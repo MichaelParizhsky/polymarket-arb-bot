@@ -34,8 +34,8 @@ class PolymarketConfig:
 class BinanceConfig:
     api_key: str = field(default_factory=lambda: os.getenv("BINANCE_API_KEY", ""))
     api_secret: str = field(default_factory=lambda: os.getenv("BINANCE_API_SECRET", ""))
-    ws_url: str = "wss://stream.binance.com:9443/ws"
-    rest_url: str = "https://api.binance.com"
+    ws_url: str = field(default_factory=lambda: os.getenv("BINANCE_WS_URL", "wss://stream.binance.us:9443/ws"))
+    rest_url: str = field(default_factory=lambda: os.getenv("BINANCE_REST_URL", "https://api.binance.us"))
     futures_enabled: bool = field(default_factory=lambda: _bool("BINANCE_FUTURES_ENABLED", False))
 
 
