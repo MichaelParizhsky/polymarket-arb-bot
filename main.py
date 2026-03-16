@@ -43,6 +43,7 @@ from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
+from src.meta_agent.analyzer import PortfolioSnapshot
 
 console = Console()
 
@@ -173,6 +174,9 @@ class ArbBot:
                     loop.add_signal_handler(sig, self._handle_shutdown)
                 except NotImplementedError:
                     pass  # Windows doesn't support add_signal_handler
+
+            # Start meta-agent background task
+            asyncio.create_task(self._meta_agent_loop())
 
             try:
                 await self._main_loop()
@@ -354,6 +358,100 @@ class ArbBot:
             if book.mid is not None:
                 price_map[tid] = book.mid
         return price_map
+
+    async def _meta_agent_loop(self) -> None:
+        """Run Claude meta-agent analysis every 30 minutes."""
+        import json
+        import re
+        import anthropic
+
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.info("Meta-agent disabled (no ANTHROPIC_API_KEY)")
+            return
+
+        interval = int(os.getenv("META_AGENT_INTERVAL_MINUTES", "30")) * 60
+        min_trades = 10
+
+        logger.info(f"Meta-agent started — analyzing every {interval//60} minutes")
+
+        while self._running:
+            await asyncio.sleep(interval)
+            if not self._running:
+                break
+
+            try:
+                state_path = "logs/portfolio_state.json"
+                if not os.path.exists(state_path):
+                    logger.debug("Meta-agent: no portfolio state yet, skipping")
+                    continue
+
+                snapshot = PortfolioSnapshot.from_json(state_path)
+                if len(snapshot.trades) < min_trades:
+                    logger.debug(f"Meta-agent: only {len(snapshot.trades)} trades, need {min_trades}")
+                    continue
+
+                analysis_data = snapshot.to_analysis_dict()
+                current_env = {k: os.getenv(k, "") for k in [
+                    "MIN_EDGE_THRESHOLD", "MAX_POSITION_SIZE", "MAX_TOTAL_EXPOSURE",
+                    "MAX_SLIPPAGE", "MM_SPREAD_BPS", "MM_ORDER_SIZE", "MM_MAX_INVENTORY",
+                    "STRATEGY_REBALANCING", "STRATEGY_COMBINATORIAL",
+                    "STRATEGY_LATENCY_ARB", "STRATEGY_MARKET_MAKING",
+                ]}
+
+                logger.info("Meta-agent: calling Claude for performance analysis...")
+                client = anthropic.AsyncAnthropic(api_key=api_key)
+
+                system = (
+                    "You are an expert quantitative analyst for prediction market arbitrage. "
+                    "Analyze trading bot performance and suggest conservative parameter improvements. "
+                    "Return a brief analysis (2-3 paragraphs) then a JSON block with ONLY keys to change, "
+                    "wrapped in ```json ... ```. Be conservative — small adjustments only."
+                )
+                user_msg = (
+                    f"Analyze this Polymarket arb bot performance:\n\n"
+                    f"Config:\n```json\n{json.dumps(current_env, indent=2)}\n```\n\n"
+                    f"Performance:\n```json\n{json.dumps(analysis_data, indent=2)}\n```\n\n"
+                    "Which strategies are profitable? Should any thresholds change? "
+                    "Suggest only small, safe adjustments."
+                )
+
+                response = await client.messages.create(
+                    model="claude-opus-4-6",
+                    max_tokens=1500,
+                    thinking={"type": "adaptive"},
+                    system=system,
+                    messages=[{"role": "user", "content": user_msg}],
+                )
+                text = next((b.text for b in response.content if hasattr(b, "text")), "")
+
+                # Extract proposed JSON changes
+                proposed = {}
+                match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+                if match:
+                    try:
+                        proposed = json.loads(match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+
+                log_entry = {
+                    "timestamp": time.time(),
+                    "analysis": text,
+                    "proposed_changes": proposed,
+                    "current_values": current_env,
+                    "portfolio_snapshot": analysis_data,
+                }
+                os.makedirs("logs", exist_ok=True)
+                log_path = f"logs/meta_agent_{int(time.time())}.json"
+                with open(log_path, "w") as f:
+                    json.dump(log_entry, f, indent=2)
+
+                logger.info(f"Meta-agent: analysis complete — {len(proposed)} suggestion(s) saved to dashboard")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"Meta-agent error: {exc}")
 
     def _handle_shutdown(self) -> None:
         logger.info("Shutdown signal received")
