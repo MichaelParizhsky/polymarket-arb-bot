@@ -187,9 +187,11 @@ class CombinatorialStrategy(BaseStrategy):
                         ))
 
         # --- Mutually exclusive events: sum > 1 means sell both ---
-        # e.g., multiple candidates for same election, only one can win
-        if "election" in topic and len(market_info) >= 2:
-            signals.extend(self._check_mutually_exclusive(topic, market_info))
+        # Only check small groups (2-4 markets) with plausible sums (1.05-1.5)
+        if "election" in topic and 2 <= len(market_info) <= 4:
+            total = sum(m["yes_mid"] for m in market_info)
+            if 1.05 <= total <= 1.5:  # sanity check: realistic mutex overpricing only
+                signals.extend(self._check_mutually_exclusive(topic, market_info))
 
         return signals
 
