@@ -333,7 +333,7 @@ class PolymarketWSFeed:
 
     async def _dispatch(self, event: dict) -> None:
         """Route a single event dict to the correct handler."""
-        msg_type = event.get("type", "")
+        msg_type = event.get("event_type") or event.get("type", "")
         if msg_type == "book":
             await self._handle_book(event)
         elif msg_type == "price_change":
