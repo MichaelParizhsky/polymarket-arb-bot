@@ -1,8 +1,5 @@
 FROM python:3.11-slim
 
-# Security: run as non-root
-RUN groupadd -r botuser && useradd -r -g botuser botuser
-
 WORKDIR /app
 
 # Install dependencies first (cache layer)
@@ -12,10 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source
 COPY . .
 
-# Create logs directory with correct permissions
-RUN mkdir -p logs && chown -R botuser:botuser /app
-
-USER botuser
+# Create logs directory
+RUN mkdir -p logs
 
 # Expose dashboard + metrics ports
 EXPOSE 5000 8000
