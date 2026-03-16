@@ -416,9 +416,14 @@ class PolymarketWSFeed:
             event.get("asset_id")
             or event.get("token_id")
             or event.get("id")
-            or event.get("outcome_id")
             or ""
         )
+
+        # New format: top-level market + price_changes list per asset
+        if not token_id and "price_changes" in event:
+            await self._handle_price_changes_batch(event)
+            return
+
         if not token_id:
             logger.debug(f"[PolymarketWS] price_change missing asset_id — keys: {list(event.keys())}")
             return
@@ -428,7 +433,6 @@ class PolymarketWSFeed:
         if "changes" in event:
             changes = event["changes"]
         elif "side" in event and "price" in event and "size" in event:
-            # Legacy flat format — normalise to the changes array format
             changes = [[event["side"], event["price"], event["size"]]]
         else:
             logger.debug(
@@ -450,3 +454,33 @@ class PolymarketWSFeed:
             f"[PolymarketWS] DELTA | token={token_id[:16]}... | "
             f"{len(changes)} change(s)"
         )
+
+    async def _handle_price_changes_batch(self, event: dict) -> None:
+        """
+        Handle the newer Polymarket WS format:
+        {
+          "event_type": "price_change",
+          "market": "<condition_id>",
+          "timestamp": "...",
+          "price_changes": [
+            {"asset_id": "<token_id>", "side": "BUY", "price": "0.45", "size": "100"},
+            ...
+          ]
+        }
+        """
+        price_changes = event.get("price_changes", [])
+        async with self._lock:
+            for change in price_changes:
+                token_id = change.get("asset_id") or change.get("token_id", "")
+                if not token_id:
+                    continue
+                side = change.get("side", "")
+                price = change.get("price", "")
+                size = change.get("size", "0")
+                if side and price:
+                    mbook = self._books.get(token_id)
+                    if mbook is None:
+                        mbook = _MutableOrderbook(token_id)
+                        self._books[token_id] = mbook
+                    mbook.apply_price_change([[side, price, size]])
+        logger.debug(f"[PolymarketWS] BATCH DELTA | {len(price_changes)} change(s)")
