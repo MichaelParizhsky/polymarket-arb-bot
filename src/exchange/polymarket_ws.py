@@ -360,9 +360,14 @@ class PolymarketWSFeed:
             "asks": [{"price": "0.55", "size": "80"}, ...]
           }
         """
-        token_id = event.get("asset_id") or event.get("token_id", "")
+        token_id = (
+            event.get("asset_id")
+            or event.get("token_id")
+            or event.get("id")
+            or ""
+        )
         if not token_id:
-            logger.debug("[PolymarketWS] book message missing asset_id")
+            logger.debug(f"[PolymarketWS] book missing asset_id — keys: {list(event.keys())}")
             return
 
         raw_bids = event.get("bids", [])
@@ -407,9 +412,15 @@ class PolymarketWSFeed:
              "market": "<condition_id>"
            }
         """
-        token_id = event.get("asset_id") or event.get("token_id", "")
+        token_id = (
+            event.get("asset_id")
+            or event.get("token_id")
+            or event.get("id")
+            or event.get("outcome_id")
+            or ""
+        )
         if not token_id:
-            logger.debug("[PolymarketWS] price_change missing asset_id")
+            logger.debug(f"[PolymarketWS] price_change missing asset_id — keys: {list(event.keys())}")
             return
 
         changes: list[list[str]] = []
