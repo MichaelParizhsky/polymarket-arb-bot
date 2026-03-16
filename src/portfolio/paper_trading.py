@@ -66,6 +66,8 @@ class PaperPortfolio:
         self._trade_counter: int = 0
         # Time-series for charting: list of {t, value, pnl}
         self.pnl_history: list[dict] = [{"t": time.time(), "value": starting_balance, "pnl": 0.0}]
+        # Closed positions history for win-rate and realized P&L tracking
+        self.closed_positions: list[dict] = []
 
     # ------------------------------------------------------------------ #
     #  Core operations                                                      #
@@ -155,6 +157,15 @@ class PaperPortfolio:
         pos.realized_pnl += realized
 
         if pos.contracts < 0.001:
+            self.closed_positions.append({
+                "token_id": token_id,
+                "market_question": pos.market_question,
+                "outcome": pos.outcome,
+                "strategy": pos.strategy,
+                "realized_pnl": round(pos.realized_pnl, 4),
+                "opened_at": pos.opened_at,
+                "closed_at": time.time(),
+            })
             del self.positions[token_id]
 
         self._trade_counter += 1
@@ -210,6 +221,21 @@ class PaperPortfolio:
     def exposure(self) -> float:
         return sum(pos.cost_basis for pos in self.positions.values())
 
+    def realized_closed_pnl(self) -> float:
+        """Sum of P&L from fully-closed positions only."""
+        return sum(p["realized_pnl"] for p in self.closed_positions)
+
+    def unrealized_pnl(self) -> float:
+        """Estimated unrealized P&L: open positions valued at cost basis minus their share of capital."""
+        return self.total_value() - self.usdc_balance - self.exposure()
+
+    def win_rate(self) -> float:
+        """% of closed positions that were profitable."""
+        if not self.closed_positions:
+            return 0.0
+        wins = sum(1 for p in self.closed_positions if p["realized_pnl"] > 0)
+        return round(wins / len(self.closed_positions) * 100, 1)
+
     def strategy_pnl(self) -> dict[str, float]:
         pnl: dict[str, float] = {}
         for t in self.trades:
@@ -253,6 +279,9 @@ class PaperPortfolio:
             "fees_paid": self.total_fees_paid(),
             "open_positions": len(self.positions),
             "strategy_pnl": self.strategy_pnl(),
+            "realized_closed_pnl": self.realized_closed_pnl(),
+            "win_rate": self.win_rate(),
+            "closed_positions": self.closed_positions,
             "trades": [
                 {
                     "trade_id": t.trade_id,
@@ -270,6 +299,65 @@ class PaperPortfolio:
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+
+    def load_from_json(self, path: str = "logs/portfolio_state.json") -> bool:
+        """Restore portfolio state from a previous run. Returns True if loaded."""
+        import json, os
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            self.usdc_balance = data["usdc_balance"]
+            self.starting_balance = data["starting_balance"]
+            self.trades = []
+            for t in data.get("trades", []):
+                trade = Trade(
+                    trade_id=t["trade_id"],
+                    strategy=t["strategy"],
+                    token_id=t.get("token_id", ""),
+                    side=t["side"],
+                    contracts=t["contracts"],
+                    price=t["price"],
+                    usdc_amount=t["usdc_amount"],
+                    timestamp=t["timestamp"],
+                    notes=t.get("notes", ""),
+                )
+                self.trades.append(trade)
+            self._trade_counter = len(self.trades)
+            self.closed_positions = data.get("closed_positions", [])
+            # Restore positions from open trades
+            self.positions = {}
+            for t in self.trades:
+                if t.side == "BUY":
+                    if t.token_id in self.positions:
+                        pos = self.positions[t.token_id]
+                        total = pos.contracts + t.contracts
+                        pos.avg_cost = (pos.cost_basis + t.usdc_amount) / total
+                        pos.contracts = total
+                    else:
+                        self.positions[t.token_id] = Position(
+                            token_id=t.token_id,
+                            market_question="",
+                            outcome="",
+                            contracts=t.contracts,
+                            avg_cost=t.price,
+                            strategy=t.strategy,
+                            opened_at=t.timestamp,
+                        )
+                elif t.side == "SELL" and t.token_id in self.positions:
+                    pos = self.positions[t.token_id]
+                    pos.contracts -= t.contracts
+                    if pos.contracts < 0.001:
+                        del self.positions[t.token_id]
+            logger.info(
+                f"[PAPER] Restored state: {len(self.trades)} trades, "
+                f"{len(self.positions)} positions, balance=${self.usdc_balance:.2f}"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"[PAPER] Could not load state: {exc}")
+            return False
 
     def _update_metrics(self) -> None:
         portfolio_balance.set(self.usdc_balance)
