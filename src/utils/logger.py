@@ -36,7 +36,7 @@ def setup_logger(level: str = "INFO") -> None:
         level="DEBUG",
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{line} - {message}",
     )
-    logger.add(_buffer_sink, level="DEBUG", format="{message}")
+    logger.add(_buffer_sink, level=level, format="{message}")
 
 
 __all__ = ["logger", "setup_logger", "get_log_buffer"]
