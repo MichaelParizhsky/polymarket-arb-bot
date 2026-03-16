@@ -371,9 +371,9 @@ class ArbBot:
             return
 
         interval = int(os.getenv("META_AGENT_INTERVAL_MINUTES", "30")) * 60
-        min_trades = 10
+        min_trades = 3
 
-        logger.info(f"Meta-agent started — analyzing every {interval//60} minutes")
+        logger.info(f"Meta-agent started — first analysis in {interval//60} minutes")
 
         while self._running:
             await asyncio.sleep(interval)
@@ -381,14 +381,16 @@ class ArbBot:
                 break
 
             try:
+                # Use live portfolio data directly (no file dependency)
+                self.portfolio.save_to_json()
                 state_path = "logs/portfolio_state.json"
                 if not os.path.exists(state_path):
-                    logger.debug("Meta-agent: no portfolio state yet, skipping")
+                    logger.info("Meta-agent: no portfolio state yet, skipping this cycle")
                     continue
 
                 snapshot = PortfolioSnapshot.from_json(state_path)
                 if len(snapshot.trades) < min_trades:
-                    logger.debug(f"Meta-agent: only {len(snapshot.trades)} trades, need {min_trades}")
+                    logger.info(f"Meta-agent: only {len(snapshot.trades)} trades so far (need {min_trades}), skipping")
                     continue
 
                 analysis_data = snapshot.to_analysis_dict()
