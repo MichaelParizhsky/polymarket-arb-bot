@@ -21,12 +21,20 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 _portfolio = None
 _bot_start_time = time.time()
 _cycle_count = 0
+_config = None
+_risk = None
+_binance_ref = None
+_kalshi_ref = None
 
 
-def register(portfolio, start_time: float) -> None:
-    global _portfolio, _bot_start_time
+def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None) -> None:
+    global _portfolio, _bot_start_time, _config, _risk, _binance_ref, _kalshi_ref
     _portfolio = portfolio
     _bot_start_time = start_time
+    _config = config
+    _risk = risk
+    _binance_ref = binance
+    _kalshi_ref = kalshi
 
 
 @app.post("/api/reset")
@@ -181,6 +189,304 @@ async def logs_stream():
 
 
 # ------------------------------------------------------------------ #
+#  System & Analytics endpoints                                        #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/system")
+def system_status():
+    """Return system connection status, strategy states, risk health, API keys, disk usage."""
+    # --- Mode ---
+    mode = "PAPER"
+    if _config is not None:
+        try:
+            mode = "LIVE" if not _config.paper_trading else "PAPER"
+        except Exception:
+            pass
+
+    # --- Strategies ---
+    strategy_notes = {
+        "rebalancing":    "Trades YES+NO deviation from $1",
+        "combinatorial":  "Multi-outcome portfolio imbalance",
+        "latency_arb":    "Polymarket lagging Binance prices",
+        "market_making":  "Passive liquidity / earn spread",
+        "resolution":     "Mispriced near-expiry markets",
+        "event_driven":   "News/event catalyst markets",
+        "cross_exchange": "Polymarket vs Kalshi divergence",
+        "futures_hedge":  "Binance futures hedge on crypto",
+    }
+    strategies = {}
+    if _config is not None:
+        try:
+            cfg_s = _config.strategies
+            for name, note in strategy_notes.items():
+                attr = f"{name}_enabled"
+                enabled = bool(getattr(cfg_s, attr, False))
+                if not enabled and name == "latency_arb":
+                    note = "Disabled — dynamic fees killed edge"
+                strategies[name] = {"enabled": enabled, "note": note}
+        except Exception:
+            pass
+    if not strategies:
+        for name, note in strategy_notes.items():
+            strategies[name] = {"enabled": False, "note": note}
+
+    # --- Connections ---
+    # Polymarket: just check if _portfolio is registered (proxy for connectivity)
+    poly_ok = _portfolio is not None
+    connections = {
+        "polymarket": {
+            "status": "ok" if poly_ok else "warn",
+            "detail": "REST + WS active" if poly_ok else "Not yet connected",
+        },
+        "binance": {"status": "error", "detail": "Not configured"},
+        "kalshi": {"status": "error", "detail": "Not configured"},
+    }
+    if _binance_ref is not None:
+        try:
+            if callable(getattr(_binance_ref, "is_connected", None)):
+                connected = _binance_ref.is_connected()
+            else:
+                connected = True
+            connections["binance"] = {
+                "status": "ok" if connected else "warn",
+                "detail": "WebSocket connected" if connected else "Reconnecting...",
+            }
+        except Exception:
+            connections["binance"] = {"status": "warn", "detail": "Status unknown"}
+    if _kalshi_ref is not None:
+        try:
+            if callable(getattr(_kalshi_ref, "_has_credentials", None)):
+                creds = _kalshi_ref._has_credentials()
+            else:
+                creds = True
+            connections["kalshi"] = {
+                "status": "ok" if creds else "warn",
+                "detail": "Credentials loaded" if creds else "No credentials",
+            }
+        except Exception:
+            connections["kalshi"] = {"status": "warn", "detail": "Status unknown"}
+
+    # --- API keys (True/False only, never expose values) ---
+    api_keys = {
+        "anthropic":    bool(os.getenv("ANTHROPIC_API_KEY")),
+        "polymarket":   bool(os.getenv("POLYMARKET_API_KEY") or os.getenv("POLY_API_KEY")),
+        "kalshi_rsa":   bool(os.getenv("KALSHI_RSA_KEY") or os.getenv("KALSHI_PRIVATE_KEY")),
+        "kalshi_token": bool(os.getenv("KALSHI_API_TOKEN") or os.getenv("KALSHI_TOKEN")),
+    }
+
+    # --- Risk health ---
+    risk_data = {
+        "health_score": None,
+        "health_grade": "N/A",
+        "hard_stop": False,
+        "drawdown_pct": 0.0,
+        "exposure_pct": 0.0,
+        "flags": [],
+    }
+    if _risk is not None:
+        try:
+            h = _risk.portfolio_health_score()
+            risk_data["health_score"] = h.get("score")
+            risk_data["health_grade"] = h.get("grade", "N/A")
+            risk_data["hard_stop"] = h.get("hard_stop", False)
+            risk_data["drawdown_pct"] = h.get("drawdown_pct", 0.0)
+            risk_data["exposure_pct"] = h.get("exposure_pct", 0.0)
+            risk_data["flags"] = h.get("flags", [])
+        except Exception:
+            pass
+
+    # --- Meta-agent info ---
+    meta_agent = {"enabled": False, "interval_minutes": 30, "last_run_ago_minutes": None}
+    meta_agent["enabled"] = bool(os.getenv("ANTHROPIC_API_KEY"))
+    try:
+        meta_agent["interval_minutes"] = int(os.getenv("META_AGENT_INTERVAL_MINUTES", "30"))
+    except Exception:
+        pass
+    meta_files = sorted(glob.glob("logs/meta_agent_*.json"), reverse=True)
+    if meta_files:
+        try:
+            mtime = os.path.getmtime(meta_files[0])
+            meta_agent["last_run_ago_minutes"] = round((time.time() - mtime) / 60, 1)
+        except Exception:
+            pass
+
+    # --- Disk usage ---
+    log_files = glob.glob("logs/*.log") + glob.glob("logs/meta_agent_*.json")
+    total_bytes = 0
+    for lf in log_files:
+        try:
+            total_bytes += os.path.getsize(lf)
+        except OSError:
+            pass
+    disk = {
+        "log_files_count": len(log_files),
+        "log_files_mb": round(total_bytes / (1024 * 1024), 2),
+    }
+
+    return {
+        "mode": mode,
+        "strategies": strategies,
+        "connections": connections,
+        "api_keys": api_keys,
+        "risk": risk_data,
+        "meta_agent": meta_agent,
+        "disk": disk,
+    }
+
+
+@app.get("/api/analytics")
+def analytics():
+    """Return strategy analytics, hourly PnL, health history, LLM decisions, edge distribution."""
+    p = _portfolio
+
+    # --- Strategy ROI, win rates, trade counts, volumes, fees ---
+    strategy_roi: dict[str, float] = {}
+    strategy_win_rates: dict[str, float] = {}
+    strategy_trade_counts: dict[str, int] = {}
+    strategy_volumes: dict[str, float] = {}
+    strategy_fees: dict[str, float] = {}
+
+    if p is not None:
+        # Trade counts, volumes, fees from trades list
+        vol_map: dict[str, float] = {}
+        fee_map: dict[str, float] = {}
+        count_map: dict[str, int] = {}
+        for t in p.trades:
+            s = t.strategy
+            count_map[s] = count_map.get(s, 0) + 1
+            vol_map[s] = vol_map.get(s, 0.0) + t.usdc_amount
+            fee_map[s] = fee_map.get(s, 0.0) + t.fee
+        strategy_trade_counts = count_map
+        strategy_volumes = {k: round(v, 2) for k, v in vol_map.items()}
+        strategy_fees = {k: round(v, 4) for k, v in fee_map.items()}
+
+        # PnL per strategy
+        strat_pnl = {}
+        try:
+            strat_pnl = p.strategy_pnl()
+        except Exception:
+            pass
+
+        # ROI = pnl / volume
+        for s, vol in vol_map.items():
+            pnl_val = strat_pnl.get(s, 0.0)
+            if vol > 0:
+                strategy_roi[s] = round((pnl_val / vol) * 100, 3)
+            else:
+                strategy_roi[s] = 0.0
+
+        # Win rates from closed_positions
+        wins_map: dict[str, int] = {}
+        total_map: dict[str, int] = {}
+        for cp in p.closed_positions:
+            s = getattr(cp, "strategy", None) or cp.get("strategy", "") if isinstance(cp, dict) else getattr(cp, "strategy", "")
+            rp = cp.get("realized_pnl", 0) if isinstance(cp, dict) else getattr(cp, "realized_pnl", 0)
+            total_map[s] = total_map.get(s, 0) + 1
+            if rp > 0:
+                wins_map[s] = wins_map.get(s, 0) + 1
+        for s, total in total_map.items():
+            strategy_win_rates[s] = round(wins_map.get(s, 0) / total * 100, 1) if total > 0 else 0.0
+
+    # --- Hourly PnL (last 24h) ---
+    hourly_pnl: list[dict] = []
+    if p is not None and p.pnl_history:
+        now = time.time()
+        cutoff = now - 86400
+        # bucket by hour
+        buckets: dict[int, list[float]] = {}
+        for point in p.pnl_history:
+            t_val = point.get("t", 0)
+            if t_val < cutoff:
+                continue
+            hour_bucket = int(t_val // 3600)
+            buckets.setdefault(hour_bucket, []).append(point.get("pnl", 0.0))
+
+        if buckets:
+            sorted_hours = sorted(buckets.keys())
+            prev_pnl = 0.0
+            for hb in sorted_hours:
+                last_pnl = buckets[hb][-1]
+                delta = last_pnl - prev_pnl
+                import datetime
+                label = datetime.datetime.fromtimestamp(hb * 3600).strftime("%H:00")
+                hourly_pnl.append({"hour_label": label, "pnl": round(delta, 4)})
+                prev_pnl = last_pnl
+
+    # --- Health history from meta_agent_*.json ---
+    health_history: list[dict] = []
+    meta_files = sorted(glob.glob("logs/meta_agent_*.json"), reverse=True)[:20]
+    for mf in reversed(meta_files):
+        try:
+            with open(mf) as fp:
+                data = json.load(fp)
+            h = data.get("health", {})
+            score = h.get("score") or h.get("health_score")
+            grade = h.get("grade") or h.get("health_grade", "?")
+            ts_val = data.get("timestamp", 0)
+            if score is not None:
+                health_history.append({"t": ts_val, "score": score, "grade": grade})
+        except Exception:
+            pass
+
+    # --- LLM decisions (trades with [LLM] in notes) ---
+    llm_decisions: list[dict] = []
+    if p is not None:
+        for t in reversed(p.trades):
+            notes = t.notes if isinstance(t.notes, str) else ""
+            if "[LLM]" in notes:
+                llm_decisions.append({
+                    "trade_id": t.trade_id,
+                    "strategy": t.strategy,
+                    "side": t.side,
+                    "price": round(t.price, 4),
+                    "usdc_amount": round(t.usdc_amount, 2),
+                    "timestamp": int(t.timestamp),
+                    "notes": notes[:120],
+                })
+                if len(llm_decisions) >= 20:
+                    break
+
+    # --- Edge distribution (bucket edges seen in trade notes) ---
+    edge_distribution: dict[str, int] = {
+        "0-1%": 0, "1-2%": 0, "2-3%": 0, "3-5%": 0, "5-10%": 0, "10%+": 0
+    }
+    if p is not None:
+        import re as _re
+        for t in p.trades:
+            notes = t.notes if isinstance(t.notes, str) else ""
+            m = _re.search(r"edge[=:]\s*([\d.]+)", notes, _re.IGNORECASE)
+            if m:
+                try:
+                    edge_pct = float(m.group(1)) * 100
+                    if edge_pct < 1:
+                        edge_distribution["0-1%"] += 1
+                    elif edge_pct < 2:
+                        edge_distribution["1-2%"] += 1
+                    elif edge_pct < 3:
+                        edge_distribution["2-3%"] += 1
+                    elif edge_pct < 5:
+                        edge_distribution["3-5%"] += 1
+                    elif edge_pct < 10:
+                        edge_distribution["5-10%"] += 1
+                    else:
+                        edge_distribution["10%+"] += 1
+                except ValueError:
+                    pass
+
+    return {
+        "strategy_roi": strategy_roi,
+        "strategy_win_rates": strategy_win_rates,
+        "strategy_trade_counts": strategy_trade_counts,
+        "strategy_volumes": strategy_volumes,
+        "strategy_fees": strategy_fees,
+        "hourly_pnl": hourly_pnl,
+        "health_history": health_history,
+        "llm_decisions": llm_decisions,
+        "edge_distribution": edge_distribution,
+    }
+
+
+# ------------------------------------------------------------------ #
 #  Meta-agent API endpoints                                            #
 # ------------------------------------------------------------------ #
 
@@ -192,13 +498,20 @@ def meta_history():
         try:
             with open(f) as fp:
                 data = json.load(fp)
+            # Support both old format (portfolio_snapshot) and new format (portfolio_summary)
+            old_snapshot = data.get("portfolio_snapshot", {})
+            new_summary = data.get("portfolio_summary", {})
+            portfolio_block = new_summary or old_snapshot.get("portfolio", {})
+            portfolio_pnl = portfolio_block.get("total_pnl_usdc", 0)
             results.append({
                 "file": os.path.basename(f),
                 "timestamp": data.get("timestamp", 0),
                 "proposed_changes": data.get("proposed_changes", {}),
                 "applied_changes": data.get("applied_changes", []),
                 "analysis_preview": data.get("analysis", "")[:300],
-                "portfolio_pnl": data.get("portfolio_snapshot", {}).get("portfolio", {}).get("total_pnl_usdc", 0),
+                "portfolio_pnl": portfolio_pnl,
+                "health": data.get("health", {}),
+                "strategy_roi_pct": data.get("strategy_roi_pct", {}),
             })
         except Exception:
             pass
@@ -254,7 +567,7 @@ header h1{color:#00e5ff;font-size:1.1rem;letter-spacing:.05em}
 #reset-btn{font-size:.7rem;padding:4px 12px;border-radius:4px;background:#1a0000;color:#ff5252;border:1px solid #3d0000;cursor:pointer;transition:all .2s}
 #reset-btn:hover{background:#3d0000}
 
-.tabs{display:flex;background:#111;border-bottom:1px solid #1e1e1e;padding:0 20px}
+.tabs{display:flex;background:#111;border-bottom:1px solid #1e1e1e;padding:0 20px;flex-wrap:wrap}
 .tab{padding:10px 18px;cursor:pointer;color:#666;font-size:.8rem;border-bottom:2px solid transparent;transition:all .2s}
 .tab:hover{color:#aaa}
 .tab.active{color:#00e5ff;border-bottom-color:#00e5ff}
@@ -319,6 +632,31 @@ tr:hover td{background:#181818}
 .ts-small{color:#555;font-size:.65rem}
 .no-data{color:#333;text-align:center;padding:30px;font-size:.8rem}
 #last-update{color:#333;font-size:.65rem;text-align:right;padding:6px 20px}
+
+/* Status tab */
+.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:18px}
+.status-item{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:12px;display:flex;align-items:center;gap:10px}
+.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.dot.ok{background:#00e676;box-shadow:0 0 6px #00e676}
+.dot.warn{background:#ffd740;box-shadow:0 0 6px #ffd740}
+.dot.err{background:#ff5252;box-shadow:0 0 6px #ff5252}
+.status-label{font-size:.78rem;color:#ccc}
+.status-detail{font-size:.65rem;color:#555;margin-top:2px}
+
+.strat-card{background:#141414;border:2px solid #1e1e1e;border-radius:8px;padding:12px}
+.strat-card.enabled{border-color:#1a3a1a}
+.strat-card.disabled{border-color:#2a1a1a;opacity:.6}
+.strat-card h4{font-size:.8rem;margin-bottom:4px}
+.strat-card .strat-status{font-size:.65rem;font-weight:700}
+.strat-card .strat-note{font-size:.65rem;color:#555;margin-top:4px}
+
+.health-bar{height:8px;border-radius:4px;background:#1a1a1a;overflow:hidden;margin-top:6px}
+.health-fill{height:100%;border-radius:4px;transition:width .5s}
+
+/* Analytics tab */
+.analytics-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.thinking-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:14px}
+.thinking-card h3{font-size:.72rem;color:#7986cb;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
 </style>
 </head>
 <body>
@@ -335,13 +673,13 @@ tr:hover td{background:#181818}
   <div class="tab" onclick="showTab('live')">Live Feed</div>
   <div class="tab" onclick="showTab('positions')">Positions</div>
   <div class="tab" onclick="showTab('trades')">Trades</div>
+  <div class="tab" onclick="showTab('status')">Status</div>
+  <div class="tab" onclick="showTab('analytics')">Analytics</div>
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
 </div>
 
 <!-- OVERVIEW TAB -->
 <div class="page active" id="tab-overview">
-
-  <!-- Top stats row -->
   <div class="cards">
     <div class="card"><div class="lbl">Cash Balance</div><div class="val blue" id="balance">--</div></div>
     <div class="card"><div class="lbl">Total Value</div><div class="val" id="total-value">--</div><div class="sub" id="total-pnl-sub">--</div></div>
@@ -416,6 +754,83 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
+<!-- STATUS TAB -->
+<div class="page" id="tab-status">
+  <div class="section">
+    <h3>System Connections</h3>
+    <div class="status-grid" id="status-connections">
+      <div class="no-data">Loading...</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Strategies</h3>
+    <div class="status-grid" id="status-strategies">
+      <div class="no-data">Loading...</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Risk Health</h3>
+    <div id="status-risk"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <div class="section">
+    <h3>Disk Usage</h3>
+    <div id="status-disk"><div class="no-data">Loading...</div></div>
+  </div>
+</div>
+
+<!-- ANALYTICS TAB -->
+<div class="page" id="tab-analytics">
+  <!-- Row 1: ROI + Win Rate -->
+  <div class="analytics-row">
+    <div class="chart-box">
+      <h3>Strategy ROI %</h3>
+      <canvas id="roiChart" style="max-height:220px"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>Strategy Win Rate %</h3>
+      <canvas id="winRateChart" style="max-height:220px"></canvas>
+    </div>
+  </div>
+
+  <!-- Row 2: Hourly PnL + Fee Drag -->
+  <div class="analytics-row">
+    <div class="chart-box">
+      <h3>Hourly PnL — Last 24h</h3>
+      <canvas id="hourlyPnlChart" style="max-height:220px"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>Fee Drag Per Strategy</h3>
+      <canvas id="feeDragChart" style="max-height:220px"></canvas>
+    </div>
+  </div>
+
+  <!-- Row 3: Health score trend -->
+  <div class="section">
+    <h3>Health Score Trend (Meta-Agent History)</h3>
+    <canvas id="healthTrendChart" style="max-height:160px"></canvas>
+  </div>
+
+  <!-- Row 4: Bot Thinking -->
+  <div class="thinking-card">
+    <h3>Bot Thinking — Recent LLM Decisions</h3>
+    <div id="llm-decisions-table"><div class="no-data">No LLM-tagged trades yet</div></div>
+  </div>
+
+  <div class="thinking-card">
+    <h3>Active LLM Signals (Last Hour)</h3>
+    <div id="llm-active-signals"><div class="no-data">None in last hour</div></div>
+  </div>
+
+  <!-- Row 5: Parameter change timeline -->
+  <div class="thinking-card">
+    <h3>Meta-Agent Parameter Change Timeline</h3>
+    <div id="param-timeline"><div class="no-data">No parameter changes yet</div></div>
+  </div>
+</div>
+
 <!-- META-AGENT TAB -->
 <div class="page" id="tab-meta">
   <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
@@ -445,12 +860,27 @@ const badge=s=>`<span class="badge ${s}">${s}</span>`;
 const pnlClass=n=>n>=0?'green':'red';
 
 let currentTab='overview';
+let _statusInterval=null;
+
+const allTabs=['overview','live','positions','trades','status','analytics','meta'];
+
 function showTab(name){
-  const tabs=['overview','live','positions','trades','meta'];
-  document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',tabs[i]===name)});
+  document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   $('tab-'+name).classList.add('active');
   currentTab=name;
+
+  if(name==='status'){
+    fetchSystemStatus();
+    if(_statusInterval) clearInterval(_statusInterval);
+    _statusInterval=setInterval(fetchSystemStatus,10000);
+  } else {
+    if(_statusInterval){clearInterval(_statusInterval);_statusInterval=null;}
+  }
+
+  if(name==='analytics'){
+    fetchAnalytics();
+  }
 }
 
 const chartDefaults={responsive:true,maintainAspectRatio:true,plugins:{legend:{display:false}},scales:{x:{display:false,grid:{color:'#1a1a1a'}},y:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}}}};
@@ -460,6 +890,14 @@ const pnlChart=new Chart(pnlCtx,{type:'line',data:{labels:[],datasets:[{label:'P
 
 const stratCtx=$('stratChart').getContext('2d');
 const stratChart=new Chart(stratCtx,{type:'doughnut',data:{labels:[],datasets:[{data:[],backgroundColor:['#00e676','#7986cb','#ff7043','#ffd740','#4dd0e1','#ce93d8'],borderColor:'#0a0a0a',borderWidth:2}]},options:{responsive:true,maintainAspectRatio:true,plugins:{legend:{position:'right',labels:{color:'#666',font:{size:10},boxWidth:10}}}}});
+
+// Analytics charts (lazy-init)
+let roiChart=null,winRateChart=null,hourlyPnlChart=null,feeDragChart=null,healthTrendChart=null;
+
+function getOrCreateChart(id,config){
+  const ctx=$(id).getContext('2d');
+  return new Chart(ctx,config);
+}
 
 function updatePnlChart(history){
   if(!history.length)return;
@@ -621,6 +1059,291 @@ function updateTrades(data,status){
       <td style="color:#555">${t.notes}</td>
     </tr>`).join('')}
   </table>`;
+}
+
+// ------------------------------------------------------------------ //
+//  Status tab                                                          //
+// ------------------------------------------------------------------ //
+async function fetchSystemStatus(){
+  try{
+    const d=await fetch('/api/system').then(r=>r.json());
+    renderSystemStatus(d);
+  }catch(e){
+    $('status-connections').innerHTML='<div class="no-data">Failed to load system status</div>';
+  }
+}
+
+function renderSystemStatus(d){
+  // Mode badge in header
+  const modeBadge=$('mode-badge');
+  modeBadge.textContent=d.mode||'PAPER';
+  modeBadge.style.background=d.mode==='LIVE'?'#3a1a1a':'#1a3a4a';
+  modeBadge.style.color=d.mode==='LIVE'?'#ff5252':'#00e5ff';
+
+  // Connections section
+  const connItems=[
+    {key:'polymarket',label:'Polymarket API'},
+    {key:'binance',label:'Binance WebSocket'},
+    {key:'kalshi',label:'Kalshi'},
+  ];
+  const apiItems=[
+    {key:'anthropic',label:'Anthropic API'},
+    {key:'polymarket',label:'Polymarket Key'},
+    {key:'kalshi_rsa',label:'Kalshi RSA Key'},
+    {key:'kalshi_token',label:'Kalshi Token'},
+  ];
+
+  let connHtml=connItems.map(({key,label})=>{
+    const c=d.connections&&d.connections[key]||{status:'error',detail:''};
+    return`<div class="status-item">
+      <div class="dot ${c.status==='ok'?'ok':c.status==='warn'?'warn':'err'}"></div>
+      <div><div class="status-label">${label}</div><div class="status-detail">${c.detail||''}</div></div>
+    </div>`;
+  }).join('');
+
+  connHtml+=apiItems.map(({key,label})=>{
+    const has=d.api_keys&&d.api_keys[key];
+    return`<div class="status-item">
+      <div class="dot ${has?'ok':'err'}"></div>
+      <div><div class="status-label">${label}</div><div class="status-detail">${has?'Configured':'Not set'}</div></div>
+    </div>`;
+  }).join('');
+
+  // Meta-agent connection item
+  const ma=d.meta_agent||{};
+  const maStatus=ma.enabled?'ok':'err';
+  const maDetail=ma.enabled?(ma.last_run_ago_minutes!=null?'Last run '+ma.last_run_ago_minutes+'m ago':'Not run yet'):'No API key';
+  connHtml+=`<div class="status-item">
+    <div class="dot ${maStatus}"></div>
+    <div><div class="status-label">Meta-Agent</div><div class="status-detail">${maDetail} · every ${ma.interval_minutes||30}m</div></div>
+  </div>`;
+
+  $('status-connections').innerHTML=connHtml;
+
+  // Strategies section
+  const strats=d.strategies||{};
+  const stratHtml=Object.entries(strats).map(([name,info])=>{
+    const cls=info.enabled?'enabled':'disabled';
+    const statusTxt=info.enabled?'<span class="strat-status" style="color:#00e676">ENABLED</span>':'<span class="strat-status" style="color:#ff5252">DISABLED</span>';
+    return`<div class="strat-card ${cls}">
+      <h4>${name}</h4>
+      ${statusTxt}
+      <div class="strat-note">${info.note||''}</div>
+    </div>`;
+  }).join('');
+  $('status-strategies').innerHTML=stratHtml||'<div class="no-data">No strategy info</div>';
+
+  // Risk health section
+  const risk=d.risk||{};
+  const score=risk.health_score;
+  const grade=risk.health_grade||'N/A';
+  const gradeColor=grade==='HEALTHY'?'#00e676':grade==='WEAK'?'#ffd740':grade==='CRITICAL'?'#ff5252':'#888';
+  const drawdown=risk.drawdown_pct||0;
+  const exposure=risk.exposure_pct||0;
+  const flags=risk.flags||[];
+  const scoreDisplay=score!=null?score.toFixed(1):'--';
+  const hardStopBadge=risk.hard_stop?'<span style="background:#3d0000;color:#ff5252;padding:2px 8px;border-radius:4px;font-size:.7rem;font-weight:700;margin-left:10px">HARD STOP</span>':'';
+
+  $('status-risk').innerHTML=`
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+      <div style="font-size:2.5rem;font-weight:700;color:${gradeColor}">${scoreDisplay}</div>
+      <div>
+        <div style="font-size:1rem;font-weight:700;color:${gradeColor}">${grade}${hardStopBadge}</div>
+        <div style="font-size:.7rem;color:#555;margin-top:4px">${flags.length?flags.join(' · '):'No active risk flags'}</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div>
+        <div style="font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:.06em">Drawdown</div>
+        <div style="font-size:.9rem;font-weight:700;color:${drawdown>10?'#ff5252':drawdown>5?'#ffd740':'#00e676'}">${drawdown.toFixed(2)}%</div>
+        <div class="health-bar"><div class="health-fill" style="width:${Math.min(drawdown/15*100,100)}%;background:${drawdown>10?'#ff5252':drawdown>5?'#ffd740':'#00e676'}"></div></div>
+      </div>
+      <div>
+        <div style="font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:.06em">Exposure</div>
+        <div style="font-size:.9rem;font-weight:700;color:${exposure>80?'#ff5252':exposure>60?'#ffd740':'#00e676'}">${exposure.toFixed(1)}%</div>
+        <div class="health-bar"><div class="health-fill" style="width:${Math.min(exposure,100)}%;background:${exposure>80?'#ff5252':exposure>60?'#ffd740':'#00e676'}"></div></div>
+      </div>
+    </div>`;
+
+  // Disk section
+  const disk=d.disk||{};
+  $('status-disk').innerHTML=`
+    <div style="display:flex;gap:30px;font-size:.85rem">
+      <div><span style="color:#555;font-size:.65rem;text-transform:uppercase">Log Files</span><div style="font-weight:700;color:#00e5ff;margin-top:4px">${disk.log_files_count||0}</div></div>
+      <div><span style="color:#555;font-size:.65rem;text-transform:uppercase">Total Size</span><div style="font-weight:700;color:#00e5ff;margin-top:4px">${(disk.log_files_mb||0).toFixed(2)} MB</div></div>
+    </div>`;
+}
+
+// ------------------------------------------------------------------ //
+//  Analytics tab                                                       //
+// ------------------------------------------------------------------ //
+async function fetchAnalytics(){
+  try{
+    const d=await fetch('/api/analytics').then(r=>r.json());
+    renderAnalytics(d);
+  }catch(e){
+    console.error('Analytics fetch failed',e);
+  }
+}
+
+function hbar(labels,values,colors){
+  return{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[{data:values,backgroundColor:colors,borderColor:'transparent',borderWidth:0}]
+    },
+    options:{
+      indexAxis:'y',
+      responsive:true,
+      maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}},
+        y:{grid:{color:'#1a1a1a'},ticks:{color:'#aaa',font:{size:10}}}
+      }
+    }
+  };
+}
+
+function renderAnalytics(d){
+  // Strategy ROI chart
+  const roiEntries=Object.entries(d.strategy_roi||{});
+  if(roiEntries.length){
+    const labels=roiEntries.map(([k])=>k);
+    const values=roiEntries.map(([,v])=>v);
+    const colors=values.map(v=>v>=0?'rgba(0,230,118,.6)':'rgba(255,82,82,.6)');
+    if(roiChart){roiChart.destroy();}
+    roiChart=new Chart($('roiChart').getContext('2d'),hbar(labels,values,colors));
+  }
+
+  // Win rate chart
+  const wrEntries=Object.entries(d.strategy_win_rates||{});
+  if(wrEntries.length){
+    const labels=wrEntries.map(([k])=>k);
+    const values=wrEntries.map(([,v])=>v);
+    const colors=values.map(v=>v>=50?'rgba(0,229,255,.6)':'rgba(255,215,64,.6)');
+    if(winRateChart){winRateChart.destroy();}
+    winRateChart=new Chart($('winRateChart').getContext('2d'),hbar(labels,values,colors));
+  }
+
+  // Hourly PnL chart
+  const hourly=d.hourly_pnl||[];
+  if(hourly.length){
+    if(hourlyPnlChart){hourlyPnlChart.destroy();}
+    hourlyPnlChart=new Chart($('hourlyPnlChart').getContext('2d'),{
+      type:'bar',
+      data:{
+        labels:hourly.map(h=>h.hour_label),
+        datasets:[{
+          data:hourly.map(h=>h.pnl),
+          backgroundColor:hourly.map(h=>h.pnl>=0?'rgba(0,230,118,.6)':'rgba(255,82,82,.6)'),
+          borderWidth:0
+        }]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{x:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}},y:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}}}
+      }
+    });
+  }
+
+  // Fee drag chart
+  const feeEntries=Object.entries(d.strategy_fees||{});
+  if(feeEntries.length){
+    const labels=feeEntries.map(([k])=>k);
+    const values=feeEntries.map(([,v])=>v);
+    if(feeDragChart){feeDragChart.destroy();}
+    feeDragChart=new Chart($('feeDragChart').getContext('2d'),hbar(labels,values,values.map(()=>'rgba(255,112,67,.6)')));
+  }
+
+  // Health trend chart
+  const hh=d.health_history||[];
+  if(hh.length){
+    if(healthTrendChart){healthTrendChart.destroy();}
+    healthTrendChart=new Chart($('healthTrendChart').getContext('2d'),{
+      type:'line',
+      data:{
+        labels:hh.map(h=>new Date(h.t*1000).toLocaleString()),
+        datasets:[{
+          label:'Health Score',
+          data:hh.map(h=>h.score),
+          borderColor:'#7986cb',
+          backgroundColor:'rgba(121,134,203,.1)',
+          borderWidth:1.5,
+          pointRadius:3,
+          fill:true,
+          tension:.3
+        }]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{display:false,grid:{color:'#1a1a1a'}},
+          y:{min:0,max:100,grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}}
+        }
+      }
+    });
+  }else{
+    $('healthTrendChart').closest('.section').querySelector('h3').insertAdjacentHTML('afterend','<div class="no-data" style="padding:20px">No health history yet — run meta-agent first</div>');
+  }
+
+  // LLM decisions table
+  const llm=d.llm_decisions||[];
+  const now=Date.now()/1000;
+  if(llm.length){
+    $('llm-decisions-table').innerHTML=`<table>
+      <tr><th>Time</th><th>Strategy</th><th>Side</th><th>Price</th><th>Amount</th><th>Notes</th></tr>
+      ${llm.map(t=>`<tr>
+        <td class="ts-small">${ts(t.timestamp)}</td>
+        <td>${badge(t.strategy)}</td>
+        <td class="${t.side.toLowerCase()}">${t.side}</td>
+        <td>${fmtN(t.price)}</td>
+        <td>${fmt(t.usdc_amount)}</td>
+        <td style="color:#7986cb;font-size:.68rem">${t.notes}</td>
+      </tr>`).join('')}
+    </table>`;
+  }
+
+  // Active signals: LLM trades in last hour
+  const active=llm.filter(t=>now-t.timestamp<3600);
+  if(active.length){
+    $('llm-active-signals').innerHTML=`<div style="display:flex;flex-wrap:wrap;gap:8px">${active.map(t=>`
+      <div style="background:#1a1a2a;border:1px solid #7986cb;border-radius:6px;padding:8px 12px;font-size:.72rem">
+        <span class="${t.side.toLowerCase()}">${t.side}</span> via ${badge(t.strategy)} · ${fmtN(t.price)} · ${fmt(t.usdc_amount)}
+        <div style="color:#555;margin-top:3px">${t.notes.substring(0,80)}</div>
+      </div>`).join('')}</div>`;
+  }else{
+    $('llm-active-signals').innerHTML='<div class="no-data">None in last hour</div>';
+  }
+
+  // Parameter change timeline from meta history
+  fetch('/api/meta/history').then(r=>r.json()).then(hist=>{
+    const changes=[];
+    hist.forEach(h=>{
+      const applied=h.applied_changes||[];
+      const proposed=h.proposed_changes||{};
+      if(applied.length){
+        changes.push({
+          t:h.timestamp,
+          keys:applied,
+          proposed
+        });
+      }
+    });
+    if(changes.length){
+      $('param-timeline').innerHTML=`<div style="display:flex;flex-direction:column;gap:8px">${changes.map(c=>`
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div class="ts-small" style="white-space:nowrap;min-width:120px;margin-top:2px">${tsDate(c.t)}</div>
+          <div>${c.keys.map(k=>`<span style="background:#1a2a1a;color:#00e676;padding:1px 7px;border-radius:3px;font-size:.65rem;margin-right:4px">${k} → ${c.proposed[k]||'?'}</span>`).join('')}</div>
+        </div>`).join('')}
+      </div>`;
+    }else{
+      $('param-timeline').innerHTML='<div class="no-data">No parameter changes applied yet</div>';
+    }
+  }).catch(()=>{});
 }
 
 async function fetchMeta(){

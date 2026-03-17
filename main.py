@@ -143,7 +143,9 @@ class ArbBot:
         self._running = True
 
         # Register portfolio with dashboard
-        dashboard_register(self.portfolio, self._start_time)
+        dashboard_register(self.portfolio, self._start_time,
+                           config=self.config, risk=self.risk,
+                           binance=self.binance, kalshi=self._kalshi)
 
         # Start dashboard server
         dashboard_port = 5000
