@@ -542,28 +542,64 @@ async def balances():
     disk_pct = round(disk_used_mb / vol_limit_mb * 100, 1) if vol_limit_mb else 0
 
     # --- Railway billing (optional — requires RAILWAY_TOKEN env var) ---
-    railway_monthly_cost: float | None = None
     railway_token = os.getenv("RAILWAY_TOKEN")
+    railway_monthly_cost: float | None = None
+    railway_credit_remaining: float | None = None
+    railway_period_end: str | None = None
+    railway_api_error: str | None = None
+
     if railway_token:
         try:
             import httpx as _httpx
-            async with _httpx.AsyncClient(timeout=5.0) as _rc:
+            # Fetch estimated cost + subscription period end + credit balance
+            gql_query = """
+            {
+              me {
+                usage { estimatedMonthlyCost }
+                creditBalance
+                subscriptions {
+                  edges {
+                    node {
+                      status
+                      currentPeriodEnd
+                      plan { name }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            async with _httpx.AsyncClient(timeout=8.0) as _rc:
                 resp = await _rc.post(
                     "https://backboard.railway.app/graphql/v2",
                     headers={
                         "Authorization": f"Bearer {railway_token}",
                         "Content-Type": "application/json",
                     },
-                    json={"query": "{ me { usage { estimatedMonthlyCost } } }"},
+                    json={"query": gql_query},
                 )
                 if resp.status_code == 200:
                     gql = resp.json()
-                    railway_monthly_cost = (
-                        gql.get("data", {})
-                        .get("me", {})
-                        .get("usage", {})
-                        .get("estimatedMonthlyCost")
-                    )
+                    me = gql.get("data", {}).get("me", {}) or {}
+                    railway_monthly_cost = me.get("usage", {}).get("estimatedMonthlyCost")
+                    railway_credit_remaining = me.get("creditBalance")
+                    subs = me.get("subscriptions", {}).get("edges", [])
+                    if subs:
+                        node = subs[0].get("node", {})
+                        railway_period_end = node.get("currentPeriodEnd")
+                else:
+                    railway_api_error = f"HTTP {resp.status_code}"
+        except Exception as exc:
+            railway_api_error = str(exc)[:80]
+
+    # If Railway API gave us a period end, recompute days_remaining from it
+    railway_days_remaining: int | None = None
+    if railway_period_end:
+        try:
+            import datetime as _dt
+            pe = _dt.datetime.fromisoformat(railway_period_end.replace("Z", "+00:00"))
+            delta = pe - _dt.datetime.now(_dt.timezone.utc)
+            railway_days_remaining = max(int(delta.days), 0)
         except Exception:
             pass
 
@@ -604,10 +640,13 @@ async def balances():
             "disk_limit_mb": vol_limit_mb,
             "disk_pct": disk_pct,
             "estimated_monthly_cost_usd": railway_monthly_cost,
+            "credit_remaining_usd": railway_credit_remaining,
+            "period_end": railway_period_end,
+            "days_remaining_in_cycle": railway_days_remaining if railway_days_remaining is not None else days_remaining,
             "plan_base_cost_usd": railway_base,
             "monthly_budget_usd": railway_budget,
             "token_configured": bool(railway_token),
-            "days_remaining_in_cycle": days_remaining,
+            "api_error": railway_api_error,
         },
         "bot": {
             "uptime_hours": uptime_hours,
@@ -1019,15 +1058,21 @@ tr:hover td{background:#181818}
     <!-- Railway -->
     <div class="bal-card railway">
       <h3>Railway</h3>
+      <div id="bal-rail-setup" style="display:none;background:#1a1a00;border:1px solid #3a3a00;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:.7rem;color:#ffd740;line-height:1.6">
+        <strong>Set up live billing:</strong><br>
+        1. Go to <strong>railway.app → Account → Tokens</strong><br>
+        2. Create a token, copy it<br>
+        3. In Railway → your service → <strong>Variables</strong> → add <code>RAILWAY_TOKEN=&lt;your token&gt;</code>
+      </div>
+      <div id="bal-rail-api-error" style="display:none;background:#1a0000;border:1px solid #3a0000;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:.68rem;color:#ff5252"></div>
       <div class="bal-row"><span class="bal-lbl">API Token</span><span class="bal-val" id="bal-rail-token">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Disk Used</span><span class="bal-val" id="bal-rail-disk">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Disk Limit</span><span class="bal-val" id="bal-rail-limit">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Est. Monthly Cost</span><span class="bal-val" id="bal-rail-cost" style="color:#4dd0e1">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Plan Base</span><span class="bal-val" id="bal-rail-base">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Credit Remaining</span><span class="bal-val" id="bal-rail-credit" style="color:#4dd0e1">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Est. Spend This Month</span><span class="bal-val" id="bal-rail-cost">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Days Left in Cycle</span><span class="bal-val" id="bal-rail-days">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Period End</span><span class="bal-val" id="bal-rail-period">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Disk Used / Limit</span><span class="bal-val" id="bal-rail-disk">--</span></div>
       <div class="budget-bar"><div class="budget-fill" id="bal-rail-bar" style="width:0%;background:#4dd0e1"></div></div>
       <div class="budget-label"><span>Disk usage</span><span id="bal-rail-bar-pct"></span></div>
-      <div style="font-size:.65rem;color:#444;margin-top:8px">Set <code style="color:#555">RAILWAY_TOKEN</code> env var for live billing data</div>
     </div>
 
     <!-- Bot Stats -->
@@ -1048,9 +1093,9 @@ tr:hover td{background:#181818}
     <h3>Cost Breakdown Notes</h3>
     <div style="font-size:.75rem;color:#555;line-height:1.8">
       <div><span style="color:#ce93d8">Anthropic:</span> Claude Opus 4.6 with extended thinking — ~$0.79/meta-agent run (est. 2,500 input tokens + 10,000 output/thinking). Runs every 30 min when active.</div>
-      <div style="margin-top:6px"><span style="color:#4dd0e1">Railway:</span> Hobby plan $5/mo base + $0.000463/GB·h RAM + $0.000231/vCPU·h + $0.25/GB egress. Add <code style="color:#666">RAILWAY_TOKEN</code> env var for live cost from Railway's API.</div>
-      <div style="margin-top:6px"><span style="color:#00e676">Volume:</span> Railway volume storage is $0.25/GB·mo. Set <code style="color:#666">RAILWAY_VOLUME_LIMIT_MB</code> env var if your volume size differs from the 512 MB default shown.</div>
-      <div style="margin-top:6px"><span style="color:#ffd740">Budgets:</span> Set <code style="color:#666">ANTHROPIC_MONTHLY_BUDGET</code> and <code style="color:#666">RAILWAY_MONTHLY_BUDGET</code> env vars to show budget progress bars.</div>
+      <div style="margin-top:6px"><span style="color:#4dd0e1">Railway:</span> Hobby plan $5/mo base + usage. "Credit Remaining" and "Days Left" come from Railway's API — requires <code style="color:#666">RAILWAY_TOKEN</code>. Get your token at railway.app → Account → Tokens.</div>
+      <div style="margin-top:6px"><span style="color:#00e676">Volume:</span> Set <code style="color:#666">RAILWAY_VOLUME_LIMIT_MB</code> if your volume size differs from 512 MB default.</div>
+      <div style="margin-top:6px"><span style="color:#ffd740">Budgets:</span> Set <code style="color:#666">ANTHROPIC_MONTHLY_BUDGET</code> env var to show Anthropic budget bar.</div>
     </div>
   </div>
 </div>
@@ -1628,19 +1673,50 @@ function renderBalances(d){
   }
 
   // Railway
-  $('bal-rail-token').innerHTML=rail.token_configured
+  const hasToken=rail.token_configured;
+  // Show setup box if no token; show error box if token set but API failed
+  $('bal-rail-setup').style.display=hasToken?'none':'block';
+  const errBox=$('bal-rail-api-error');
+  if(rail.api_error){errBox.style.display='block';errBox.textContent='API error: '+rail.api_error;}
+  else{errBox.style.display='none';}
+
+  $('bal-rail-token').innerHTML=hasToken
     ?'<span style="color:#00e676">Configured</span>'
-    :'<span style="color:#ffd740">Not set (add RAILWAY_TOKEN)</span>';
+    :'<span style="color:#ffd740">Not set — see below</span>';
+
+  // Credit remaining (the "$4.20 left" figure from Railway dashboard)
+  const credit=rail.credit_remaining_usd;
+  if(credit!=null){
+    $('bal-rail-credit').textContent=fmtUsd(credit);
+    $('bal-rail-credit').style.color=credit<2?'#ff5252':credit<5?'#ffd740':'#4dd0e1';
+  }else{
+    $('bal-rail-credit').textContent=hasToken?'--':'Set RAILWAY_TOKEN to see';
+    $('bal-rail-credit').style.color='#555';
+  }
+
+  // Monthly spend
+  const railCost=rail.estimated_monthly_cost_usd!=null
+    ?fmtUsd(rail.estimated_monthly_cost_usd)
+    :(hasToken?'Fetching...':'Set RAILWAY_TOKEN to see');
+  $('bal-rail-cost').textContent=railCost;
+  $('bal-rail-cost').style.color=rail.estimated_monthly_cost_usd!=null?'#4dd0e1':'#555';
+
+  // Days remaining
+  const daysLeft=rail.days_remaining_in_cycle;
+  $('bal-rail-days').textContent=daysLeft!=null?daysLeft+' days':(hasToken?'--':'~'+((cy.days_remaining||0))+' days (est.)');
+
+  // Period end
+  if(rail.period_end){
+    const peDate=new Date(rail.period_end).toLocaleDateString();
+    $('bal-rail-period').textContent=peDate;
+  }else{
+    $('bal-rail-period').textContent=hasToken?'--':'--';
+  }
+
+  // Disk
   const diskMb=rail.disk_used_mb||0;
   const diskLim=rail.disk_limit_mb||512;
-  $('bal-rail-disk').textContent=diskMb.toFixed(2)+' MB';
-  $('bal-rail-limit').textContent=diskLim+' MB';
-  const railCost=rail.estimated_monthly_cost_usd!=null
-    ?fmtUsd(rail.estimated_monthly_cost_usd)+' (live)'
-    :'~'+fmtUsd(rail.plan_base_cost_usd)+' base (no token)';
-  $('bal-rail-cost').textContent=railCost;
-  $('bal-rail-base').textContent=fmtUsd(rail.plan_base_cost_usd)+'/mo';
-  $('bal-rail-days').textContent=(rail.days_remaining_in_cycle||0)+' days';
+  $('bal-rail-disk').textContent=diskMb.toFixed(2)+' MB / '+diskLim+' MB';
   const diskPct=rail.disk_pct||0;
   $('bal-rail-bar').style.width=Math.min(diskPct,100)+'%';
   $('bal-rail-bar').style.background=diskPct>80?'#ff5252':diskPct>60?'#ffd740':'#4dd0e1';
