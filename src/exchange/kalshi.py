@@ -6,6 +6,7 @@ Gracefully degrades to empty data when no credentials are configured.
 """
 from __future__ import annotations
 
+import base64
 import os
 import time
 from dataclasses import dataclass, field
@@ -16,6 +17,25 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.utils.logger import logger
 from src.utils.metrics import api_latency
+
+
+def _rsa_sign(private_key_pem: str, timestamp_ms: int, method: str, path: str) -> str:
+    """Sign a Kalshi API request using RSA-PSS SHA-256."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding as crypto_padding
+    message = f"{timestamp_ms}{method}{path}".encode()
+    # Handle both raw PEM and escaped newlines from env vars
+    pem = private_key_pem.replace("\\n", "\n").encode()
+    private_key = serialization.load_pem_private_key(pem, password=None)
+    signature = private_key.sign(
+        message,
+        crypto_padding.PSS(
+            mgf=crypto_padding.MGF1(hashes.SHA256()),
+            salt_length=crypto_padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+    return base64.b64encode(signature).decode()
 
 
 # ------------------------------------------------------------------ #
@@ -73,9 +93,10 @@ class KalshiClient:
     Async Kalshi trading API client.
 
     Authentication priority:
-      1. KALSHI_API_TOKEN env var  -> Bearer token used directly.
-      2. KALSHI_EMAIL + KALSHI_PASSWORD env vars -> POST /login to obtain token.
-      3. Neither present -> degraded mode (returns empty data, warns once).
+      1. KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY env vars -> RSA-PSS signing (recommended).
+      2. KALSHI_API_TOKEN env var  -> Bearer token used directly.
+      3. KALSHI_EMAIL + KALSHI_PASSWORD env vars -> POST /login to obtain token.
+      4. None present -> degraded mode (returns empty data, warns once).
 
     Use as an async context manager::
 
@@ -90,6 +111,8 @@ class KalshiClient:
         self.config = config
         self.paper_trading = paper_trading
 
+        self._key_id: str | None = os.getenv("KALSHI_API_KEY_ID")
+        self._private_key: str | None = os.getenv("KALSHI_PRIVATE_KEY")
         self._token: str | None = os.getenv("KALSHI_API_TOKEN")
         self._email: str | None = os.getenv("KALSHI_EMAIL")
         self._password: str | None = os.getenv("KALSHI_PASSWORD")
@@ -140,13 +163,26 @@ class KalshiClient:
         except Exception as exc:
             logger.warning(f"KalshiClient: login failed ({exc}); will operate in degraded mode")
 
-    def _auth_headers(self) -> dict[str, str]:
+    def _auth_headers(self, method: str = "GET", path: str = "/") -> dict[str, str]:
+        # RSA key auth (recommended by Kalshi)
+        if self._key_id and self._private_key:
+            ts = int(time.time() * 1000)
+            try:
+                sig = _rsa_sign(self._private_key, ts, method.upper(), path)
+                return {
+                    "Kalshi-Access-Key": self._key_id,
+                    "Kalshi-Access-Timestamp": str(ts),
+                    "Kalshi-Access-Signature": sig,
+                }
+            except Exception as exc:
+                logger.warning(f"KalshiClient: RSA signing failed ({exc}), falling back to token auth")
+        # Bearer token fallback
         if self._token:
             return {"Authorization": f"Bearer {self._token}"}
         return {}
 
     def _has_credentials(self) -> bool:
-        return bool(self._token)
+        return bool((self._key_id and self._private_key) or self._token)
 
     def _warn_no_creds(self) -> None:
         if not self._no_creds_warned:
@@ -182,7 +218,7 @@ class KalshiClient:
             resp = await self._http.get(
                 "/markets",
                 params={"limit": limit, "status": status},
-                headers=self._auth_headers(),
+                headers=self._auth_headers("GET", "/trade-api/v2/markets"),
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -232,7 +268,7 @@ class KalshiClient:
         try:
             resp = await self._http.get(
                 f"/markets/{ticker}/orderbook",
-                headers=self._auth_headers(),
+                headers=self._auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
