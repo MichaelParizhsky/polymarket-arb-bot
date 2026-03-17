@@ -19,7 +19,6 @@ import sys
 import time
 from typing import Any
 
-import uvicorn
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
@@ -147,7 +146,10 @@ class ArbBot:
                            config=self.config, risk=self.risk,
                            binance=self.binance, kalshi=self._kalshi)
 
-        # Start dashboard server
+        # Start dashboard server in a dedicated thread with its own event loop.
+        # This isolates the dashboard from the trading bot's asyncio loop so that
+        # heavy scanning / API calls never starve the HTTP server.
+        import threading
         dashboard_port = 5000
         for _port in range(5000, 5010):
             import socket as _sock
@@ -155,11 +157,18 @@ class ArbBot:
                 if s.connect_ex(("127.0.0.1", _port)) != 0:
                     dashboard_port = _port
                     break
-        dashboard_config = uvicorn.Config(
-            dashboard_app, host="0.0.0.0", port=dashboard_port, log_level="warning"
-        )
-        dashboard_server = uvicorn.Server(dashboard_config)
-        asyncio.create_task(dashboard_server.serve())
+
+        def _run_dashboard():
+            import uvicorn as _uvi
+            _uvi.run(
+                dashboard_app,
+                host="0.0.0.0",
+                port=dashboard_port,
+                log_level="warning",
+            )
+
+        _dash_thread = threading.Thread(target=_run_dashboard, daemon=True)
+        _dash_thread.start()
         logger.info(f"Dashboard: http://localhost:{dashboard_port}")
 
         # Start Binance feed
