@@ -416,7 +416,7 @@ class ArbBot:
             return
 
         interval = int(os.getenv("META_AGENT_INTERVAL_MINUTES", "30")) * 60
-        min_trades = 3
+        min_trades = 20   # need meaningful sample before analyzing
 
         logger.info(f"Meta-agent started — first analysis in {interval//60} minutes")
 
@@ -447,27 +447,73 @@ class ArbBot:
                 logger.info("Meta-agent: calling Claude for performance analysis...")
                 client = anthropic.AsyncAnthropic(api_key=api_key)
 
+                # Include live risk health in the analysis
+                live_health = self.risk.portfolio_health_score()
+
                 system = (
-                    "You are an expert quantitative analyst for prediction market arbitrage. "
-                    "Analyze trading bot performance and suggest parameter improvements. "
-                    "Your suggestions will be AUTOMATICALLY APPLIED to the live bot — be thoughtful but decisive. "
-                    "Return a brief analysis (2-3 paragraphs) then a JSON block with ONLY the keys you want to change, "
-                    "wrapped in ```json ... ```. "
-                    "Available parameters: MIN_EDGE_THRESHOLD, MAX_POSITION_SIZE, MAX_TOTAL_EXPOSURE, "
-                    "MIN_TRADE_INTERVAL, TOKEN_COOLDOWN, MM_SPREAD_BPS, MM_ORDER_SIZE, MM_MAX_INVENTORY, "
-                    "MAX_DAYS_TO_RESOLUTION, STRATEGY_REBALANCING, STRATEGY_COMBINATORIAL, "
-                    "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, STRATEGY_EVENT_DRIVEN. "
-                    "If performance is good, make no changes (return empty JSON {}). "
-                    "If a strategy has negative PnL with many trades, disable it. "
-                    "If win rate is below 40%, raise MIN_EDGE_THRESHOLD. "
-                    "If trades are too frequent, raise MIN_TRADE_INTERVAL."
+                    "You are an expert quantitative analyst for a Polymarket/Kalshi prediction market "
+                    "arbitrage bot. Your role combines four perspectives:\n\n"
+
+                    "1. QUANT ANALYST: Evaluate each strategy as a revenue line. "
+                    "Think in terms of ROI (PnL / volume traded), not just raw PnL. "
+                    "A strategy trading $10k volume for $50 PnL (0.5% ROI) is better than one "
+                    "trading $1k for $30 (3% ROI) only if it scales — check trades_per_hour.\n\n"
+
+                    "2. RISK MANAGER: Use the health score as your primary triage signal. "
+                    "CRITICAL (<25) or WEAK (<50) health requires defensive action first — "
+                    "widen thresholds, reduce exposure — before optimizing returns. "
+                    "HEALTHY (>75) health permits more aggressive parameter tuning. "
+                    "Never raise MAX_TOTAL_EXPOSURE when drawdown is above 8%. "
+                    "Never lower MIN_EDGE_THRESHOLD when win_rate is below 45%.\n\n"
+
+                    "3. SCENARIO THINKER: Before recommending any change, consider its failure mode. "
+                    "If you raise MM_SPREAD_BPS, does inventory risk increase? "
+                    "If you disable a strategy, does it leave a gap in market coverage? "
+                    "Prefer reversible changes. Prefer changes with evidence from >= 10 trades.\n\n"
+
+                    "4. DECISION LOGGER: Your JSON output is stored and audited. "
+                    "Every non-empty change must be justified by data in the performance snapshot. "
+                    "Do not make changes based on gut feel or recency bias from a single bad cycle.\n\n"
+
+                    "PARAMETERS YOU CAN CHANGE:\n"
+                    "  Risk: MIN_EDGE_THRESHOLD, MAX_POSITION_SIZE, MAX_TOTAL_EXPOSURE, "
+                    "MAX_SLIPPAGE, MIN_TRADE_INTERVAL, TOKEN_COOLDOWN\n"
+                    "  Market making: MM_SPREAD_BPS, MM_ORDER_SIZE, MM_MAX_INVENTORY\n"
+                    "  Coverage: MAX_DAYS_TO_RESOLUTION, MAX_MARKETS\n"
+                    "  Strategies (enable/disable): STRATEGY_REBALANCING, STRATEGY_COMBINATORIAL, "
+                    "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, "
+                    "STRATEGY_EVENT_DRIVEN\n\n"
+
+                    "DECISION RULES (override your own judgment only with strong evidence):\n"
+                    "  - bootstrap_phase=true: DO NOT change any parameters. Observe only.\n"
+                    "  - Health CRITICAL AND NOT bootstrap: disable worst ROI strategy, raise MIN_EDGE_THRESHOLD 20%\n"
+                    "  - Win rate < 40% AND >= 30 closed positions: raise MIN_EDGE_THRESHOLD\n"
+                    "  - Strategy ROI < -1% AND >= 30 trades: disable that strategy\n"
+                    "  - Fee drag > 1.5% of volume AND >= 30 trades: raise MIN_EDGE_THRESHOLD\n"
+                    "  - trades_per_hour > 20: raise MIN_TRADE_INTERVAL\n"
+                    "  - trades_per_hour < 0.5 AND health HEALTHY: lower MIN_EDGE_THRESHOLD 10%\n"
+                    "  - Best strategy ROI > 2% AND >= 30 trades: consider raising MAX_POSITION_SIZE\n\n"
+
+                    "OUTPUT FORMAT:\n"
+                    "Write 3 sections:\n"
+                    "## Performance Summary\n"
+                    "One paragraph: health grade, top performer, worst performer, key concern.\n\n"
+                    "## Analysis\n"
+                    "Per-strategy assessment (1 line each) using ROI and win rate data.\n\n"
+                    "## Decision\n"
+                    "What you are changing and why (cite the specific data point). "
+                    "Then provide the JSON block with ONLY changed keys:\n"
+                    "```json\n{...}\n```\n"
+                    "If no changes needed, return ```json\n{}\n```"
                 )
+
                 user_msg = (
-                    f"Analyze this Polymarket arb bot performance:\n\n"
-                    f"Config:\n```json\n{json.dumps(current_env, indent=2)}\n```\n\n"
-                    f"Performance:\n```json\n{json.dumps(analysis_data, indent=2)}\n```\n\n"
-                    "Which strategies are profitable? Should any thresholds change? "
-                    "Suggest only small, safe adjustments."
+                    f"Analyze this Polymarket arb bot cycle.\n\n"
+                    f"**Live Risk Health:**\n```json\n{json.dumps(live_health, indent=2)}\n```\n\n"
+                    f"**Current Config:**\n```json\n{json.dumps(current_env, indent=2)}\n```\n\n"
+                    f"**Performance Snapshot:**\n```json\n{json.dumps(analysis_data, indent=2)}\n```\n\n"
+                    "Identify the weakest strategy by ROI, check if health requires defensive action, "
+                    "and suggest only evidence-backed parameter changes."
                 )
 
                 response = await client.messages.create(
@@ -489,9 +535,16 @@ class ArbBot:
                         pass
 
                 # Auto-apply proposed changes to live config
+                # Skip auto-apply during bootstrap phase (< 30 closed positions)
+                bootstrap = analysis_data.get("health", {}).get("bootstrap_phase", True)
                 applied = []
-                if proposed:
+                if proposed and not bootstrap:
                     applied = self._apply_config_overrides(proposed)
+                elif proposed and bootstrap:
+                    logger.info(
+                        f"Meta-agent: bootstrap phase ({analysis_data['health'].get('closed_positions', 0)} "
+                        f"closed positions) — logging suggestions but NOT auto-applying changes"
+                    )
                     if applied:
                         # Persist to disk so changes survive restarts
                         config_path = "logs/meta_agent_config.json"

@@ -77,6 +77,8 @@ class MarketMakingStrategy(BaseStrategy):
         self, markets: list[Market], orderbooks: dict[str, Orderbook]
     ) -> list[Market]:
         """Pick top markets by volume that have reasonable spreads."""
+        cfg = self.config.strategies
+        max_spread = getattr(cfg, "mm_max_market_spread_pct", 0.06)
         eligible = []
         for m in markets:
             if not m.active or m.closed:
@@ -92,6 +94,15 @@ class MarketMakingStrategy(BaseStrategy):
             # Only make markets where mid is not at extremes (avoid near-resolved markets)
             if not (0.05 < book.mid < 0.95):
                 continue
+            # Skip markets with a wide bid-ask spread — adverse selection risk
+            if book.best_bid is not None and book.best_ask is not None:
+                market_spread = book.best_ask - book.best_bid
+                if market_spread > max_spread:
+                    self.log(
+                        f"MM skip {m.question[:40]} — spread {market_spread:.3f} > {max_spread:.3f}",
+                        "debug",
+                    )
+                    continue
             eligible.append(m)
 
         # Sort by volume descending, take top 10
@@ -106,7 +117,7 @@ class MarketMakingStrategy(BaseStrategy):
         signals = []
 
         mid = book.mid
-        spread_bps = cfg.mm_spread_bps
+        spread_bps = max(cfg.mm_spread_bps, getattr(cfg, "mm_min_spread_bps", 10))
         half_spread = (spread_bps / 10000) / 2
 
         # Inventory skew: if we hold a lot of YES, widen bid, tighten ask
@@ -114,6 +125,9 @@ class MarketMakingStrategy(BaseStrategy):
         inventory = pos.contracts if pos else 0.0
         max_inv = cfg.mm_max_inventory
         inv_ratio = min(max(inventory / max_inv, -1.0), 1.0) if max_inv > 0 else 0.0
+
+        # Hard inventory skew limit — stop quoting the adverse side beyond threshold
+        skew_limit = getattr(cfg, "mm_inventory_skew_limit", 0.30)
 
         # Skew the mid price to reflect inventory
         skew_factor = cfg.mm_skew_factor
@@ -132,6 +146,12 @@ class MarketMakingStrategy(BaseStrategy):
         ok, reason = self.risk.check_trade(token_id, "BUY", order_size, "market_making")
         if not ok:
             self.log(f"MM bid blocked: {reason}", "debug")
+        elif inv_ratio > skew_limit:
+            # Already long too much YES — skip bid to reduce inventory risk
+            self.log(
+                f"MM bid skipped — inventory skew {inv_ratio:.2f} > {skew_limit:.2f}",
+                "debug",
+            )
         else:
             bid_usdc = min(order_size, available * 0.1)
             bid_contracts = bid_usdc / bid_price

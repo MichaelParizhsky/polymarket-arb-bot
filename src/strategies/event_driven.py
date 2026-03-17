@@ -15,6 +15,7 @@ Custom events can be loaded from logs/custom_events.json.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -218,6 +219,135 @@ def get_default_calendar() -> list[CalendarEvent]:
     ))
 
     # ------------------------------------------------------------------
+    # US GDP releases (advance estimate) — typically 12:30 UTC (8:30am ET)
+    # ------------------------------------------------------------------
+    gdp_dates = [
+        ("2026-04-29", 12, 30),  # Q1 2026 advance
+        ("2026-07-29", 12, 30),  # Q2 2026 advance
+    ]
+    for date_str, h, m in gdp_dates:
+        events.append(CalendarEvent(
+            name=f"US GDP Advance Estimate {date_str}",
+            event_time=_unix_hhmm(date_str, h, m),
+            keywords=["gdp", "gross domestic product", "economic growth", "recession",
+                      "q1 gdp", "q2 gdp", "us economy"],
+            size_multiplier=1.6,
+            category="macro",
+            window_before_hours=1.0,
+            window_after_hours=1.5,
+        ))
+
+    # ------------------------------------------------------------------
+    # FOMC meeting minutes releases — 3 weeks after each meeting, 18:00 UTC
+    # ------------------------------------------------------------------
+    fomc_minutes = [
+        ("2026-04-08", 18, 0),  # Jan/Feb meeting minutes
+        ("2026-05-27", 18, 0),  # Mar meeting minutes
+    ]
+    for date_str, h, m in fomc_minutes:
+        events.append(CalendarEvent(
+            name=f"FOMC Minutes Release {date_str}",
+            event_time=_unix_hhmm(date_str, h, m),
+            keywords=["fomc minutes", "fed minutes", "federal reserve", "monetary policy",
+                      "interest rate", "rate path", "powell"],
+            size_multiplier=1.4,
+            category="macro",
+            window_before_hours=0.5,
+            window_after_hours=1.0,
+        ))
+
+    # ------------------------------------------------------------------
+    # Major crypto events 2026
+    # ------------------------------------------------------------------
+    events.append(CalendarEvent(
+        name="Ethereum ETF Options Launch (est.)",
+        event_time=_unix_hhmm("2026-04-14", 14, 0),
+        keywords=["ethereum", "eth", "etf", "options", "crypto", "ether"],
+        size_multiplier=1.5,
+        category="crypto",
+        window_before_hours=4.0,
+        window_after_hours=2.0,
+    ))
+
+    events.append(CalendarEvent(
+        name="Bitcoin Monthly Options Expiry (April)",
+        event_time=_unix_hhmm("2026-04-24", 8, 0),  # Last Friday, 8am UTC = Deribit expiry
+        keywords=["bitcoin", "btc", "options expiry", "options", "deribit", "crypto"],
+        size_multiplier=1.4,
+        category="crypto",
+        window_before_hours=2.0,
+        window_after_hours=1.0,
+    ))
+
+    events.append(CalendarEvent(
+        name="Bitcoin Monthly Options Expiry (May)",
+        event_time=_unix_hhmm("2026-05-29", 8, 0),
+        keywords=["bitcoin", "btc", "options expiry", "options", "deribit", "crypto"],
+        size_multiplier=1.4,
+        category="crypto",
+        window_before_hours=2.0,
+        window_after_hours=1.0,
+    ))
+
+    events.append(CalendarEvent(
+        name="Bitcoin Monthly Options Expiry (June)",
+        event_time=_unix_hhmm("2026-06-26", 8, 0),
+        keywords=["bitcoin", "btc", "options expiry", "options", "deribit", "crypto"],
+        size_multiplier=1.4,
+        category="crypto",
+        window_before_hours=2.0,
+        window_after_hours=1.0,
+    ))
+
+    # ------------------------------------------------------------------
+    # Major earnings (market-moving for prediction market activity)
+    # ------------------------------------------------------------------
+    earnings_events = [
+        ("2026-04-23", "Meta Q1 Earnings", ["meta", "facebook", "zuckerberg", "ai", "metaverse"], 1.3),
+        ("2026-04-24", "Alphabet Q1 Earnings", ["google", "alphabet", "ai", "search", "cloud"], 1.3),
+        ("2026-04-30", "Microsoft Q3 Earnings", ["microsoft", "msft", "ai", "azure", "openai"], 1.3),
+        ("2026-05-01", "Apple Q2 Earnings", ["apple", "aapl", "iphone", "ai", "tim cook"], 1.3),
+        ("2026-05-07", "Amazon Q1 Earnings", ["amazon", "aws", "ai", "cloud", "ecommerce"], 1.3),
+        ("2026-07-22", "Tesla Q2 Earnings", ["tesla", "elon musk", "ev", "electric vehicle", "musk"], 1.3),
+    ]
+    for date_str, name, keywords, mult in earnings_events:
+        events.append(CalendarEvent(
+            name=name,
+            event_time=_unix_hhmm(date_str, 20, 30),  # ~4:30pm ET after-hours
+            keywords=keywords,
+            size_multiplier=mult,
+            category="macro",
+            window_before_hours=1.0,
+            window_after_hours=2.0,
+        ))
+
+    # ------------------------------------------------------------------
+    # Sports — Stanley Cup Finals 2026
+    # ------------------------------------------------------------------
+    events.append(CalendarEvent(
+        name="Stanley Cup Finals 2026 (est. Game 7)",
+        event_time=_unix_hhmm("2026-06-15", 23, 0),
+        keywords=["stanley cup", "nhl", "hockey", "nhl finals", "ice hockey"],
+        size_multiplier=1.5,
+        category="sports",
+        window_before_hours=2.0,
+        window_after_hours=1.0,
+    ))
+
+    # ------------------------------------------------------------------
+    # Sports — Wimbledon 2026 Finals
+    # ------------------------------------------------------------------
+    events.append(CalendarEvent(
+        name="Wimbledon 2026 Men's Final",
+        event_time=_unix_hhmm("2026-07-12", 13, 0),  # ~1pm UTC
+        keywords=["wimbledon", "tennis", "grand slam", "djokovic", "alcaraz", "sinner"],
+        size_multiplier=1.3,
+        category="sports",
+        window_before_hours=1.0,
+        window_after_hours=1.0,
+    ))
+
+    # ------------------------------------------------------------------
     # Generic "always-on" event: US market hours (Mon-Fri 9:30am-4pm ET)
     # This is evaluated dynamically by checking current weekday + time.
     # We represent it as a recurring sentinel with multiplier 1.0.
@@ -289,6 +419,9 @@ class EventDrivenStrategy(BaseStrategy):
         )
         self._last_custom_load: float = time.time()
         self._custom_reload_interval: float = 300.0   # reload every 5 minutes
+        # LLM ensemble cache: condition_id -> (probability, cached_at_timestamp)
+        self._llm_cache: dict[str, tuple[float, float]] = {}
+        self._llm_cache_ttl: float = 1800.0  # 30-minute cache per market
 
     # ------------------------------------------------------------------
     # Public API
@@ -394,7 +527,233 @@ class EventDrivenStrategy(BaseStrategy):
                 f"{event_names}"
             )
 
+        # LLM ensemble: run Claude probability estimates on top event-related markets
+        llm_signals = await self._llm_scan(markets, orderbooks, active_events)
+        signals.extend(llm_signals)
+
         return signals
+
+    # ------------------------------------------------------------------
+    # LLM Ensemble (Claude probability estimation)
+    # ------------------------------------------------------------------
+
+    async def _llm_scan(
+        self,
+        markets: list[Market],
+        orderbooks: dict[str, Any],
+        active_events: list[CalendarEvent],
+    ) -> list[Signal]:
+        """
+        Run Claude claude-haiku-4-5-20251001 probability estimates on the most relevant event-related
+        markets. Generates BUY signals when Claude's estimate diverges from the
+        market price by more than ensemble_min_edge (default 5%).
+
+        Key design choices (based on research findings):
+        - Claude is NOT shown the current market price to avoid anchoring bias
+        - Results are cached 30 minutes to limit API costs
+        - Only evaluates top N markets per cycle (configurable)
+        - Min liquidity filter ($2000 volume) to avoid illiquid markets
+        """
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            return []
+
+        cfg = self.config.strategies
+        ensemble_min_edge: float = getattr(cfg, "ensemble_min_edge", 0.05)
+        max_markets: int = getattr(cfg, "ensemble_max_markets_per_cycle", 5)
+
+        # Build keyword set from active events for fast pre-filter
+        event_keywords: set[str] = set()
+        event_context_map: dict[str, str] = {}  # keyword -> event name
+        for ev in active_events:
+            for kw in ev.keywords:
+                event_keywords.add(kw.lower())
+                event_context_map[kw.lower()] = ev.name
+
+        if not event_keywords:
+            return []
+
+        # Select candidate markets: event-related, minimum liquidity, not near-resolved
+        candidates: list[tuple[Market, str, float]] = []  # (market, event_context, yes_mid)
+        for market in markets:
+            if not market.active or market.closed:
+                continue
+            if market.volume < 2000:
+                continue
+            q_lower = market.question.lower()
+            matched_kws = [kw for kw in event_keywords if kw in q_lower]
+            if not matched_kws:
+                continue
+
+            yes_tok = next((t for t in market.tokens if t.outcome.lower() == "yes"), None)
+            if not yes_tok:
+                continue
+            book = orderbooks.get(yes_tok.token_id)
+            if not book or book.mid is None or book.best_ask is None:
+                continue
+            # Skip near-resolved markets — endgame sweep handles those
+            if not (0.03 < book.mid < 0.97):
+                continue
+
+            ctx = event_context_map.get(matched_kws[0], "major market event")
+            candidates.append((market, ctx, book.mid))
+
+        if not candidates:
+            return []
+
+        # Sort by volume descending, take top N
+        candidates.sort(key=lambda x: x[0].volume, reverse=True)
+        candidates = candidates[:max_markets]
+
+        # Run LLM estimates in parallel
+        tasks = [
+            self._llm_estimate_probability(market, event_ctx)
+            for market, event_ctx, _ in candidates
+        ]
+        estimates = await asyncio.gather(*tasks, return_exceptions=True)
+
+        signals: list[Signal] = []
+        fee_cost = 2 * 0.002
+
+        for (market, event_ctx, yes_mid), estimate in zip(candidates, estimates):
+            if isinstance(estimate, Exception) or estimate is None:
+                continue
+
+            yes_tok = next((t for t in market.tokens if t.outcome.lower() == "yes"), None)
+            no_tok = next((t for t in market.tokens if t.outcome.lower() == "no"), None)
+            if not yes_tok:
+                continue
+
+            book = orderbooks.get(yes_tok.token_id)
+            if not book or book.best_ask is None:
+                continue
+
+            # YES signal: Claude thinks YES probability >> market price
+            yes_edge = estimate - book.best_ask - fee_cost
+            if yes_edge >= ensemble_min_edge:
+                size_usdc = self.risk.size_position(edge=yes_edge)
+                if size_usdc >= 1.0:
+                    self.log(
+                        f"[LLM ENSEMBLE] BUY YES | {market.question[:55]} | "
+                        f"Claude={estimate:.3f} vs market={book.best_ask:.3f} | "
+                        f"edge={yes_edge:.3f} | size=${size_usdc:.2f}"
+                    )
+                    signals.append(Signal(
+                        strategy="event_driven",
+                        token_id=yes_tok.token_id,
+                        side="BUY",
+                        price=book.best_ask,
+                        size_usdc=size_usdc,
+                        edge=yes_edge,
+                        notes=f"[LLM] YES | Claude={estimate:.3f} vs mkt={book.best_ask:.3f}",
+                        metadata={
+                            "source": "llm_ensemble",
+                            "llm_probability": estimate,
+                            "market_price": book.best_ask,
+                            "event_context": event_ctx,
+                        },
+                    ))
+                    continue
+
+            # NO signal: Claude thinks YES probability << market price
+            if no_tok:
+                no_book = orderbooks.get(no_tok.token_id)
+                if no_book and no_book.best_ask is not None:
+                    no_fair_value = 1.0 - estimate
+                    no_edge = no_fair_value - no_book.best_ask - fee_cost
+                    if no_edge >= ensemble_min_edge:
+                        size_usdc = self.risk.size_position(edge=no_edge)
+                        if size_usdc >= 1.0:
+                            self.log(
+                                f"[LLM ENSEMBLE] BUY NO | {market.question[:55]} | "
+                                f"Claude YES={estimate:.3f} → NO fair={no_fair_value:.3f} "
+                                f"vs market NO={no_book.best_ask:.3f} | edge={no_edge:.3f}"
+                            )
+                            signals.append(Signal(
+                                strategy="event_driven",
+                                token_id=no_tok.token_id,
+                                side="BUY",
+                                price=no_book.best_ask,
+                                size_usdc=size_usdc,
+                                edge=no_edge,
+                                notes=f"[LLM] NO | Claude YES={estimate:.3f} vs mkt NO={no_book.best_ask:.3f}",
+                                metadata={
+                                    "source": "llm_ensemble",
+                                    "llm_yes_probability": estimate,
+                                    "no_fair_value": no_fair_value,
+                                    "event_context": event_ctx,
+                                },
+                            ))
+
+        if signals:
+            self.log(f"[LLM ENSEMBLE] {len(signals)} signal(s) from {len(candidates)} evaluated markets")
+
+        return signals
+
+    async def _llm_estimate_probability(
+        self, market: Market, event_context: str
+    ) -> float | None:
+        """
+        Ask Claude claude-haiku-4-5-20251001 for an independent probability estimate for a market.
+        Returns a float 0–1, or None on failure.
+
+        Critical: does NOT pass the current market price to Claude to avoid
+        anchoring bias (documented failure mode in prediction market research).
+        """
+        cache_key = market.condition_id
+        cached = self._llm_cache.get(cache_key)
+        if cached is not None:
+            prob, cached_at = cached
+            if time.time() - cached_at < self._llm_cache_ttl:
+                return prob
+
+        try:
+            import anthropic
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+
+            prompt = (
+                f"You are an expert forecaster for prediction markets. "
+                f"Estimate the probability that the following question resolves YES.\n\n"
+                f"Question: {market.question}\n\n"
+                f"Context: This is related to {event_context}. "
+                f"Today's date is approximately {datetime.now(timezone.utc).strftime('%Y-%m-%d')}.\n\n"
+                f"IMPORTANT: Give your independent probability estimate based on your knowledge. "
+                f"Do NOT consider any market prices.\n\n"
+                f"Respond with ONLY a JSON object, no other text:\n"
+                f'{{\"probability\": 0.XX, \"confidence\": \"low|medium|high\", '
+                f'\"reasoning\": \"one sentence\"}}\n\n'
+                f"Probability must be between 0.0 and 1.0."
+            )
+
+            response = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=150,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            data = json.loads(text)
+            prob = float(data["probability"])
+            confidence = data.get("confidence", "medium")
+
+            # Discount low-confidence estimates toward 0.5 (Bayesian shrinkage)
+            if confidence == "low":
+                prob = 0.5 + (prob - 0.5) * 0.5
+
+            if 0.0 <= prob <= 1.0:
+                self._llm_cache[cache_key] = (prob, time.time())
+                logger.debug(
+                    f"[LLM] {market.question[:50]} → {prob:.3f} "
+                    f"(conf={confidence})"
+                )
+                return prob
+
+        except json.JSONDecodeError as exc:
+            logger.debug(f"[LLM] JSON parse error: {exc}")
+        except Exception as exc:
+            logger.debug(f"[LLM] Estimate failed for {market.question[:40]}: {exc}")
+
+        return None
 
     # ------------------------------------------------------------------
     # Internals

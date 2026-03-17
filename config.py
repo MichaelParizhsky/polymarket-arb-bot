@@ -64,26 +64,37 @@ class RiskConfig:
 class StrategyConfig:
     rebalancing_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_REBALANCING", True))
     combinatorial_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_COMBINATORIAL", True))
-    latency_arb_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_LATENCY_ARB", True))
+    latency_arb_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_LATENCY_ARB", False))  # disabled: Polymarket dynamic fees killed this strategy
     market_making_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_MARKET_MAKING", True))
 
-    # Rebalancing
-    rebalancing_min_edge: float = 0.02       # Minimum 2c edge after fees
+    # Rebalancing — must clear 2% winner fee + gas; set above 2%
+    rebalancing_min_edge: float = field(default_factory=lambda: _float("REBALANCING_MIN_EDGE", 0.025))
     rebalancing_max_spend: float = 200.0
 
     # Combinatorial
     combo_min_edge: float = 0.03
     combo_lookback_markets: int = 50
 
-    # Latency arb
+    # Latency arb (mostly disabled — Polymarket dynamic fees make this fee-negative at 50/50)
     latency_price_lag_threshold: float = 0.015  # 1.5% lag triggers entry
     latency_max_hold_seconds: int = 30
 
     # Market making
     mm_spread_bps: int = field(default_factory=lambda: _int("MM_SPREAD_BPS", 50))
+    mm_min_spread_bps: int = field(default_factory=lambda: _int("MM_MIN_SPREAD_BPS", 10))       # never quote tighter than 10 bps
     mm_order_size: float = field(default_factory=lambda: _float("MM_ORDER_SIZE", 100.0))
     mm_max_inventory: float = field(default_factory=lambda: _float("MM_MAX_INVENTORY", 500.0))
     mm_skew_factor: float = 0.3
+    mm_inventory_skew_limit: float = field(default_factory=lambda: _float("MM_INVENTORY_SKEW_LIMIT", 0.30))  # stop quoting adverse side at 30% skew
+    mm_max_market_spread_pct: float = field(default_factory=lambda: _float("MM_MAX_MARKET_SPREAD_PCT", 0.06))  # skip markets with >6% bid-ask spread
+
+    # Cross-exchange — separate min edge (needs to clear ~4-5% combined fees)
+    cross_exchange_min_edge: float = field(default_factory=lambda: _float("CROSS_EXCHANGE_MIN_EDGE", 0.05))
+    cross_exchange_safe_only: bool = field(default_factory=lambda: _bool("CROSS_EXCHANGE_SAFE_ONLY", True))  # only trade mechanical-resolution markets
+
+    # LLM ensemble for event-driven directional trading
+    ensemble_min_edge: float = field(default_factory=lambda: _float("ENSEMBLE_MIN_EDGE", 0.05))  # 5% edge vs LLM estimate to trade
+    ensemble_max_markets_per_cycle: int = field(default_factory=lambda: _int("ENSEMBLE_MAX_MARKETS", 5))  # limit LLM API calls per cycle
 
     # New strategies
     resolution_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_RESOLUTION", True))

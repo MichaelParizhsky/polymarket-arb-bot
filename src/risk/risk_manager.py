@@ -81,3 +81,79 @@ class RiskManager:
         """Manual override — use carefully."""
         self._hard_stop = False
         logger.warning("Hard stop reset manually")
+
+    def portfolio_health_score(self) -> dict:
+        """
+        Fast health check on current portfolio state.
+        Returns a score (0-100) and flags for the meta-agent / dashboard.
+
+        Dimensions:
+          - Capital safety: how close to hard stop (drawdown limit)
+          - Concentration: single-position exposure vs total exposure
+          - Liquidity: free USDC as % of total value
+          - Activity: are we trading (not stalled)?
+        """
+        total = self.portfolio.total_value()
+        if total <= 0:
+            return {"score": 0, "grade": "CRITICAL", "flags": ["zero portfolio value"]}
+
+        drawdown = max(
+            0.0,
+            (self.portfolio.starting_balance - total) / self.portfolio.starting_balance,
+        )
+        dd_limit = self.config.risk.max_drawdown_pct
+        dd_ratio = drawdown / dd_limit if dd_limit > 0 else 1.0  # 0=safe, 1=at limit
+
+        exposure = self.portfolio.exposure()
+        max_exposure = self.config.risk.max_total_exposure
+        exposure_ratio = exposure / max_exposure if max_exposure > 0 else 1.0
+
+        free_usdc_pct = (self.portfolio.usdc_balance / total) * 100
+
+        # Concentration: largest single position as % of total exposure
+        positions = self.portfolio.positions
+        if positions and exposure > 0:
+            largest = max(p.cost_basis for p in positions.values())
+            concentration_pct = (largest / exposure) * 100
+        else:
+            concentration_pct = 0.0
+
+        flags = []
+
+        # Capital safety (40 pts)
+        capital_score = max(0.0, 40.0 * (1.0 - dd_ratio))
+        if dd_ratio > 0.7:
+            flags.append(f"drawdown at {drawdown:.1%} — approaching hard stop ({dd_limit:.0%})")
+
+        # Exposure headroom (25 pts)
+        exposure_score = max(0.0, 25.0 * (1.0 - exposure_ratio))
+        if exposure_ratio > 0.85:
+            flags.append(f"exposure at {exposure_ratio:.0%} of limit — limited capacity for new trades")
+
+        # Liquidity (20 pts): >30% free USDC = full points
+        liquidity_score = min(20.0, (free_usdc_pct / 30.0) * 20.0)
+        if free_usdc_pct < 10.0:
+            flags.append(f"only {free_usdc_pct:.1f}% capital free — capital locked in positions")
+
+        # Concentration (15 pts): <25% in single position = full points
+        concentration_score = max(0.0, 15.0 * (1.0 - max(0.0, concentration_pct - 25.0) / 75.0))
+        if concentration_pct > 50.0:
+            flags.append(f"concentration risk: largest position is {concentration_pct:.0f}% of exposure")
+
+        total_score = round(capital_score + exposure_score + liquidity_score + concentration_score, 1)
+        grade = "HEALTHY" if total_score >= 75 else "FAIR" if total_score >= 50 else "WEAK" if total_score >= 25 else "CRITICAL"
+
+        if self._hard_stop:
+            total_score = 0.0
+            grade = "CRITICAL"
+            flags.insert(0, "HARD STOP ACTIVE")
+
+        return {
+            "score": total_score,
+            "grade": grade,
+            "flags": flags,
+            "drawdown_pct": round(drawdown * 100, 2),
+            "exposure_ratio_pct": round(exposure_ratio * 100, 1),
+            "free_usdc_pct": round(free_usdc_pct, 1),
+            "concentration_pct": round(concentration_pct, 1),
+        }

@@ -38,6 +38,21 @@ from src.utils.metrics import arb_opportunities, edge_detected
 
 FEE_RATE = 0.002  # per side; applied to both legs
 
+# Resolution criteria safety: keywords that indicate mechanical/unambiguous resolution
+# (price at specific time). Safe to arb because both platforms resolve identically.
+_MECHANICAL_KEYWORDS = {
+    "above", "below", "over", "under", "exceed", "reach", "price", "at or above",
+    "at or below", "higher than", "lower than", "close", "trading at",
+}
+
+# High-risk categories — resolution criteria often diverge between platforms
+_RISKY_KEYWORDS = {
+    "win", "election", "vote", "president", "senator", "governor", "candidate",
+    "shutdown", "bill", "pass", "impeach", "resign", "acquit", "convict",
+    "indict", "arrest", "war", "invasion", "ceasefire", "treaty", "deal",
+    "default", "bankrupt", "merge", "acquire", "ipo",
+}
+
 
 # ------------------------------------------------------------------ #
 #  Keyword sets used for cross-exchange market matching               #
@@ -152,7 +167,12 @@ class CrossExchangeStrategy(BaseStrategy):
             logger.debug("[CROSS-EXCHANGE] No Kalshi markets available, skipping scan")
             return signals
 
-        min_edge: float = self.config.strategies.combo_min_edge
+        # Use cross_exchange_min_edge (default 5%) — must clear ~4-5% combined fees
+        min_edge: float = getattr(
+            self.config.strategies, "cross_exchange_min_edge",
+            self.config.strategies.combo_min_edge
+        )
+        safe_only: bool = getattr(self.config.strategies, "cross_exchange_safe_only", True)
         fee_cost = 2 * FEE_RATE  # both legs
 
         for poly_market in poly_markets:
@@ -177,6 +197,13 @@ class CrossExchangeStrategy(BaseStrategy):
             # Find a matching Kalshi market.
             k_market = self._match_markets(poly_market, kalshi_markets)
             if k_market is None:
+                continue
+
+            # Safety check: skip markets with ambiguous/divergent resolution criteria
+            if safe_only and not self._is_safe_market_pair(poly_market.question, k_market.title):
+                logger.debug(
+                    f"[CROSS-EXCHANGE] Skipping risky market pair: '{poly_market.question[:40]}'"
+                )
                 continue
 
             # Fetch Kalshi orderbook for live bid/ask, fall back to top-level prices.
@@ -308,6 +335,37 @@ class CrossExchangeStrategy(BaseStrategy):
                     ))
 
         return signals
+
+    # ------------------------------------------------------------------ #
+    #  Resolution safety check                                             #
+    # ------------------------------------------------------------------ #
+
+    def _is_safe_market_pair(self, poly_question: str, kalshi_title: str) -> bool:
+        """
+        Return True only if both market questions appear to use mechanical,
+        unambiguous resolution criteria (e.g., price above $X at time Y).
+
+        Markets with political/event outcome resolution are excluded because
+        Polymarket and Kalshi frequently diverge on resolution criteria for
+        semantically similar but legally-distinct questions, causing total
+        loss on one leg (documented in 2024 election and shutdown markets).
+
+        Only BTC/ETH/SOL/XRP/SOL price markets at a specific time are
+        considered inherently safe for cross-exchange arbitrage.
+        """
+        combined = (poly_question + " " + kalshi_title).lower()
+
+        # Block if any risky keyword appears
+        if any(kw in combined for kw in _RISKY_KEYWORDS):
+            return False
+
+        # Require at least one mechanical keyword (price-level language)
+        has_mechanical = any(kw in combined for kw in _MECHANICAL_KEYWORDS)
+
+        # Require a crypto asset reference for maximum safety
+        has_crypto = any(c in combined for c in ("btc", "bitcoin", "eth", "ethereum", "sol", "xrp"))
+
+        return has_mechanical and has_crypto
 
     # ------------------------------------------------------------------ #
     #  Market matching                                                     #
