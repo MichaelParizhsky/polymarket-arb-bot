@@ -1740,9 +1740,9 @@ function renderBalances(d){
   $('bal-bot-pnl').innerHTML='<span style="color:'+(pnl>=0?'#00e676':'#ff5252')+'">'+fmtUsd(pnl)+'</span>';
   // Cycles left: 30-min meta-agent cadence × days remaining × 48 runs/day
   const metaRunsPerDay=48;
-  const daysLeft=cy.days_remaining||0;
-  $('bal-bot-cycles').textContent=Math.round(daysLeft*24*2)+' scan cycles';
-  $('bal-bot-metaruns').textContent=Math.round(daysLeft*metaRunsPerDay)+' runs';
+  const botDaysLeft=cy.days_remaining||0;
+  $('bal-bot-cycles').textContent=Math.round(botDaysLeft*24*2)+' scan cycles';
+  $('bal-bot-metaruns').textContent=Math.round(botDaysLeft*metaRunsPerDay)+' runs';
 }
 
 async function fetchMeta(){
