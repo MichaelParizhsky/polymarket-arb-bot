@@ -158,16 +158,17 @@ class ArbBot:
                     dashboard_port = _port
                     break
 
-        def _run_dashboard():
+        def _run_dashboard(port: int) -> None:
+            import asyncio as _asyncio
             import uvicorn as _uvi
-            _uvi.run(
-                dashboard_app,
-                host="0.0.0.0",
-                port=dashboard_port,
-                log_level="warning",
-            )
+            _loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(_loop)
+            _cfg = _uvi.Config(dashboard_app, host="0.0.0.0", port=port, log_level="warning")
+            _srv = _uvi.Server(_cfg)
+            _srv.install_signal_handlers = lambda: None  # signal handlers only work in main thread
+            _loop.run_until_complete(_srv.serve())
 
-        _dash_thread = threading.Thread(target=_run_dashboard, daemon=True)
+        _dash_thread = threading.Thread(target=_run_dashboard, args=(dashboard_port,), daemon=True)
         _dash_thread.start()
         logger.info(f"Dashboard: http://localhost:{dashboard_port}")
 
