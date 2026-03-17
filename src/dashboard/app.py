@@ -487,6 +487,138 @@ def analytics():
 
 
 # ------------------------------------------------------------------ #
+#  Balances endpoint                                                   #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/balances")
+async def balances():
+    """Estimated spend on Anthropic, Railway disk usage, billing cycle info."""
+    import datetime
+
+    now = time.time()
+    today = datetime.date.today()
+
+    # Billing cycle: 1st of this month → 1st of next month
+    cycle_start = datetime.date(today.year, today.month, 1)
+    if today.month == 12:
+        cycle_end = datetime.date(today.year + 1, 1, 1)
+    else:
+        cycle_end = datetime.date(today.year, today.month + 1, 1)
+    days_in_cycle = (cycle_end - cycle_start).days
+    days_elapsed = max((today - cycle_start).days, 0)
+    days_remaining = max((cycle_end - today).days, 0)
+    cycle_pct = round(days_elapsed / days_in_cycle * 100, 1) if days_in_cycle else 0
+
+    # --- Anthropic cost estimate ---
+    # Each meta-agent run uses Claude Opus 4.6 with extended thinking.
+    # ~2500 input tokens  @ $15/MTok = $0.0375
+    # ~10000 output+think @ $75/MTok = $0.75
+    # ≈ $0.79/run (conservative estimate)
+    meta_files = sorted(glob.glob("logs/meta_agent_*.json"))
+    meta_run_count = len(meta_files)
+    COST_PER_RUN = 0.79
+    estimated_anthropic_cost = round(meta_run_count * COST_PER_RUN, 2)
+    daily_runs = meta_run_count / max(days_elapsed, 1)
+    projected_monthly = round(daily_runs * days_in_cycle * COST_PER_RUN, 2)
+    try:
+        anthropic_budget: float | None = float(os.getenv("ANTHROPIC_MONTHLY_BUDGET") or 0) or None
+    except Exception:
+        anthropic_budget = None
+
+    # --- Railway disk usage (local filesystem) ---
+    log_files = (
+        glob.glob("logs/*.log")
+        + glob.glob("logs/meta_agent_*.json")
+        + glob.glob("logs/*.json")
+    )
+    total_bytes = sum(
+        os.path.getsize(f) for f in log_files if os.path.exists(f)
+    )
+    disk_used_mb = round(total_bytes / (1024 * 1024), 2)
+    try:
+        vol_limit_mb = int(os.getenv("RAILWAY_VOLUME_LIMIT_MB") or 512)
+    except Exception:
+        vol_limit_mb = 512
+    disk_pct = round(disk_used_mb / vol_limit_mb * 100, 1) if vol_limit_mb else 0
+
+    # --- Railway billing (optional — requires RAILWAY_TOKEN env var) ---
+    railway_monthly_cost: float | None = None
+    railway_token = os.getenv("RAILWAY_TOKEN")
+    if railway_token:
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=5.0) as _rc:
+                resp = await _rc.post(
+                    "https://backboard.railway.app/graphql/v2",
+                    headers={
+                        "Authorization": f"Bearer {railway_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"query": "{ me { usage { estimatedMonthlyCost } } }"},
+                )
+                if resp.status_code == 200:
+                    gql = resp.json()
+                    railway_monthly_cost = (
+                        gql.get("data", {})
+                        .get("me", {})
+                        .get("usage", {})
+                        .get("estimatedMonthlyCost")
+                    )
+        except Exception:
+            pass
+
+    try:
+        railway_base = float(os.getenv("RAILWAY_PLAN_COST") or 5)
+    except Exception:
+        railway_base = 5.0
+    try:
+        railway_budget: float | None = float(os.getenv("RAILWAY_MONTHLY_BUDGET") or 0) or None
+    except Exception:
+        railway_budget = None
+
+    # --- Bot summary ---
+    uptime_hours = round((now - _bot_start_time) / 3600, 2) if _bot_start_time else 0
+    bot_trades = len(_portfolio.trades) if _portfolio else 0
+    bot_pnl = round(_portfolio.total_pnl(), 2) if _portfolio else 0.0
+
+    return {
+        "billing_cycle": {
+            "start": str(cycle_start),
+            "end": str(cycle_end),
+            "days_elapsed": days_elapsed,
+            "days_remaining": days_remaining,
+            "days_total": days_in_cycle,
+            "cycle_pct": cycle_pct,
+        },
+        "anthropic": {
+            "meta_agent_runs": meta_run_count,
+            "cost_per_run_usd": COST_PER_RUN,
+            "estimated_cost_usd": estimated_anthropic_cost,
+            "projected_monthly_usd": projected_monthly,
+            "monthly_budget_usd": anthropic_budget,
+            "key_configured": bool(os.getenv("ANTHROPIC_API_KEY")),
+            "model": "claude-opus-4-6",
+        },
+        "railway": {
+            "disk_used_mb": disk_used_mb,
+            "disk_limit_mb": vol_limit_mb,
+            "disk_pct": disk_pct,
+            "estimated_monthly_cost_usd": railway_monthly_cost,
+            "plan_base_cost_usd": railway_base,
+            "monthly_budget_usd": railway_budget,
+            "token_configured": bool(railway_token),
+            "days_remaining_in_cycle": days_remaining,
+        },
+        "bot": {
+            "uptime_hours": uptime_hours,
+            "trades_executed": bot_trades,
+            "total_pnl_usd": bot_pnl,
+            "paper_trading": True,
+        },
+    }
+
+
+# ------------------------------------------------------------------ #
 #  Meta-agent API endpoints                                            #
 # ------------------------------------------------------------------ #
 
@@ -657,6 +789,28 @@ tr:hover td{background:#181818}
 .analytics-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
 .thinking-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:14px}
 .thinking-card h3{font-size:.72rem;color:#7986cb;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
+
+/* Balances tab */
+.bal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:18px}
+.bal-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:18px}
+.bal-card.anthropic{border-top:3px solid #ce93d8}
+.bal-card.railway{border-top:3px solid #4dd0e1}
+.bal-card.bot{border-top:3px solid #00e676}
+.bal-card h3{font-size:.8rem;font-weight:700;margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}
+.bal-card.anthropic h3{color:#ce93d8}
+.bal-card.railway h3{color:#4dd0e1}
+.bal-card.bot h3{color:#00e676}
+.bal-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a1a;font-size:.78rem}
+.bal-row:last-child{border-bottom:none}
+.bal-lbl{color:#555}
+.bal-val{font-weight:600;color:#ccc}
+.budget-bar{height:6px;border-radius:3px;background:#1a1a1a;overflow:hidden;margin-top:10px}
+.budget-fill{height:100%;border-radius:3px;transition:width .5s}
+.budget-label{font-size:.65rem;color:#555;margin-top:4px;display:flex;justify-content:space-between}
+.cycle-bar{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:16px;margin-bottom:18px}
+.cycle-bar h3{font-size:.72rem;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.cycle-progress{height:10px;border-radius:5px;background:#1a1a1a;overflow:hidden;margin-bottom:8px}
+.cycle-fill{height:100%;border-radius:5px;background:linear-gradient(90deg,#00e5ff,#7986cb);transition:width .5s}
 </style>
 </head>
 <body>
@@ -675,6 +829,7 @@ tr:hover td{background:#181818}
   <div class="tab" onclick="showTab('trades')">Trades</div>
   <div class="tab" onclick="showTab('status')">Status</div>
   <div class="tab" onclick="showTab('analytics')">Analytics</div>
+  <div class="tab" onclick="showTab('balances')">Balances</div>
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
 </div>
 
@@ -831,6 +986,75 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
+<!-- BALANCES TAB -->
+<div class="page" id="tab-balances">
+
+  <!-- Billing cycle bar -->
+  <div class="cycle-bar">
+    <h3>Billing Cycle</h3>
+    <div id="cycle-dates" style="display:flex;justify-content:space-between;font-size:.72rem;color:#555;margin-bottom:8px">
+      <span id="cycle-start">--</span><span id="cycle-days-left" style="color:#aaa">-- days remaining</span><span id="cycle-end">--</span>
+    </div>
+    <div class="cycle-progress"><div class="cycle-fill" id="cycle-fill" style="width:0%"></div></div>
+    <div style="font-size:.65rem;color:#444;margin-top:4px;text-align:center"><span id="cycle-pct">0</span>% of billing cycle elapsed</div>
+  </div>
+
+  <!-- Service cards -->
+  <div class="bal-grid">
+
+    <!-- Anthropic -->
+    <div class="bal-card anthropic">
+      <h3>Anthropic API</h3>
+      <div class="bal-row"><span class="bal-lbl">Model</span><span class="bal-val" id="bal-ant-model">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">API Key</span><span class="bal-val" id="bal-ant-key">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Meta-Agent Runs (this deploy)</span><span class="bal-val" id="bal-ant-runs">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Est. Cost / Run</span><span class="bal-val" id="bal-ant-cpr">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Est. Spend (this deploy)</span><span class="bal-val" id="bal-ant-cost" style="color:#ce93d8">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Projected Monthly</span><span class="bal-val" id="bal-ant-proj">--</span></div>
+      <div class="bal-row" id="bal-ant-budget-row"><span class="bal-lbl">Monthly Budget</span><span class="bal-val" id="bal-ant-budget">Not set</span></div>
+      <div class="budget-bar"><div class="budget-fill" id="bal-ant-bar" style="width:0%;background:#ce93d8"></div></div>
+      <div class="budget-label"><span id="bal-ant-bar-lbl">Set ANTHROPIC_MONTHLY_BUDGET env var to track</span><span id="bal-ant-bar-pct"></span></div>
+    </div>
+
+    <!-- Railway -->
+    <div class="bal-card railway">
+      <h3>Railway</h3>
+      <div class="bal-row"><span class="bal-lbl">API Token</span><span class="bal-val" id="bal-rail-token">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Disk Used</span><span class="bal-val" id="bal-rail-disk">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Disk Limit</span><span class="bal-val" id="bal-rail-limit">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Est. Monthly Cost</span><span class="bal-val" id="bal-rail-cost" style="color:#4dd0e1">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Plan Base</span><span class="bal-val" id="bal-rail-base">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Days Left in Cycle</span><span class="bal-val" id="bal-rail-days">--</span></div>
+      <div class="budget-bar"><div class="budget-fill" id="bal-rail-bar" style="width:0%;background:#4dd0e1"></div></div>
+      <div class="budget-label"><span>Disk usage</span><span id="bal-rail-bar-pct"></span></div>
+      <div style="font-size:.65rem;color:#444;margin-top:8px">Set <code style="color:#555">RAILWAY_TOKEN</code> env var for live billing data</div>
+    </div>
+
+    <!-- Bot Stats -->
+    <div class="bal-card bot">
+      <h3>Bot Runtime</h3>
+      <div class="bal-row"><span class="bal-lbl">Mode</span><span class="bal-val" id="bal-bot-mode">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Uptime This Deploy</span><span class="bal-val" id="bal-bot-uptime">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Trades Executed</span><span class="bal-val" id="bal-bot-trades">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Portfolio P&amp;L</span><span class="bal-val" id="bal-bot-pnl">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Cycles Left (billing)</span><span class="bal-val" id="bal-bot-cycles">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Meta-Runs Left (billing)</span><span class="bal-val" id="bal-bot-metaruns">--</span></div>
+    </div>
+
+  </div>
+
+  <!-- Cost breakdown note -->
+  <div class="section">
+    <h3>Cost Breakdown Notes</h3>
+    <div style="font-size:.75rem;color:#555;line-height:1.8">
+      <div><span style="color:#ce93d8">Anthropic:</span> Claude Opus 4.6 with extended thinking — ~$0.79/meta-agent run (est. 2,500 input tokens + 10,000 output/thinking). Runs every 30 min when active.</div>
+      <div style="margin-top:6px"><span style="color:#4dd0e1">Railway:</span> Hobby plan $5/mo base + $0.000463/GB·h RAM + $0.000231/vCPU·h + $0.25/GB egress. Add <code style="color:#666">RAILWAY_TOKEN</code> env var for live cost from Railway's API.</div>
+      <div style="margin-top:6px"><span style="color:#00e676">Volume:</span> Railway volume storage is $0.25/GB·mo. Set <code style="color:#666">RAILWAY_VOLUME_LIMIT_MB</code> env var if your volume size differs from the 512 MB default shown.</div>
+      <div style="margin-top:6px"><span style="color:#ffd740">Budgets:</span> Set <code style="color:#666">ANTHROPIC_MONTHLY_BUDGET</code> and <code style="color:#666">RAILWAY_MONTHLY_BUDGET</code> env vars to show budget progress bars.</div>
+    </div>
+  </div>
+</div>
+
 <!-- META-AGENT TAB -->
 <div class="page" id="tab-meta">
   <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
@@ -862,7 +1086,7 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-const allTabs=['overview','live','positions','trades','status','analytics','meta'];
+const allTabs=['overview','live','positions','trades','status','analytics','balances','meta'];
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -880,6 +1104,10 @@ function showTab(name){
 
   if(name==='analytics'){
     fetchAnalytics();
+  }
+
+  if(name==='balances'){
+    fetchBalances();
   }
 }
 
@@ -1344,6 +1572,95 @@ function renderAnalytics(d){
       $('param-timeline').innerHTML='<div class="no-data">No parameter changes applied yet</div>';
     }
   }).catch(()=>{});
+}
+
+// ------------------------------------------------------------------ //
+//  Balances tab                                                        //
+// ------------------------------------------------------------------ //
+async function fetchBalances(){
+  try{
+    const d=await fetch('/api/balances').then(r=>r.json());
+    renderBalances(d);
+  }catch(e){
+    console.error('Balances fetch failed',e);
+  }
+}
+
+function fmtUsd(n){
+  if(n==null||n===undefined)return'--';
+  return'$'+Number(n).toFixed(2);
+}
+
+function renderBalances(d){
+  const cy=d.billing_cycle||{};
+  const ant=d.anthropic||{};
+  const rail=d.railway||{};
+  const bot=d.bot||{};
+
+  // Billing cycle bar
+  const pct=cy.cycle_pct||0;
+  $('cycle-fill').style.width=pct+'%';
+  $('cycle-pct').textContent=pct.toFixed(1);
+  $('cycle-start').textContent=cy.start||'--';
+  $('cycle-end').textContent=cy.end||'--';
+  $('cycle-days-left').textContent=(cy.days_remaining||0)+' days remaining';
+
+  // Anthropic
+  $('bal-ant-model').textContent=ant.model||'--';
+  $('bal-ant-key').innerHTML=ant.key_configured
+    ?'<span style="color:#00e676">Configured</span>'
+    :'<span style="color:#ff5252">Not set</span>';
+  $('bal-ant-runs').textContent=ant.meta_agent_runs||0;
+  $('bal-ant-cpr').textContent=fmtUsd(ant.cost_per_run_usd);
+  $('bal-ant-cost').textContent=fmtUsd(ant.estimated_cost_usd);
+  $('bal-ant-proj').textContent=fmtUsd(ant.projected_monthly_usd);
+  if(ant.monthly_budget_usd){
+    $('bal-ant-budget').textContent=fmtUsd(ant.monthly_budget_usd);
+    const usedPct=Math.min((ant.estimated_cost_usd/ant.monthly_budget_usd)*100,100);
+    $('bal-ant-bar').style.width=usedPct+'%';
+    $('bal-ant-bar').style.background=usedPct>80?'#ff5252':usedPct>60?'#ffd740':'#ce93d8';
+    $('bal-ant-bar-lbl').textContent=fmtUsd(ant.estimated_cost_usd)+' used of '+fmtUsd(ant.monthly_budget_usd);
+    $('bal-ant-bar-pct').textContent=usedPct.toFixed(1)+'%';
+  }else{
+    $('bal-ant-bar').style.width='0%';
+    const projPct=ant.projected_monthly_usd||0;
+    $('bal-ant-bar-lbl').textContent='Projected this month: '+fmtUsd(projPct);
+  }
+
+  // Railway
+  $('bal-rail-token').innerHTML=rail.token_configured
+    ?'<span style="color:#00e676">Configured</span>'
+    :'<span style="color:#ffd740">Not set (add RAILWAY_TOKEN)</span>';
+  const diskMb=rail.disk_used_mb||0;
+  const diskLim=rail.disk_limit_mb||512;
+  $('bal-rail-disk').textContent=diskMb.toFixed(2)+' MB';
+  $('bal-rail-limit').textContent=diskLim+' MB';
+  const railCost=rail.estimated_monthly_cost_usd!=null
+    ?fmtUsd(rail.estimated_monthly_cost_usd)+' (live)'
+    :'~'+fmtUsd(rail.plan_base_cost_usd)+' base (no token)';
+  $('bal-rail-cost').textContent=railCost;
+  $('bal-rail-base').textContent=fmtUsd(rail.plan_base_cost_usd)+'/mo';
+  $('bal-rail-days').textContent=(rail.days_remaining_in_cycle||0)+' days';
+  const diskPct=rail.disk_pct||0;
+  $('bal-rail-bar').style.width=Math.min(diskPct,100)+'%';
+  $('bal-rail-bar').style.background=diskPct>80?'#ff5252':diskPct>60?'#ffd740':'#4dd0e1';
+  $('bal-rail-bar-pct').textContent=diskPct.toFixed(1)+'%';
+
+  // Bot
+  $('bal-bot-mode').innerHTML=bot.paper_trading
+    ?'<span style="color:#00e5ff">PAPER</span>'
+    :'<span style="color:#ff5252">LIVE</span>';
+  const uh=bot.uptime_hours||0;
+  const uptimeStr=uh>=24?Math.floor(uh/24)+'d '+Math.round(uh%24)+'h':uh.toFixed(1)+'h';
+  $('bal-bot-uptime').textContent=uptimeStr;
+  $('bal-bot-trades').textContent=bot.trades_executed||0;
+  const pnl=bot.total_pnl_usd||0;
+  $('bal-bot-pnl').innerHTML='<span style="color:'+(pnl>=0?'#00e676':'#ff5252')+'">'+fmtUsd(pnl)+'</span>';
+  // Cycles left: 30-min meta-agent cadence × days remaining × 48 runs/day
+  const metaRunsPerDay=48;
+  const daysLeft=cy.days_remaining||0;
+  $('bal-bot-cycles').textContent=Math.round(daysLeft*24*2)+' scan cycles';
+  $('bal-bot-metaruns').textContent=Math.round(daysLeft*metaRunsPerDay)+' runs';
 }
 
 async function fetchMeta(){
