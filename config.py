@@ -91,6 +91,7 @@ class StrategyConfig:
 
     # Markets coverage
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))
+    max_days_to_resolution: int = field(default_factory=lambda: _int("MAX_DAYS_TO_RESOLUTION", 30))
 
     # WebSocket orderbook feed
     use_ws_orderbook: bool = field(default_factory=lambda: _bool("USE_WS_ORDERBOOK", True))

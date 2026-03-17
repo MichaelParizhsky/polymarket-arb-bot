@@ -59,6 +59,7 @@ class ArbBot:
 
         # Core components
         self.portfolio = PaperPortfolio(starting_balance=self.config.starting_balance)
+        self.portfolio.load_from_json()  # restore state from previous run if available
         self.risk = RiskManager(config=self.config, portfolio=self.portfolio)
         self.binance = BinanceFeed(reconnect_delay=self.config.binance_ws_reconnect_delay)
 
@@ -239,6 +240,26 @@ class ArbBot:
     async def _build_context(self) -> dict[str, Any]:
         """Fetch all market data needed by strategies."""
         markets = await self.poly.get_markets_cached()
+
+        # Filter to markets resolving within MAX_DAYS_TO_RESOLUTION
+        max_days = self.config.strategies.max_days_to_resolution
+        if max_days > 0:
+            from datetime import datetime, timezone
+            cutoff = datetime.now(timezone.utc).timestamp() + max_days * 86400
+            filtered = []
+            for m in markets:
+                if not m.end_date_iso:
+                    continue  # skip markets with no resolution date
+                try:
+                    end_ts = datetime.fromisoformat(
+                        m.end_date_iso.replace("Z", "+00:00")
+                    ).timestamp()
+                    if end_ts <= cutoff:
+                        filtered.append(m)
+                except ValueError:
+                    continue
+            markets = filtered
+            logger.debug(f"Date filter ({max_days}d): {len(markets)} markets within window")
 
         # Limit to top N markets by volume
         max_markets = self.config.strategies.max_markets
