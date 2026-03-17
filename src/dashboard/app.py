@@ -178,6 +178,7 @@ def meta_history():
                 "file": os.path.basename(f),
                 "timestamp": data.get("timestamp", 0),
                 "proposed_changes": data.get("proposed_changes", {}),
+                "applied_changes": data.get("applied_changes", []),
                 "analysis_preview": data.get("analysis", "")[:300],
                 "portfolio_pnl": data.get("portfolio_snapshot", {}).get("portfolio", {}).get("total_pnl_usdc", 0),
             })
@@ -631,7 +632,7 @@ async function fetchMeta(){
       ${hist.map(h=>`<tr>
         <td class="ts-small">${tsDate(h.timestamp)}</td>
         <td class="${h.portfolio_pnl>=0?'buy':'sell'}">${fmtPnl(h.portfolio_pnl)}</td>
-        <td>${Object.keys(h.proposed_changes||{}).length}</td>
+        <td>${Object.keys(h.proposed_changes||{}).length} suggested / <span class="win">${(h.applied_changes||[]).length} applied</span></td>
         <td style="color:#555">${h.analysis_preview}</td>
       </tr>`).join('')}
     </table>`;

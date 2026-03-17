@@ -179,6 +179,9 @@ class ArbBot:
                 except NotImplementedError:
                     pass  # Windows doesn't support add_signal_handler
 
+            # Apply any previously auto-tuned config
+            self._load_saved_config()
+
             # Start meta-agent background task
             asyncio.create_task(self._meta_agent_loop())
 
@@ -436,21 +439,28 @@ class ArbBot:
                     continue
 
                 analysis_data = snapshot.to_analysis_dict()
-                current_env = {k: os.getenv(k, "") for k in [
-                    "MIN_EDGE_THRESHOLD", "MAX_POSITION_SIZE", "MAX_TOTAL_EXPOSURE",
-                    "MAX_SLIPPAGE", "MM_SPREAD_BPS", "MM_ORDER_SIZE", "MM_MAX_INVENTORY",
-                    "STRATEGY_REBALANCING", "STRATEGY_COMBINATORIAL",
-                    "STRATEGY_LATENCY_ARB", "STRATEGY_MARKET_MAKING",
-                ]}
+                current_env = {k: str(getattr(
+                    self.config.risk if v[0] == "risk" else self.config.strategies,
+                    v[1]
+                )) for k, v in self._CONFIG_MAP.items()}
 
                 logger.info("Meta-agent: calling Claude for performance analysis...")
                 client = anthropic.AsyncAnthropic(api_key=api_key)
 
                 system = (
                     "You are an expert quantitative analyst for prediction market arbitrage. "
-                    "Analyze trading bot performance and suggest conservative parameter improvements. "
-                    "Return a brief analysis (2-3 paragraphs) then a JSON block with ONLY keys to change, "
-                    "wrapped in ```json ... ```. Be conservative — small adjustments only."
+                    "Analyze trading bot performance and suggest parameter improvements. "
+                    "Your suggestions will be AUTOMATICALLY APPLIED to the live bot — be thoughtful but decisive. "
+                    "Return a brief analysis (2-3 paragraphs) then a JSON block with ONLY the keys you want to change, "
+                    "wrapped in ```json ... ```. "
+                    "Available parameters: MIN_EDGE_THRESHOLD, MAX_POSITION_SIZE, MAX_TOTAL_EXPOSURE, "
+                    "MIN_TRADE_INTERVAL, TOKEN_COOLDOWN, MM_SPREAD_BPS, MM_ORDER_SIZE, MM_MAX_INVENTORY, "
+                    "MAX_DAYS_TO_RESOLUTION, STRATEGY_REBALANCING, STRATEGY_COMBINATORIAL, "
+                    "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, STRATEGY_EVENT_DRIVEN. "
+                    "If performance is good, make no changes (return empty JSON {}). "
+                    "If a strategy has negative PnL with many trades, disable it. "
+                    "If win rate is below 40%, raise MIN_EDGE_THRESHOLD. "
+                    "If trades are too frequent, raise MIN_TRADE_INTERVAL."
                 )
                 user_msg = (
                     f"Analyze this Polymarket arb bot performance:\n\n"
@@ -478,10 +488,32 @@ class ArbBot:
                     except json.JSONDecodeError:
                         pass
 
+                # Auto-apply proposed changes to live config
+                applied = []
+                if proposed:
+                    applied = self._apply_config_overrides(proposed)
+                    if applied:
+                        # Persist to disk so changes survive restarts
+                        config_path = "logs/meta_agent_config.json"
+                        try:
+                            existing = {}
+                            if os.path.exists(config_path):
+                                with open(config_path) as f:
+                                    existing = json.load(f)
+                            existing.update(proposed)
+                            with open(config_path, "w") as f:
+                                json.dump(existing, f, indent=2)
+                        except Exception as exc:
+                            logger.warning(f"Meta-agent: could not persist config: {exc}")
+                        logger.info(f"Meta-agent: AUTO-APPLIED {len(applied)} change(s): {applied}")
+                    else:
+                        logger.info("Meta-agent: no config changes needed")
+
                 log_entry = {
                     "timestamp": time.time(),
                     "analysis": text,
                     "proposed_changes": proposed,
+                    "applied_changes": applied,
                     "current_values": current_env,
                     "portfolio_snapshot": analysis_data,
                 }
@@ -490,12 +522,85 @@ class ArbBot:
                 with open(log_path, "w") as f:
                     json.dump(log_entry, f, indent=2)
 
-                logger.info(f"Meta-agent: analysis complete — {len(proposed)} suggestion(s) saved to dashboard")
+                logger.info(f"Meta-agent: analysis complete — {len(proposed)} suggestion(s), {len(applied)} applied")
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.warning(f"Meta-agent error: {exc}")
+
+    # ------------------------------------------------------------------ #
+    #  Live config tuning                                                  #
+    # ------------------------------------------------------------------ #
+
+    _CONFIG_MAP: dict[str, tuple[str, str, type]] = {
+        # env_key: (config_section, attribute, type)
+        "MIN_EDGE_THRESHOLD":      ("risk",       "min_edge_threshold",      float),
+        "MAX_POSITION_SIZE":       ("risk",       "max_position_size",        float),
+        "MAX_TOTAL_EXPOSURE":      ("risk",       "max_total_exposure",       float),
+        "MAX_SLIPPAGE":            ("risk",       "max_slippage",             float),
+        "MIN_TRADE_INTERVAL":      ("risk",       "min_trade_interval",       int),
+        "TOKEN_COOLDOWN":          ("risk",       "token_cooldown",           int),
+        "MM_SPREAD_BPS":           ("strategies", "mm_spread_bps",            int),
+        "MM_ORDER_SIZE":           ("strategies", "mm_order_size",            float),
+        "MM_MAX_INVENTORY":        ("strategies", "mm_max_inventory",         float),
+        "MAX_DAYS_TO_RESOLUTION":  ("strategies", "max_days_to_resolution",   int),
+        "MAX_MARKETS":             ("strategies", "max_markets",              int),
+        "STRATEGY_REBALANCING":    ("strategies", "rebalancing_enabled",      bool),
+        "STRATEGY_COMBINATORIAL":  ("strategies", "combinatorial_enabled",    bool),
+        "STRATEGY_LATENCY_ARB":    ("strategies", "latency_arb_enabled",      bool),
+        "STRATEGY_MARKET_MAKING":  ("strategies", "market_making_enabled",    bool),
+        "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),
+        "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),
+    }
+
+    def _apply_config_overrides(self, overrides: dict) -> list[str]:
+        """Apply a dict of {ENV_KEY: value} to the live config. Returns list of applied keys."""
+        import json as _json
+        applied = []
+        strategy_flags_changed = False
+
+        for key, val in overrides.items():
+            mapping = self._CONFIG_MAP.get(key)
+            if not mapping:
+                continue
+            section, attr, typ = mapping
+            cfg_obj = self.config.risk if section == "risk" else self.config.strategies
+            try:
+                if typ == bool:
+                    coerced = str(val).lower() in ("true", "1", "yes")
+                else:
+                    coerced = typ(val)
+                old = getattr(cfg_obj, attr)
+                if old != coerced:
+                    setattr(cfg_obj, attr, coerced)
+                    logger.info(f"[Config] {key}: {old} → {coerced}")
+                    applied.append(key)
+                    if section == "strategies" and attr.endswith("_enabled"):
+                        strategy_flags_changed = True
+            except (ValueError, TypeError) as exc:
+                logger.warning(f"[Config] Could not apply {key}={val}: {exc}")
+
+        if strategy_flags_changed:
+            self._build_strategies()
+            logger.info(f"[Config] Strategy list rebuilt: {[type(s).__name__ for s in self._strategies]}")
+
+        return applied
+
+    def _load_saved_config(self) -> None:
+        """Load and apply any previously auto-tuned config from disk."""
+        import json as _json
+        path = "logs/meta_agent_config.json"
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                saved = _json.load(f)
+            applied = self._apply_config_overrides(saved)
+            if applied:
+                logger.info(f"[Config] Restored {len(applied)} auto-tuned parameter(s) from disk: {applied}")
+        except Exception as exc:
+            logger.warning(f"[Config] Could not load saved config: {exc}")
 
     def _handle_shutdown(self) -> None:
         logger.info("Shutdown signal received")
