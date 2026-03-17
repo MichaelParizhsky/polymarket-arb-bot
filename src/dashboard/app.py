@@ -544,31 +544,13 @@ async def balances():
     # --- Railway billing (optional — requires RAILWAY_TOKEN env var) ---
     railway_token = os.getenv("RAILWAY_TOKEN")
     railway_monthly_cost: float | None = None
-    railway_credit_remaining: float | None = None
+    railway_credit_remaining: float | None = None  # not exposed by Railway API
     railway_period_end: str | None = None
     railway_api_error: str | None = None
 
     if railway_token:
         try:
             import httpx as _httpx
-            # Fetch estimated cost + subscription period end + credit balance
-            gql_query = """
-            {
-              me {
-                usage { estimatedMonthlyCost }
-                creditBalance
-                subscriptions {
-                  edges {
-                    node {
-                      status
-                      currentPeriodEnd
-                      plan { name }
-                    }
-                  }
-                }
-              }
-            }
-            """
             async with _httpx.AsyncClient(timeout=8.0) as _rc:
                 resp = await _rc.post(
                     "https://backboard.railway.app/graphql/v2",
@@ -576,19 +558,15 @@ async def balances():
                         "Authorization": f"Bearer {railway_token}",
                         "Content-Type": "application/json",
                     },
-                    json={"query": gql_query},
+                    json={"query": "{ me { usage { estimatedMonthlyCost currentPeriodEnd } } }"},
                 )
                 if resp.status_code == 200:
                     gql = resp.json()
-                    me = gql.get("data", {}).get("me", {}) or {}
-                    railway_monthly_cost = me.get("usage", {}).get("estimatedMonthlyCost")
-                    railway_credit_remaining = me.get("creditBalance")
-                    subs = me.get("subscriptions", {}).get("edges", [])
-                    if subs:
-                        node = subs[0].get("node", {})
-                        railway_period_end = node.get("currentPeriodEnd")
+                    usage = gql.get("data", {}).get("me", {}).get("usage", {}) or {}
+                    railway_monthly_cost = usage.get("estimatedMonthlyCost")
+                    railway_period_end = usage.get("currentPeriodEnd")
                 else:
-                    railway_api_error = f"HTTP {resp.status_code}"
+                    railway_api_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
         except Exception as exc:
             railway_api_error = str(exc)[:80]
 
@@ -1069,7 +1047,7 @@ tr:hover td{background:#181818}
       </div>
       <div id="bal-rail-api-error" style="display:none;background:#1a0000;border:1px solid #3a0000;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:.68rem;color:#ff5252"></div>
       <div class="bal-row"><span class="bal-lbl">API Token</span><span class="bal-val" id="bal-rail-token">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Credit Remaining</span><span class="bal-val" id="bal-rail-credit" style="color:#4dd0e1">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Credit Remaining</span><span class="bal-val" id="bal-rail-credit" style="color:#555">Check railway.app</span></div>
       <div class="bal-row"><span class="bal-lbl">Est. Spend This Month</span><span class="bal-val" id="bal-rail-cost">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Days Left in Cycle</span><span class="bal-val" id="bal-rail-days">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Period End</span><span class="bal-val" id="bal-rail-period">--</span></div>
@@ -1690,15 +1668,8 @@ function renderBalances(d){
     ?'<span style="color:#00e676">Configured</span>'
     :'<span style="color:#ffd740">Not set — see below</span>';
 
-  // Credit remaining (the "$4.20 left" figure from Railway dashboard)
-  const credit=rail.credit_remaining_usd;
-  if(credit!=null){
-    $('bal-rail-credit').textContent=fmtUsd(credit);
-    $('bal-rail-credit').style.color=credit<2?'#ff5252':credit<5?'#ffd740':'#4dd0e1';
-  }else{
-    $('bal-rail-credit').textContent=hasToken?'--':'Set RAILWAY_TOKEN to see';
-    $('bal-rail-credit').style.color='#555';
-  }
+  // Credit remaining — Railway API doesn't expose this; link user to dashboard
+  $('bal-rail-credit').innerHTML='<a href="https://railway.app/account/billing" target="_blank" style="color:#4dd0e1;text-decoration:none">View on railway.app →</a>';
 
   // Monthly spend
   const railCost=rail.estimated_monthly_cost_usd!=null
