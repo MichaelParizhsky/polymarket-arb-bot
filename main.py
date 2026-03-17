@@ -568,12 +568,18 @@ class ArbBot:
                     "proposed_changes": proposed,
                     "applied_changes": applied,
                     "current_values": current_env,
-                    "portfolio_snapshot": analysis_data,
+                    # Store only the health summary, not full snapshot (saves disk)
+                    "health": analysis_data.get("health", {}),
+                    "strategy_roi_pct": analysis_data.get("strategy_roi_pct", {}),
+                    "portfolio_summary": analysis_data.get("portfolio", {}),
                 }
                 os.makedirs("logs", exist_ok=True)
                 log_path = f"logs/meta_agent_{int(time.time())}.json"
                 with open(log_path, "w") as f:
-                    json.dump(log_entry, f, indent=2)
+                    json.dump(log_entry, f, separators=(",", ":"))
+
+                # Prune old meta-agent logs — keep only the last 48 (24h at 30-min intervals)
+                self._prune_meta_agent_logs(keep=48)
 
                 logger.info(f"Meta-agent: analysis complete — {len(proposed)} suggestion(s), {len(applied)} applied")
 
@@ -654,6 +660,16 @@ class ArbBot:
                 logger.info(f"[Config] Restored {len(applied)} auto-tuned parameter(s) from disk: {applied}")
         except Exception as exc:
             logger.warning(f"[Config] Could not load saved config: {exc}")
+
+    def _prune_meta_agent_logs(self, keep: int = 48) -> None:
+        """Delete oldest meta_agent_*.json files, keeping only the most recent `keep`."""
+        import glob as _glob
+        files = sorted(_glob.glob("logs/meta_agent_[0-9]*.json"))
+        for old in files[:-keep]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
 
     def _handle_shutdown(self) -> None:
         logger.info("Shutdown signal received")

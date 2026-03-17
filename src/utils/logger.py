@@ -30,10 +30,11 @@ def setup_logger(level: str = "INFO") -> None:
         colorize=True,
     )
     logger.add(
-        "logs/bot_{time:YYYY-MM-DD}.log",
-        rotation="1 day",
-        retention="7 days",
-        level="DEBUG",
+        "logs/bot.log",
+        rotation="20 MB",       # hard size cap — prevents volume overflow
+        retention=3,            # keep at most 3 rotated files (~60 MB total)
+        compression="zip",      # compress rotated files to save space
+        level="INFO",           # INFO only — DEBUG floods disk at 500-market scan rate
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{line} - {message}",
     )
     logger.add(_buffer_sink, level=level, format="{message}")

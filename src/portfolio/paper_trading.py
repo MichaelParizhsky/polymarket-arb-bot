@@ -267,38 +267,55 @@ class PaperPortfolio:
         return "\n".join(lines)
 
     def save_to_json(self, path: str = "logs/portfolio_state.json") -> None:
-        """Persist trade history and stats for the meta-agent to read."""
+        """Persist trade history and stats for the meta-agent to read.
+
+        Only the most recent trades and closed positions are saved to keep
+        the file size bounded. The meta-agent only needs recent data for
+        rolling strategy analysis; older history doesn't improve decisions.
+        """
         import json, os
         os.makedirs(os.path.dirname(path), exist_ok=True)
+
+        # Rolling windows — enough for meaningful analysis, bounded disk use
+        MAX_TRADES = 500
+        MAX_CLOSED = 200
+        MAX_PNL_HISTORY = 200
+
+        recent_trades = self.trades[-MAX_TRADES:]
+        recent_closed = self.closed_positions[-MAX_CLOSED:]
+        recent_pnl = self.pnl_history[-MAX_PNL_HISTORY:]
+
         data = {
             "snapshot_time": time.time(),
             "starting_balance": self.starting_balance,
             "usdc_balance": self.usdc_balance,
             "total_value": self.total_value(),
             "total_pnl": self.total_pnl(),
+            "total_trades_all_time": len(self.trades),
             "fees_paid": self.total_fees_paid(),
             "open_positions": len(self.positions),
             "strategy_pnl": self.strategy_pnl(),
             "realized_closed_pnl": self.realized_closed_pnl(),
             "win_rate": self.win_rate(),
-            "closed_positions": self.closed_positions,
+            "closed_positions": recent_closed,
+            "pnl_history": recent_pnl,
             "trades": [
                 {
                     "trade_id": t.trade_id,
                     "strategy": t.strategy,
                     "side": t.side,
-                    "contracts": t.contracts,
-                    "price": t.price,
-                    "usdc_amount": t.usdc_amount,
-                    "fee": t.fee,
+                    "contracts": round(t.contracts, 6),
+                    "price": round(t.price, 6),
+                    "usdc_amount": round(t.usdc_amount, 4),
+                    "fee": round(t.fee, 6),
                     "timestamp": t.timestamp,
                     "notes": t.notes,
                 }
-                for t in self.trades
+                for t in recent_trades
             ],
         }
         with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, separators=(",", ":"))  # compact JSON, no indent
 
     def load_from_json(self, path: str = "logs/portfolio_state.json") -> bool:
         """Restore portfolio state from a previous run. Returns True if loaded."""
@@ -366,5 +383,5 @@ class PaperPortfolio:
         total_exposure.set(self.exposure())
         # Record time-series point (max 2000 points)
         self.pnl_history.append({"t": time.time(), "value": round(self.total_value(), 2), "pnl": round(self.total_pnl(), 2)})
-        if len(self.pnl_history) > 2000:
-            self.pnl_history = self.pnl_history[-2000:]
+        if len(self.pnl_history) > 500:
+            self.pnl_history = self.pnl_history[-500:]
