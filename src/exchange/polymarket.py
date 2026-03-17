@@ -6,6 +6,7 @@ Paper trading mode skips actual order placement.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -137,12 +138,10 @@ class PolymarketClient:
                 # API uses clobTokenIds + outcomes arrays
                 token_ids = raw.get("clobTokenIds") or []
                 if isinstance(token_ids, str):
-                    import json as _json
-                    token_ids = _json.loads(token_ids)
+                    token_ids = json.loads(token_ids)
                 outcomes = raw.get("outcomes") or ["Yes", "No"]
                 if isinstance(outcomes, str):
-                    import json as _json
-                    outcomes = _json.loads(outcomes)
+                    outcomes = json.loads(outcomes)
 
                 tokens = [
                     Token(token_id=str(tid), outcome=str(out))

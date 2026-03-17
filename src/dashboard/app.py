@@ -631,6 +631,46 @@ def meta_latest():
 
 
 # ------------------------------------------------------------------ #
+#  Code Review API endpoints                                           #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/code_review/latest")
+def code_review_latest():
+    files = sorted(glob.glob("logs/code_review_*.json"), reverse=True)
+    if not files:
+        return {"found": False}
+    try:
+        with open(files[0]) as f:
+            data = json.load(f)
+        return {"found": True, **data}
+    except Exception:
+        return {"found": False}
+
+
+@app.get("/api/code_review/list")
+def code_review_list():
+    files = sorted(glob.glob("logs/code_review_*.json"), reverse=True)[:5]
+    results = []
+    for fp in files:
+        try:
+            with open(fp) as f:
+                data = json.load(f)
+            results.append({
+                "date": data.get("date", ""),
+                "timestamp": data.get("timestamp", 0),
+                "grade": data.get("grade", "?"),
+                "health_score": data.get("health_score"),
+                "total_findings": data.get("total_findings", 0),
+                "high_findings": data.get("high_findings", 0),
+                "medium_findings": data.get("medium_findings", 0),
+                "summary": data.get("summary", "")[:200],
+            })
+        except Exception:
+            pass
+    return results
+
+
+# ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
 
@@ -780,6 +820,26 @@ tr:hover td{background:#181818}
 .cycle-fill{height:100%;border-radius:5px;background:linear-gradient(90deg,#00e5ff,#7986cb);transition:width .5s}
 .refill-link{display:block;margin-top:12px;text-align:center;font-size:.72rem;font-weight:600;padding:7px;border-radius:5px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;text-decoration:none;transition:all .2s}
 .refill-link:hover{background:#222;color:#ccc;border-color:#444}
+
+/* Code Review tab */
+.cr-finding{background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:12px;margin-bottom:8px;border-left:3px solid #333}
+.cr-finding.high{border-left-color:#ff5252}
+.cr-finding.medium{border-left-color:#ffd740}
+.cr-finding.low{border-left-color:#00e5ff}
+.cr-finding.info{border-left-color:#555}
+.cr-finding-header{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.cr-sev{font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase}
+.cr-sev.high{background:#3d0000;color:#ff5252}
+.cr-sev.medium{background:#3d3000;color:#ffd740}
+.cr-sev.low{background:#001a3d;color:#00e5ff}
+.cr-sev.info{background:#1a1a1a;color:#666}
+.cr-cat{font-size:.65rem;color:#555;font-style:italic}
+.cr-file{font-size:.65rem;color:#7986cb;font-family:monospace}
+.cr-title{font-size:.82rem;font-weight:600;color:#ddd}
+.cr-desc{font-size:.75rem;color:#888;margin-top:4px;line-height:1.5}
+.cr-suggestion{font-size:.72rem;color:#4dd0e1;margin-top:5px;padding:5px 8px;background:#001a1a;border-radius:4px}
+.cr-strength{font-size:.78rem;color:#00e676;padding:4px 0;display:flex;align-items:flex-start;gap:6px}
+.cr-grade-A{color:#00e676}.cr-grade-B{color:#00e5ff}.cr-grade-C{color:#ffd740}.cr-grade-D{color:#ff7043}.cr-grade-F{color:#ff5252}
 </style>
 </head>
 <body>
@@ -800,6 +860,7 @@ tr:hover td{background:#181818}
   <div class="tab" onclick="showTab('analytics')">Analytics</div>
   <div class="tab" onclick="showTab('balances')">Balances</div>
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
+  <div class="tab" onclick="showTab('codereview')">Code Review</div>
 </div>
 
 <!-- OVERVIEW TAB -->
@@ -1040,6 +1101,36 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
+<!-- CODE REVIEW TAB -->
+<div class="page" id="tab-codereview">
+  <div class="cards" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
+    <div class="card"><div class="lbl">Code Grade</div><div class="val blue" id="cr-grade">--</div></div>
+    <div class="card"><div class="lbl">Health Score</div><div class="val" id="cr-score">--</div></div>
+    <div class="card"><div class="lbl">Last Review</div><div class="val yellow" id="cr-date">--</div></div>
+    <div class="card"><div class="lbl">Findings</div><div class="val" id="cr-total">--</div><div class="sub" id="cr-severity">--</div></div>
+  </div>
+
+  <div class="meta-card" id="cr-summary-card">
+    <h3>Summary</h3>
+    <div id="cr-summary" class="meta-analysis">No review yet — runs automatically once a week (first run 5 minutes after bot start).</div>
+  </div>
+
+  <div class="meta-card" id="cr-strengths-card" style="display:none">
+    <h3>Strengths</h3>
+    <div id="cr-strengths"></div>
+  </div>
+
+  <div class="section" style="margin-top:14px">
+    <h3>Findings</h3>
+    <div id="cr-findings"><div class="no-data">No findings yet.</div></div>
+  </div>
+
+  <div class="section" style="margin-top:14px">
+    <h3>Review History</h3>
+    <div id="cr-history"><div class="no-data">No history yet.</div></div>
+  </div>
+</div>
+
 <div id="last-update">--</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1056,7 +1147,7 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-const allTabs=['overview','live','positions','trades','status','analytics','balances','meta'];
+const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview'];
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -1078,6 +1169,10 @@ function showTab(name){
 
   if(name==='balances'){
     fetchBalances();
+  }
+
+  if(name==='codereview'){
+    fetchCodeReview();
   }
 }
 
@@ -1623,6 +1718,90 @@ function renderBalances(d){
   const botDaysLeft=cy.days_remaining||0;
   $('bal-bot-cycles').textContent=Math.round(botDaysLeft*24*2)+' scan cycles';
   $('bal-bot-metaruns').textContent=Math.round(botDaysLeft*metaRunsPerDay)+' runs';
+}
+
+// ------------------------------------------------------------------ //
+//  Code Review tab                                                     //
+// ------------------------------------------------------------------ //
+async function fetchCodeReview(){
+  try{
+    const [latest,history]=await Promise.all([
+      fetch('/api/code_review/latest').then(r=>r.json()),
+      fetch('/api/code_review/list').then(r=>r.json()),
+    ]);
+    renderCodeReview(latest,history);
+  }catch(e){
+    console.error('Code review fetch failed',e);
+  }
+}
+
+function renderCodeReview(d,history){
+  if(!d||!d.found){
+    $('cr-grade').textContent='--';
+    $('cr-score').textContent='--';
+    $('cr-date').textContent='Never';
+    $('cr-total').textContent='--';
+    $('cr-severity').textContent='runs weekly';
+    return;
+  }
+
+  const grade=d.grade||'?';
+  const gradeEl=$('cr-grade');
+  gradeEl.textContent=grade;
+  gradeEl.className='val cr-grade-'+grade;
+
+  const score=d.health_score;
+  const scoreEl=$('cr-score');
+  scoreEl.textContent=score!=null?score:'--';
+  scoreEl.className='val '+(score>=75?'green':score>=50?'yellow':'red');
+
+  $('cr-date').textContent=d.date||'--';
+  $('cr-total').textContent=(d.total_findings||0)+' total';
+  $('cr-severity').textContent=(d.high_findings||0)+' high · '+(d.medium_findings||0)+' medium · '+(d.low_findings||0)+' low';
+
+  // Summary
+  $('cr-summary').textContent=d.summary||'No summary.';
+
+  // Strengths
+  const strengths=d.strengths||[];
+  if(strengths.length){
+    $('cr-strengths-card').style.display='';
+    $('cr-strengths').innerHTML=strengths.map(s=>`<div class="cr-strength"><span style="color:#00e676">✓</span>${s}</div>`).join('');
+  }
+
+  // Findings
+  const findings=d.findings||[];
+  if(!findings.length){
+    $('cr-findings').innerHTML='<div class="no-data">No findings — code looks clean!</div>';
+  }else{
+    const sevOrder={high:0,medium:1,low:2,info:3};
+    const sorted=[...findings].sort((a,b)=>(sevOrder[a.severity]||9)-(sevOrder[b.severity]||9));
+    $('cr-findings').innerHTML=sorted.map(f=>`
+      <div class="cr-finding ${f.severity||'info'}">
+        <div class="cr-finding-header">
+          <span class="cr-sev ${f.severity||'info'}">${f.severity||'info'}</span>
+          <span class="cr-cat">${f.category||''}</span>
+          <span class="cr-file">${f.file||''}</span>
+        </div>
+        <div class="cr-title">${f.title||''}</div>
+        <div class="cr-desc">${f.description||''}</div>
+        ${f.suggestion?`<div class="cr-suggestion">💡 ${f.suggestion}</div>`:''}
+      </div>`).join('');
+  }
+
+  // History table
+  if(history&&history.length){
+    $('cr-history').innerHTML=`<table>
+      <tr><th>Date</th><th>Grade</th><th>Score</th><th>Findings</th><th>Summary</th></tr>
+      ${history.map(r=>`<tr>
+        <td class="ts-small">${r.date||'--'}</td>
+        <td class="cr-grade-${r.grade||'?'}" style="font-weight:700">${r.grade||'?'}</td>
+        <td>${r.health_score!=null?r.health_score:'--'}</td>
+        <td>${r.high_findings||0}H / ${r.medium_findings||0}M / ${(r.total_findings||0)-(r.high_findings||0)-(r.medium_findings||0)}L</td>
+        <td style="color:#555;font-size:.7rem">${r.summary||''}</td>
+      </tr>`).join('')}
+    </table>`;
+  }
 }
 
 async function fetchMeta(){

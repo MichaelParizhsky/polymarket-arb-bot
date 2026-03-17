@@ -20,8 +20,6 @@ import time
 from typing import Any
 
 from rich.console import Console
-from rich.table import Table
-from rich.live import Live
 from rich.panel import Panel
 
 from config import CONFIG
@@ -197,8 +195,9 @@ class ArbBot:
             # Apply any previously auto-tuned config
             self._load_saved_config()
 
-            # Start meta-agent background task
+            # Start background tasks
             asyncio.create_task(self._meta_agent_loop())
+            asyncio.create_task(self._code_review_loop())
 
             try:
                 await self._main_loop()
@@ -214,7 +213,6 @@ class ArbBot:
         while self._running:
             cycle_start = time.perf_counter()
             self._cycle_count += 1
-            from src.dashboard import app as _dash_mod
             import src.dashboard.app as _dash_mod
             _dash_mod._cycle_count = self._cycle_count
 
@@ -555,11 +553,6 @@ class ArbBot:
                 applied = []
                 if proposed and not bootstrap:
                     applied = self._apply_config_overrides(proposed)
-                elif proposed and bootstrap:
-                    logger.info(
-                        f"Meta-agent: bootstrap phase ({analysis_data['health'].get('closed_positions', 0)} "
-                        f"closed positions) — logging suggestions but NOT auto-applying changes"
-                    )
                     if applied:
                         # Persist to disk so changes survive restarts
                         config_path = "logs/meta_agent_config.json"
@@ -576,6 +569,11 @@ class ArbBot:
                         logger.info(f"Meta-agent: AUTO-APPLIED {len(applied)} change(s): {applied}")
                     else:
                         logger.info("Meta-agent: no config changes needed")
+                elif proposed and bootstrap:
+                    logger.info(
+                        f"Meta-agent: bootstrap phase ({analysis_data['health'].get('closed_positions', 0)} "
+                        f"closed positions) — logging suggestions but NOT auto-applying changes"
+                    )
 
                 log_entry = {
                     "timestamp": time.time(),
@@ -630,7 +628,6 @@ class ArbBot:
 
     def _apply_config_overrides(self, overrides: dict) -> list[str]:
         """Apply a dict of {ENV_KEY: value} to the live config. Returns list of applied keys."""
-        import json as _json
         applied = []
         strategy_flags_changed = False
 
@@ -663,13 +660,13 @@ class ArbBot:
 
     def _load_saved_config(self) -> None:
         """Load and apply any previously auto-tuned config from disk."""
-        import json as _json
+        import json
         path = "logs/meta_agent_config.json"
         if not os.path.exists(path):
             return
         try:
             with open(path) as f:
-                saved = _json.load(f)
+                saved = json.load(f)
             applied = self._apply_config_overrides(saved)
             if applied:
                 logger.info(f"[Config] Restored {len(applied)} auto-tuned parameter(s) from disk: {applied}")
@@ -685,6 +682,42 @@ class ArbBot:
                 os.remove(old)
             except OSError:
                 pass
+
+    async def _code_review_loop(self) -> None:
+        """Run a weekly read-only code review via Claude. Never auto-modifies code."""
+        import glob as _glob
+        from src.meta_agent.code_reviewer import run_code_review
+
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return
+
+        # Wait for any recent review to expire before running
+        existing = sorted(_glob.glob("logs/code_review_*.json"), reverse=True)
+        if existing:
+            try:
+                age_days = (time.time() - os.path.getmtime(existing[0])) / 86400
+                wait_secs = max(0.0, (7.0 - age_days) * 86400)
+                if wait_secs > 0:
+                    logger.info(
+                        f"Code review: last review {age_days:.1f}d ago, "
+                        f"next in {wait_secs/3600:.1f}h"
+                    )
+                    await asyncio.sleep(wait_secs)
+            except OSError:
+                pass
+        else:
+            # First run — let the bot warm up for 5 minutes first
+            await asyncio.sleep(300)
+
+        while self._running:
+            try:
+                await run_code_review()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"Code review error: {exc}")
+
+            await asyncio.sleep(7 * 24 * 3600)  # run weekly
 
     def _startup_cleanup(self) -> None:
         """

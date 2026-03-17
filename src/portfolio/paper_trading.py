@@ -4,6 +4,8 @@ Tracks virtual positions, P&L, and order history.
 """
 from __future__ import annotations
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -273,7 +275,6 @@ class PaperPortfolio:
         the file size bounded. The meta-agent only needs recent data for
         rolling strategy analysis; older history doesn't improve decisions.
         """
-        import json, os
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         # Rolling windows — enough for meaningful analysis, bounded disk use
@@ -319,7 +320,6 @@ class PaperPortfolio:
 
     def load_from_json(self, path: str = "logs/portfolio_state.json") -> bool:
         """Restore portfolio state from a previous run. Returns True if loaded."""
-        import json, os
         if not os.path.exists(path):
             return False
         try:
