@@ -727,7 +727,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Polymarket Arb Bot</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0a0a0a;color:#e0e0e0;font-family:'Segoe UI',sans-serif;font-size:13px}
@@ -1123,6 +1123,7 @@ tr:hover td{background:#181818}
 
 <div id="last-update">--</div>
 
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const fmt=(n,d=2)=>n==null?'--':'$'+Number(n).toFixed(d).replace(/\B(?=(\d{3})+(?!\d))/g,',');
