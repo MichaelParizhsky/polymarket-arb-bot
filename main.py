@@ -198,6 +198,7 @@ class ArbBot:
             # Start background tasks
             asyncio.create_task(self._meta_agent_loop())
             asyncio.create_task(self._code_review_loop())
+            asyncio.create_task(self._research_loop())
 
             try:
                 await self._main_loop()
@@ -682,6 +683,41 @@ class ArbBot:
                 os.remove(old)
             except OSError:
                 pass
+
+    async def _research_loop(self) -> None:
+        """Hourly web research for new strategies and improvements."""
+        import glob as _glob
+        from src.meta_agent.researcher import run_research, DEFAULT_INTERVAL_HOURS
+
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            return
+
+        interval_hours = float(os.getenv("RESEARCH_INTERVAL_HOURS", DEFAULT_INTERVAL_HOURS))
+        interval_secs = interval_hours * 3600
+
+        # If a recent run exists, wait for its interval to expire
+        existing = sorted(_glob.glob("logs/research_*.json"), reverse=True)
+        if existing:
+            try:
+                age_secs = time.time() - os.path.getmtime(existing[0])
+                wait = max(0.0, interval_secs - age_secs)
+                if wait > 0:
+                    logger.info(f"Research agent: last run {age_secs/3600:.1f}h ago, next in {wait/3600:.1f}h")
+                    await asyncio.sleep(wait)
+            except OSError:
+                pass
+        else:
+            await asyncio.sleep(60)  # brief warm-up on very first run
+
+        while self._running:
+            try:
+                await run_research()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"Research agent error: {exc}")
+
+            await asyncio.sleep(interval_secs)
 
     async def _code_review_loop(self) -> None:
         """Run a weekly read-only code review via Claude. Never auto-modifies code."""

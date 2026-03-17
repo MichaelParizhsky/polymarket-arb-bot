@@ -634,6 +634,42 @@ def meta_latest():
 #  Code Review API endpoints                                           #
 # ------------------------------------------------------------------ #
 
+@app.get("/api/research/latest")
+def research_latest():
+    files = sorted(glob.glob("logs/research_*.json"), reverse=True)
+    if not files:
+        return {"found": False}
+    try:
+        with open(files[0]) as f:
+            data = json.load(f)
+        return {"found": True, **data}
+    except Exception:
+        return {"found": False}
+
+
+@app.get("/api/research/list")
+def research_list():
+    files = sorted(glob.glob("logs/research_*.json"), reverse=True)[:24]
+    results = []
+    for fp in files:
+        try:
+            with open(fp) as f:
+                data = json.load(f)
+            results.append({
+                "date": data.get("date", ""),
+                "run_hour": data.get("run_hour", ""),
+                "timestamp": data.get("timestamp", 0),
+                "topics_searched": data.get("topics_searched", []),
+                "finding_count": data.get("finding_count", 0),
+                "high_count": data.get("high_count", 0),
+                "web_search_used": data.get("web_search_used", False),
+                "top_insights": data.get("top_insights", [])[:2],
+            })
+        except Exception:
+            pass
+    return results
+
+
 @app.get("/api/code_review/latest")
 def code_review_latest():
     files = sorted(glob.glob("logs/code_review_*.json"), reverse=True)
@@ -840,6 +876,31 @@ tr:hover td{background:#181818}
 .refill-link{display:block;margin-top:12px;text-align:center;font-size:.72rem;font-weight:600;padding:7px;border-radius:5px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;text-decoration:none;transition:all .2s}
 .refill-link:hover{background:#222;color:#ccc;border-color:#444}
 
+/* Research tab */
+.res-insights-card{background:#111;border:1px solid #2a2a1a;border-top:3px solid #ffd740;border-radius:8px;padding:16px;margin-bottom:14px}
+.res-insights-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.res-run-label{font-size:.65rem;color:#555}
+.res-insight{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid #1a1a1a;font-size:.78rem;color:#ccc;line-height:1.5}
+.res-insight:last-child{border-bottom:none}
+.res-insight-bullet{color:#ffd740;font-size:.9rem;flex-shrink:0;margin-top:1px}
+.res-finding{background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:12px;margin-bottom:8px;border-left:3px solid #333}
+.res-finding.high{border-left-color:#00e676}
+.res-finding.medium{border-left-color:#ffd740}
+.res-finding.low{border-left-color:#555}
+.res-finding-meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.res-rel{font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase}
+.res-rel.high{background:#001a0a;color:#00e676}
+.res-rel.medium{background:#2a2a00;color:#ffd740}
+.res-rel.low{background:#1a1a1a;color:#555}
+.res-cat{font-size:.65rem;background:#1a1a2a;color:#7986cb;padding:2px 7px;border-radius:3px}
+.res-source{font-size:.65rem;color:#555;font-style:italic}
+.res-title{font-size:.82rem;font-weight:600;color:#ddd;margin-bottom:4px}
+.res-summary{font-size:.75rem;color:#888;line-height:1.5;margin-bottom:5px}
+.res-suggestion{font-size:.72rem;color:#00e5ff;padding:5px 8px;background:#001a1a;border-radius:4px}
+.res-experiment{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid #1a1a1a;font-size:.78rem;color:#ccc}
+.res-experiment:last-child{border-bottom:none}
+.res-exp-num{color:#7986cb;font-weight:700;flex-shrink:0;min-width:18px}
+
 /* Code Review tab */
 .cr-finding{background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:12px;margin-bottom:8px;border-left:3px solid #333}
 .cr-finding.high{border-left-color:#ff5252}
@@ -880,6 +941,7 @@ tr:hover td{background:#181818}
   <div class="tab" onclick="showTab('balances')">Balances</div>
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
   <div class="tab" onclick="showTab('codereview')">Code Review</div>
+  <div class="tab" onclick="showTab('research')">Research</div>
 </div>
 
 <!-- OVERVIEW TAB -->
@@ -1165,6 +1227,44 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
+<!-- RESEARCH TAB -->
+<div class="page" id="tab-research">
+
+  <div class="cards" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
+    <div class="card"><div class="lbl">Last Run</div><div class="val blue" id="res-last">--</div></div>
+    <div class="card"><div class="lbl">Next Run</div><div class="val yellow" id="res-next">--</div></div>
+    <div class="card"><div class="lbl">Total Findings</div><div class="val" id="res-total">--</div><div class="sub" id="res-high">--</div></div>
+    <div class="card"><div class="lbl">Web Search</div><div class="val" id="res-websearch">--</div><div class="sub" id="res-interval">every -- h</div></div>
+  </div>
+
+  <!-- Top insights from latest run -->
+  <div class="res-insights-card" id="res-insights-card">
+    <div class="res-insights-header">
+      <span style="font-size:.8rem;font-weight:700;color:#ffd740;text-transform:uppercase;letter-spacing:.06em">Top Insights</span>
+      <span class="res-run-label" id="res-run-label">--</span>
+    </div>
+    <div id="res-insights"><div class="no-data">No research yet — runs every 2 hours (configurable via RESEARCH_INTERVAL_HOURS)</div></div>
+  </div>
+
+  <!-- Findings list -->
+  <div class="section" style="margin-top:14px">
+    <h3>Findings <span style="color:#555;font-weight:normal;font-size:.65rem" id="res-topics-label"></span></h3>
+    <div id="res-findings"><div class="no-data">No findings yet.</div></div>
+  </div>
+
+  <!-- Suggested experiments -->
+  <div class="section" style="margin-top:14px">
+    <h3>Suggested Experiments</h3>
+    <div id="res-experiments"><div class="no-data">No suggestions yet.</div></div>
+  </div>
+
+  <!-- Run history -->
+  <div class="section" style="margin-top:14px">
+    <h3>Research History <span style="color:#555;font-weight:normal;font-size:.65rem">(last 24 runs)</span></h3>
+    <div id="res-history"><div class="no-data">No history yet.</div></div>
+  </div>
+</div>
+
 <div id="last-update">--</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1181,7 +1281,7 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview'];
+const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview','research'];
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -1207,6 +1307,10 @@ function showTab(name){
 
   if(name==='codereview'){
     fetchCodeReview();
+  }
+
+  if(name==='research'){
+    fetchResearch();
   }
 }
 
@@ -1908,6 +2012,114 @@ function renderBalances(d){
   const botDaysLeft=cy.days_remaining||0;
   $('bal-bot-cycles').textContent=Math.round(botDaysLeft*24*2)+' scan cycles';
   $('bal-bot-metaruns').textContent=Math.round(botDaysLeft*metaRunsPerDay)+' runs';
+}
+
+// ------------------------------------------------------------------ //
+//  Research tab                                                        //
+// ------------------------------------------------------------------ //
+async function fetchResearch(){
+  try{
+    const [latest,history]=await Promise.all([
+      fetch('/api/research/latest').then(r=>r.json()),
+      fetch('/api/research/list').then(r=>r.json()),
+    ]);
+    renderResearch(latest,history);
+  }catch(e){
+    console.error('Research fetch failed',e);
+  }
+}
+
+function renderResearch(d,history){
+  const intervalH=parseFloat(localStorage.getItem('researchInterval')||'2');
+
+  if(!d||!d.found){
+    $('res-last').textContent='Never';
+    $('res-next').textContent='soon';
+    $('res-total').textContent='--';
+    $('res-high').textContent='--';
+    $('res-websearch').textContent='--';
+    $('res-interval').textContent='every '+intervalH+'h';
+    return;
+  }
+
+  // Header cards
+  $('res-last').textContent=(d.date||'')+(d.run_hour?' '+d.run_hour:'');
+  const nextTs=(d.timestamp||0)+intervalH*3600;
+  const diffM=Math.round((nextTs-Date.now()/1000)/60);
+  $('res-next').textContent=diffM>0?'in ~'+diffM+'m':'soon';
+  $('res-total').textContent=(d.finding_count||0)+' total';
+  $('res-high').innerHTML='<span style="color:#00e676">'+(d.high_count||0)+' high</span> · <span style="color:#ffd740">'+(d.medium_count||0)+' medium</span>';
+  const ws=d.web_search_used;
+  $('res-websearch').innerHTML=ws
+    ?'<span style="color:#00e676">Live</span>'
+    :'<span style="color:#ffd740">Training data</span>';
+  $('res-interval').textContent='every '+intervalH+'h';
+  $('res-run-label').textContent='Run #'+(d.run_index!=null?d.run_index:'?')+' · '+((d.topics_searched||[]).length)+' topics searched';
+
+  // Top insights
+  const insights=d.top_insights||[];
+  if(insights.length){
+    $('res-insights').innerHTML=insights.map(ins=>`
+      <div class="res-insight">
+        <span class="res-insight-bullet">◆</span>
+        <span>${ins}</span>
+      </div>`).join('');
+  }else{
+    $('res-insights').innerHTML='<div class="no-data">No top insights extracted.</div>';
+  }
+
+  // Topics label
+  const topics=d.topics_searched||[];
+  if(topics.length){
+    $('res-topics-label').textContent='— searched: '+topics.join(' · ');
+  }
+
+  // Findings
+  const findings=d.findings||[];
+  const relOrder={high:0,medium:1,low:2};
+  const sorted=[...findings].sort((a,b)=>(relOrder[a.relevance]||9)-(relOrder[b.relevance]||9));
+  if(sorted.length){
+    $('res-findings').innerHTML=sorted.map(f=>`
+      <div class="res-finding ${f.relevance||'low'}">
+        <div class="res-finding-meta">
+          <span class="res-rel ${f.relevance||'low'}">${f.relevance||'low'}</span>
+          <span class="res-cat">${f.category||''}</span>
+          <span class="res-source">${f.source||''}</span>
+        </div>
+        <div class="res-title">${f.title||''}</div>
+        <div class="res-summary">${f.summary||''}</div>
+        ${f.actionable_suggestion?`<div class="res-suggestion">→ ${f.actionable_suggestion}</div>`:''}
+      </div>`).join('');
+  }else{
+    $('res-findings').innerHTML='<div class="no-data">No findings in this run.</div>';
+  }
+
+  // Suggested experiments
+  const exps=d.suggested_experiments||[];
+  if(exps.length){
+    $('res-experiments').innerHTML=exps.map((e,i)=>`
+      <div class="res-experiment">
+        <span class="res-exp-num">${i+1}.</span>
+        <span>${e}</span>
+      </div>`).join('');
+  }else{
+    $('res-experiments').innerHTML='<div class="no-data">No experiments suggested.</div>';
+  }
+
+  // History table
+  if(history&&history.length){
+    $('res-history').innerHTML=`<table>
+      <tr><th>Date</th><th>Time</th><th>Findings</th><th>Web</th><th>Topics</th><th>Top Insight</th></tr>
+      ${history.map(r=>`<tr>
+        <td class="ts-small">${r.date||'--'}</td>
+        <td class="ts-small">${r.run_hour||'--'}</td>
+        <td><span style="color:#00e676">${r.high_count||0}H</span> / ${r.finding_count||0} total</td>
+        <td>${r.web_search_used?'<span style="color:#00e676">✓</span>':'<span style="color:#555">✗</span>'}</td>
+        <td style="color:#555;font-size:.65rem">${(r.topics_searched||[]).slice(0,2).map(t=>t.split(' ').slice(0,3).join(' ')).join(', ')}</td>
+        <td style="color:#888;font-size:.68rem">${(r.top_insights||[])[0]||'--'}</td>
+      </tr>`).join('')}
+    </table>`;
+  }
 }
 
 // ------------------------------------------------------------------ //
