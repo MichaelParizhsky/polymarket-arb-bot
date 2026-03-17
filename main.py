@@ -179,6 +179,9 @@ class ArbBot:
                 except NotImplementedError:
                     pass  # Windows doesn't support add_signal_handler
 
+            # Clean up old log bloat from previous deploys
+            self._startup_cleanup()
+
             # Apply any previously auto-tuned config
             self._load_saved_config()
 
@@ -670,6 +673,37 @@ class ArbBot:
                 os.remove(old)
             except OSError:
                 pass
+
+    def _startup_cleanup(self) -> None:
+        """
+        Run once at startup to clear accumulated log bloat from previous deploys.
+        Removes old date-stamped log files and excess meta-agent logs.
+        Keeps portfolio_state.json and meta_agent_config.json intact.
+        """
+        import glob as _glob
+        removed = 0
+
+        # Delete old date-stamped log files (bot_YYYY-MM-DD.log) — replaced by bot.log
+        for f in _glob.glob("logs/bot_20*.log") + _glob.glob("logs/bot_20*.log.gz"):
+            try:
+                os.remove(f)
+                removed += 1
+            except OSError:
+                pass
+
+        # Delete oversized current log file if it somehow got too big
+        try:
+            if os.path.getsize("logs/bot.log") > 50 * 1024 * 1024:  # >50MB
+                os.remove("logs/bot.log")
+                removed += 1
+        except OSError:
+            pass
+
+        # Prune meta-agent logs to last 48
+        self._prune_meta_agent_logs(keep=48)
+
+        if removed:
+            logger.info(f"[Startup] Cleaned up {removed} old log file(s)")
 
     def _handle_shutdown(self) -> None:
         logger.info("Shutdown signal received")
