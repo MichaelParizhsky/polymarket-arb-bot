@@ -29,6 +29,24 @@ def register(portfolio, start_time: float) -> None:
     _bot_start_time = start_time
 
 
+@app.post("/api/reset")
+def reset_portfolio():
+    global _bot_start_time
+    if not _portfolio:
+        return JSONResponse({"ok": False, "error": "Bot not running"}, status_code=503)
+    starting = _portfolio.starting_balance
+    _portfolio.usdc_balance = starting
+    _portfolio.positions.clear()
+    _portfolio.trades.clear()
+    _portfolio.open_orders.clear()
+    _portfolio.closed_positions.clear()
+    _portfolio._trade_counter = 0
+    _portfolio.pnl_history = [{"t": time.time(), "value": starting, "pnl": 0.0}]
+    _bot_start_time = time.time()
+    _portfolio.save_to_json()
+    return {"ok": True, "starting_balance": starting}
+
+
 # ------------------------------------------------------------------ #
 #  Bot API endpoints                                                   #
 # ------------------------------------------------------------------ #
@@ -233,6 +251,8 @@ header{background:#111;border-bottom:1px solid #222;padding:12px 20px;display:fl
 header h1{color:#00e5ff;font-size:1.1rem;letter-spacing:.05em}
 #mode-badge{font-size:.7rem;padding:3px 10px;border-radius:4px;background:#1a3a4a;color:#00e5ff}
 #uptime-info{color:#555;font-size:.75rem;margin-left:auto}
+#reset-btn{font-size:.7rem;padding:4px 12px;border-radius:4px;background:#1a0000;color:#ff5252;border:1px solid #3d0000;cursor:pointer;transition:all .2s}
+#reset-btn:hover{background:#3d0000}
 
 .tabs{display:flex;background:#111;border-bottom:1px solid #1e1e1e;padding:0 20px}
 .tab{padding:10px 18px;cursor:pointer;color:#666;font-size:.8rem;border-bottom:2px solid transparent;transition:all .2s}
@@ -307,6 +327,7 @@ tr:hover td{background:#181818}
   <h1>Polymarket Arb Bot</h1>
   <span id="mode-badge">PAPER</span>
   <span id="uptime-info">loading...</span>
+  <button id="reset-btn" onclick="resetPortfolio()">Reset to $10,000</button>
 </header>
 
 <div class="tabs">
@@ -665,6 +686,20 @@ fetch('/api/logs?limit=200').then(r=>r.json()).then(logs=>{
   });
   feed.scrollTop=feed.scrollHeight;
 });
+
+async function resetPortfolio(){
+  if(!confirm('Reset portfolio to $10,000? This will erase all trades, positions, and history.'))return;
+  try{
+    const r=await fetch('/api/reset',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      alert('Portfolio reset to $'+d.starting_balance.toLocaleString());
+      fetchAll();
+    }else{
+      alert('Reset failed: '+(d.error||'unknown error'));
+    }
+  }catch(e){alert('Reset failed: '+e);}
+}
 
 fetchAll();
 setInterval(fetchAll,3000);
