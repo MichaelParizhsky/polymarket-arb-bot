@@ -797,6 +797,25 @@ tr:hover td{background:#181818}
 .thinking-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:14px}
 .thinking-card h3{font-size:.72rem;color:#7986cb;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
 
+/* Time-to-real-PnL widget */
+.ttpl-card{background:#111;border:1px solid #1e2a1e;border-top:3px solid #00e676;border-radius:8px;padding:16px;margin-bottom:18px}
+.ttpl-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.ttpl-title{font-size:.85rem;font-weight:700;color:#ccc;text-transform:uppercase;letter-spacing:.06em}
+.ttpl-badge{font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:4px;background:#1a2a1a;color:#00e676}
+.ttpl-badge.bootstrap{background:#2a1a00;color:#ffd740}
+.ttpl-badge.active{background:#001a0a;color:#00e676}
+.ttpl-badge.profit{background:#001a1a;color:#00e5ff}
+.ttpl-milestones{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px}
+.ttpl-milestone{background:#141414;border:1px solid #1e1e1e;border-radius:6px;padding:12px}
+.ttpl-milestone.done{border-color:#1a3a1a}
+.ttpl-milestone.done .ttpl-ms-eta{color:#00e676}
+.ttpl-ms-label{font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.ttpl-ms-eta{font-size:1.1rem;font-weight:700;color:#ffd740;margin-bottom:4px}
+.ttpl-ms-sub{font-size:.65rem;color:#444}
+.ttpl-ms-bar{height:4px;background:#1a1a1a;border-radius:2px;margin-top:8px;overflow:hidden}
+.ttpl-ms-fill{height:100%;border-radius:2px;transition:width .5s}
+.ttpl-verdict{font-size:.78rem;color:#666;line-height:1.6;padding-top:8px;border-top:1px solid #1a1a1a}
+
 /* Balances tab */
 .bal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:18px}
 .bal-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:18px}
@@ -968,6 +987,21 @@ tr:hover td{background:#181818}
 
 <!-- ANALYTICS TAB -->
 <div class="page" id="tab-analytics">
+
+  <!-- Time-to-real-PnL estimator -->
+  <div class="ttpl-card" id="ttpl-card">
+    <div class="ttpl-header">
+      <span class="ttpl-title">Time to Real P&amp;L</span>
+      <span class="ttpl-badge" id="ttpl-phase-badge">--</span>
+    </div>
+    <div class="ttpl-body">
+      <div class="ttpl-milestones" id="ttpl-milestones">
+        <div class="no-data">Loading estimates...</div>
+      </div>
+      <div class="ttpl-verdict" id="ttpl-verdict"></div>
+    </div>
+  </div>
+
   <!-- Row 1: ROI + Win Rate -->
   <div class="analytics-row">
     <div class="chart-box">
@@ -1472,11 +1506,167 @@ function renderSystemStatus(d){
 // ------------------------------------------------------------------ //
 async function fetchAnalytics(){
   try{
-    const d=await fetch('/api/analytics').then(r=>r.json());
+    const [d,status]=await Promise.all([
+      fetch('/api/analytics').then(r=>r.json()),
+      fetch('/api/status').then(r=>r.json()),
+    ]);
     renderAnalytics(d);
+    renderTimeToProfit(status,d);
   }catch(e){
     console.error('Analytics fetch failed',e);
   }
+}
+
+function fmtDuration(hours){
+  if(hours==null||!isFinite(hours))return'--';
+  if(hours<1)return Math.round(hours*60)+'m';
+  if(hours<24)return hours.toFixed(1)+'h';
+  const d=Math.floor(hours/24),h=Math.round(hours%24);
+  return h>0?d+'d '+h+'h':d+'d';
+}
+
+function renderTimeToProfit(status,analytics){
+  const closed=status.closed_positions||0;
+  const uptimeH=(status.uptime_seconds||0)/3600;
+  const realizedPnl=status.realized_pnl||0;
+  const startBal=status.starting_balance||10000;
+
+  // Close rate: positions closed per hour (needs >10min uptime to be meaningful)
+  const closesPerHr=uptimeH>0.17?closed/uptimeH:null;
+
+  // Hourly realized-PnL rate from last 6 data points in pnl_history (use analytics.hourly_pnl)
+  const hourly=analytics.hourly_pnl||[];
+  let hourlyRate=null;
+  if(hourly.length>=2){
+    const recent=hourly.slice(-6);
+    const total=recent.reduce((s,h)=>s+h.pnl,0);
+    hourlyRate=total/recent.length;
+  }
+
+  // Milestone definitions
+  const BOOTSTRAP=30;   // need 30 closed positions to exit bootstrap
+  const RELIABLE=50;    // 50 closed → win rate is statistically meaningful
+  const CONFIDENT=100;  // 100 closed → strategy ROI is trustworthy
+
+  const milestones=[
+    {
+      id:'bootstrap',
+      label:'Exit Bootstrap Phase',
+      sub:'30 closed positions → P&L data is meaningful',
+      target:BOOTSTRAP,
+      current:closed,
+      hoursLeft:closed<BOOTSTRAP&&closesPerHr>0?(BOOTSTRAP-closed)/closesPerHr:null,
+      done:closed>=BOOTSTRAP,
+      color:'#ffd740',
+    },
+    {
+      id:'reliable',
+      label:'Reliable Win Rate',
+      sub:'50 closed positions → win% stabilizes',
+      target:RELIABLE,
+      current:closed,
+      hoursLeft:closed<RELIABLE&&closesPerHr>0?(RELIABLE-closed)/closesPerHr:null,
+      done:closed>=RELIABLE,
+      color:'#00e5ff',
+    },
+    {
+      id:'confident',
+      label:'Strategy Confidence',
+      sub:'100 closed positions → trust per-strategy ROI',
+      target:CONFIDENT,
+      current:closed,
+      hoursLeft:closed<CONFIDENT&&closesPerHr>0?(CONFIDENT-closed)/closesPerHr:null,
+      done:closed>=CONFIDENT,
+      color:'#7986cb',
+    },
+    {
+      id:'breakeven',
+      label:'Break-Even Realized P&L',
+      sub:'Realized P&L turns positive',
+      target:null,
+      current:null,
+      hoursLeft:realizedPnl<0&&hourlyRate>0?Math.abs(realizedPnl)/hourlyRate:null,
+      done:realizedPnl>=0,
+      color:'#00e676',
+      isBreakeven:true,
+    },
+  ];
+
+  // Phase badge
+  let phase,phaseClass;
+  if(closed>=CONFIDENT){phase='Strategy Proven';phaseClass='profit';}
+  else if(closed>=RELIABLE){phase='Reliable Data';phaseClass='active';}
+  else if(closed>=BOOTSTRAP){phase='Active Trading';phaseClass='active';}
+  else{phase='Bootstrap Phase';phaseClass='bootstrap';}
+  const badge=$('ttpl-phase-badge');
+  badge.textContent=phase;
+  badge.className='ttpl-badge '+phaseClass;
+
+  // Render milestone cards
+  $('ttpl-milestones').innerHTML=milestones.map(m=>{
+    if(m.done){
+      const label=m.isBreakeven
+        ?'<span style="color:#00e676">+$'+realizedPnl.toFixed(2)+' realized</span>'
+        :'<span style="color:#00e676">✓ Done ('+closed+' closed)</span>';
+      return`<div class="ttpl-milestone done">
+        <div class="ttpl-ms-label">${m.label}</div>
+        <div class="ttpl-ms-eta">${label}</div>
+        <div class="ttpl-ms-sub">${m.sub}</div>
+        <div class="ttpl-ms-bar"><div class="ttpl-ms-fill" style="width:100%;background:${m.color}"></div></div>
+      </div>`;
+    }
+
+    let etaText,pct,subLine;
+    if(m.isBreakeven){
+      if(realizedPnl>=0){
+        etaText='In profit';pct=100;
+      }else if(hourlyRate===null){
+        etaText='Needs data';pct=0;
+      }else if(hourlyRate<=0){
+        etaText='Trending negative';pct=0;
+      }else{
+        etaText='~'+fmtDuration(m.hoursLeft);
+        // progress toward $0 from starting low watermark
+        const worst=Math.min(realizedPnl,-0.01);
+        pct=Math.max(0,Math.min(99,(1-Math.abs(realizedPnl)/Math.abs(worst))*100));
+      }
+      subLine=hourlyRate!=null&&hourlyRate>0?'At $'+hourlyRate.toFixed(2)+'/hr current rate':m.sub;
+    }else{
+      if(closesPerHr===null){etaText='Needs data';pct=0;}
+      else{
+        etaText='~'+fmtDuration(m.hoursLeft);
+        pct=Math.min(99,Math.max(0,(m.current/m.target)*100));
+      }
+      subLine=m.current+' / '+m.target+' closed'+(closesPerHr?` · ${closesPerHr.toFixed(1)}/hr`:'');
+    }
+
+    return`<div class="ttpl-milestone">
+      <div class="ttpl-ms-label">${m.label}</div>
+      <div class="ttpl-ms-eta">${etaText}</div>
+      <div class="ttpl-ms-sub">${subLine}</div>
+      <div class="ttpl-ms-bar"><div class="ttpl-ms-fill" style="width:${pct}%;background:${m.color}"></div></div>
+    </div>`;
+  }).join('');
+
+  // Verdict text
+  let verdict='';
+  if(closed<BOOTSTRAP){
+    const h=closesPerHr>0?fmtDuration((BOOTSTRAP-closed)/closesPerHr):'unknown time';
+    verdict=`You're in the <strong style="color:#ffd740">bootstrap phase</strong> (${closed}/${BOOTSTRAP} closed positions). `
+      +`P&L numbers exist but aren't statistically reliable yet. Estimated <strong>${h}</strong> until the data is meaningful. `
+      +`The meta-agent won't auto-tune parameters until bootstrap exits.`;
+  }else if(closed<RELIABLE){
+    verdict=`Bootstrap cleared! Win rate and ROI numbers are forming but need ${RELIABLE-closed} more closed positions to stabilize. `
+      +`Watch the Strategy ROI chart — strategies with negative ROI after ${RELIABLE} trades are candidates to disable.`;
+  }else if(realizedPnl<0){
+    const etaStr=hourlyRate>0?'~'+fmtDuration(Math.abs(realizedPnl)/hourlyRate)+' at current pace':'unclear (needs more recent trade data)';
+    verdict=`Data is reliable (${closed} closed positions). Realized P&L is currently <strong style="color:#ff5252">$${realizedPnl.toFixed(2)}</strong>. `
+      +`Break-even estimated in <strong>${etaStr}</strong>. Focus on strategies with positive ROI and disable outliers.`;
+  }else{
+    verdict=`<strong style="color:#00e676">You're in profit.</strong> Realized P&L: <strong>+$${realizedPnl.toFixed(2)}</strong> across ${closed} closed positions. `
+      +`Win rate and strategy ROI data below reflect real performance.`;
+  }
+  $('ttpl-verdict').innerHTML=verdict;
 }
 
 function hbar(labels,values,colors){
