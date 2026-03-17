@@ -541,54 +541,10 @@ async def balances():
         vol_limit_mb = 512
     disk_pct = round(disk_used_mb / vol_limit_mb * 100, 1) if vol_limit_mb else 0
 
-    # --- Railway billing (optional — requires RAILWAY_TOKEN env var) ---
-    railway_token = os.getenv("RAILWAY_TOKEN")
-    railway_monthly_cost: float | None = None
-    railway_credit_remaining: float | None = None  # not exposed by Railway API
-    railway_period_end: str | None = None
-    railway_api_error: str | None = None
-
-    if railway_token:
-        try:
-            import httpx as _httpx
-            async with _httpx.AsyncClient(timeout=8.0) as _rc:
-                resp = await _rc.post(
-                    "https://backboard.railway.app/graphql/v2",
-                    headers={
-                        "Authorization": f"Bearer {railway_token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"query": "{ me { usage { estimatedMonthlyCost currentPeriodEnd } } }"},
-                )
-                if resp.status_code == 200:
-                    gql = resp.json()
-                    usage = gql.get("data", {}).get("me", {}).get("usage", {}) or {}
-                    railway_monthly_cost = usage.get("estimatedMonthlyCost")
-                    railway_period_end = usage.get("currentPeriodEnd")
-                else:
-                    railway_api_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
-        except Exception as exc:
-            railway_api_error = str(exc)[:80]
-
-    # If Railway API gave us a period end, recompute days_remaining from it
-    railway_days_remaining: int | None = None
-    if railway_period_end:
-        try:
-            import datetime as _dt
-            pe = _dt.datetime.fromisoformat(railway_period_end.replace("Z", "+00:00"))
-            delta = pe - _dt.datetime.now(_dt.timezone.utc)
-            railway_days_remaining = max(int(delta.days), 0)
-        except Exception:
-            pass
-
     try:
         railway_base = float(os.getenv("RAILWAY_PLAN_COST") or 5)
     except Exception:
         railway_base = 5.0
-    try:
-        railway_budget: float | None = float(os.getenv("RAILWAY_MONTHLY_BUDGET") or 0) or None
-    except Exception:
-        railway_budget = None
 
     # --- Bot summary ---
     uptime_hours = round((now - _bot_start_time) / 3600, 2) if _bot_start_time else 0
@@ -617,14 +573,8 @@ async def balances():
             "disk_used_mb": disk_used_mb,
             "disk_limit_mb": vol_limit_mb,
             "disk_pct": disk_pct,
-            "estimated_monthly_cost_usd": railway_monthly_cost,
-            "credit_remaining_usd": railway_credit_remaining,
-            "period_end": railway_period_end,
-            "days_remaining_in_cycle": railway_days_remaining if railway_days_remaining is not None else days_remaining,
             "plan_base_cost_usd": railway_base,
-            "monthly_budget_usd": railway_budget,
-            "token_configured": bool(railway_token),
-            "api_error": railway_api_error,
+            "days_remaining_in_cycle": days_remaining,
         },
         "bot": {
             "uptime_hours": uptime_hours,
@@ -1039,22 +989,13 @@ tr:hover td{background:#181818}
     <!-- Railway -->
     <div class="bal-card railway">
       <h3>Railway</h3>
-      <div id="bal-rail-setup" style="display:none;background:#1a1a00;border:1px solid #3a3a00;border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:.7rem;color:#ffd740;line-height:1.6">
-        <strong>Set up live billing:</strong><br>
-        1. Go to <strong>railway.app → Account → Tokens</strong><br>
-        2. Create a token, copy it<br>
-        3. In Railway → your service → <strong>Variables</strong> → add <code>RAILWAY_TOKEN=&lt;your token&gt;</code>
-      </div>
-      <div id="bal-rail-api-error" style="display:none;background:#1a0000;border:1px solid #3a0000;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:.68rem;color:#ff5252"></div>
-      <div class="bal-row"><span class="bal-lbl">API Token</span><span class="bal-val" id="bal-rail-token">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Credit Remaining</span><span class="bal-val" id="bal-rail-credit" style="color:#555">Check railway.app</span></div>
-      <div class="bal-row"><span class="bal-lbl">Est. Spend This Month</span><span class="bal-val" id="bal-rail-cost">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Plan Base Cost</span><span class="bal-val" id="bal-rail-base">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Days Left in Cycle</span><span class="bal-val" id="bal-rail-days">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Period End</span><span class="bal-val" id="bal-rail-period">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Disk Used / Limit</span><span class="bal-val" id="bal-rail-disk">--</span></div>
       <div class="budget-bar"><div class="budget-fill" id="bal-rail-bar" style="width:0%;background:#4dd0e1"></div></div>
       <div class="budget-label"><span>Disk usage</span><span id="bal-rail-bar-pct"></span></div>
-      <a href="https://railway.app/account/billing" target="_blank" class="refill-link">+ Manage Railway Billing →</a>
+      <div style="font-size:.68rem;color:#555;margin-top:10px">Live billing data (credit remaining, monthly spend) must be checked directly on Railway — their API does not expose it.</div>
+      <a href="https://railway.app/account/billing" target="_blank" class="refill-link">+ View Billing on Railway →</a>
     </div>
 
     <!-- Bot Stats -->
@@ -1657,40 +1598,8 @@ function renderBalances(d){
   }
 
   // Railway
-  const hasToken=rail.token_configured;
-  // Show setup box if no token; show error box if token set but API failed
-  $('bal-rail-setup').style.display=hasToken?'none':'block';
-  const errBox=$('bal-rail-api-error');
-  if(rail.api_error){errBox.style.display='block';errBox.textContent='API error: '+rail.api_error;}
-  else{errBox.style.display='none';}
-
-  $('bal-rail-token').innerHTML=hasToken
-    ?'<span style="color:#00e676">Configured</span>'
-    :'<span style="color:#ffd740">Not set — see below</span>';
-
-  // Credit remaining — Railway API doesn't expose this; link user to dashboard
-  $('bal-rail-credit').innerHTML='<a href="https://railway.app/account/billing" target="_blank" style="color:#4dd0e1;text-decoration:none">View on railway.app →</a>';
-
-  // Monthly spend
-  const railCost=rail.estimated_monthly_cost_usd!=null
-    ?fmtUsd(rail.estimated_monthly_cost_usd)
-    :(hasToken?'Fetching...':'Set RAILWAY_TOKEN to see');
-  $('bal-rail-cost').textContent=railCost;
-  $('bal-rail-cost').style.color=rail.estimated_monthly_cost_usd!=null?'#4dd0e1':'#555';
-
-  // Days remaining
-  const daysLeft=rail.days_remaining_in_cycle;
-  $('bal-rail-days').textContent=daysLeft!=null?daysLeft+' days':(hasToken?'--':'~'+((cy.days_remaining||0))+' days (est.)');
-
-  // Period end
-  if(rail.period_end){
-    const peDate=new Date(rail.period_end).toLocaleDateString();
-    $('bal-rail-period').textContent=peDate;
-  }else{
-    $('bal-rail-period').textContent=hasToken?'--':'--';
-  }
-
-  // Disk
+  $('bal-rail-base').textContent=fmtUsd(rail.plan_base_cost_usd)+'/mo';
+  $('bal-rail-days').textContent=(rail.days_remaining_in_cycle||0)+' days';
   const diskMb=rail.disk_used_mb||0;
   const diskLim=rail.disk_limit_mb||512;
   $('bal-rail-disk').textContent=diskMb.toFixed(2)+' MB / '+diskLim+' MB';
