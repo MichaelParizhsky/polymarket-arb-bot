@@ -56,6 +56,8 @@ class RiskConfig:
     max_slippage: float = field(default_factory=lambda: _float("MAX_SLIPPAGE", 0.005))
     max_drawdown_pct: float = 0.15  # Stop trading at 15% drawdown
     max_open_orders: int = 20
+    min_trade_interval: int = field(default_factory=lambda: _int("MIN_TRADE_INTERVAL", 60))   # seconds between any two trades
+    token_cooldown: int = field(default_factory=lambda: _int("TOKEN_COOLDOWN", 300))           # seconds before re-trading same token
 
 
 @dataclass

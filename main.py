@@ -73,6 +73,9 @@ class ArbBot:
         self._running = False
         self._cycle_count = 0
         self._start_time = time.time()
+        # Rate limiting
+        self._last_trade_time: float = 0.0
+        self._token_last_traded: dict[str, float] = {}
 
     def _build_strategies(self) -> None:
         cfg = self.config.strategies
@@ -320,6 +323,10 @@ class ArbBot:
         # Deduplicate: same token_id + side should only execute once per cycle
         seen: set[tuple[str, str]] = set()
 
+        now = time.time()
+        min_interval = self.config.risk.min_trade_interval
+        token_cooldown = self.config.risk.token_cooldown
+
         for sig in signals:
             key = (sig.token_id, sig.side)
             if key in seen:
@@ -329,6 +336,18 @@ class ArbBot:
             if self.risk.is_hard_stopped():
                 logger.critical("Hard stop active — no new trades")
                 break
+
+            # Global rate limit: enforce minimum gap between any two trades
+            since_last = now - self._last_trade_time
+            if since_last < min_interval:
+                logger.debug(f"Rate limit: {since_last:.0f}s since last trade (need {min_interval}s)")
+                break  # skip rest of signals this cycle
+
+            # Per-token cooldown: don't hammer the same market
+            token_last = self._token_last_traded.get(sig.token_id, 0)
+            if now - token_last < token_cooldown:
+                logger.debug(f"Token cooldown: {sig.token_id[:16]} traded {now-token_last:.0f}s ago")
+                continue
 
             ok, reason = self.risk.check_trade(
                 sig.token_id, sig.side, sig.size_usdc, sig.strategy
@@ -363,6 +382,8 @@ class ArbBot:
             if trade:
                 trades_total.labels(strategy=sig.strategy, side=sig.side).inc()
                 arb_executed.labels(strategy=sig.strategy).inc()
+                self._last_trade_time = time.time()
+                self._token_last_traded[sig.token_id] = time.time()
 
     def _find_market_info(
         self, token_id: str, context: dict[str, Any]
