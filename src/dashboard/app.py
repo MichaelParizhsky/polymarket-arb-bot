@@ -850,6 +850,8 @@ tr:hover td{background:#181818}
 .cycle-bar h3{font-size:.72rem;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
 .cycle-progress{height:10px;border-radius:5px;background:#1a1a1a;overflow:hidden;margin-bottom:8px}
 .cycle-fill{height:100%;border-radius:5px;background:linear-gradient(90deg,#00e5ff,#7986cb);transition:width .5s}
+.refill-link{display:block;margin-top:12px;text-align:center;font-size:.72rem;font-weight:600;padding:7px;border-radius:5px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;text-decoration:none;transition:all .2s}
+.refill-link:hover{background:#222;color:#ccc;border-color:#444}
 </style>
 </head>
 <body>
@@ -1053,6 +1055,7 @@ tr:hover td{background:#181818}
       <div class="bal-row" id="bal-ant-budget-row"><span class="bal-lbl">Monthly Budget</span><span class="bal-val" id="bal-ant-budget">Not set</span></div>
       <div class="budget-bar"><div class="budget-fill" id="bal-ant-bar" style="width:0%;background:#ce93d8"></div></div>
       <div class="budget-label"><span id="bal-ant-bar-lbl">Set ANTHROPIC_MONTHLY_BUDGET env var to track</span><span id="bal-ant-bar-pct"></span></div>
+      <a href="https://console.anthropic.com/settings/billing" target="_blank" class="refill-link">+ Add Anthropic Credits →</a>
     </div>
 
     <!-- Railway -->
@@ -1073,6 +1076,7 @@ tr:hover td{background:#181818}
       <div class="bal-row"><span class="bal-lbl">Disk Used / Limit</span><span class="bal-val" id="bal-rail-disk">--</span></div>
       <div class="budget-bar"><div class="budget-fill" id="bal-rail-bar" style="width:0%;background:#4dd0e1"></div></div>
       <div class="budget-label"><span>Disk usage</span><span id="bal-rail-bar-pct"></span></div>
+      <a href="https://railway.app/account/billing" target="_blank" class="refill-link">+ Manage Railway Billing →</a>
     </div>
 
     <!-- Bot Stats -->
@@ -1084,6 +1088,7 @@ tr:hover td{background:#181818}
       <div class="bal-row"><span class="bal-lbl">Portfolio P&amp;L</span><span class="bal-val" id="bal-bot-pnl">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Cycles Left (billing)</span><span class="bal-val" id="bal-bot-cycles">--</span></div>
       <div class="bal-row"><span class="bal-lbl">Meta-Runs Left (billing)</span><span class="bal-val" id="bal-bot-metaruns">--</span></div>
+      <a href="https://polymarket.com/wallet" target="_blank" class="refill-link">+ Deposit USDC to Polymarket →</a>
     </div>
 
   </div>
