@@ -24,7 +24,15 @@ class RiskManager:
         Validates a proposed trade against risk limits.
         """
         if self._hard_stop:
-            return False, "Hard stop active"
+            total = self.portfolio.total_value()
+            recovery_threshold = self.portfolio.starting_balance * (1 - self.config.risk.max_drawdown_pct * 0.5)
+            if total >= recovery_threshold:
+                self._hard_stop = False
+                logger.warning(
+                    f"Hard stop auto-reset: portfolio ${total:.2f} recovered above threshold ${recovery_threshold:.2f}"
+                )
+            else:
+                return False, "Hard stop active"
 
         # Drawdown check applies to all trade directions
         total = self.portfolio.total_value()
