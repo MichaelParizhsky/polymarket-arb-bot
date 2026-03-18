@@ -65,7 +65,7 @@ def _load_research_topics() -> dict[str, list[str]]:
 
 
 # Price threshold regex (e.g., "above 60000", "> 60k")
-PRICE_RE = re.compile(r"[>$]?\s*(\d[\d,]*(?:\.\d+)?)\s*[kK]?\b")
+PRICE_RE = re.compile(r"[>$]?\s*(\d[\d,]*(?:\.\d+)?)\s*(?P<suffix>[kK])?\b")
 
 
 def _extract_price_level(text: str) -> float | None:
@@ -76,7 +76,7 @@ def _extract_price_level(text: str) -> float | None:
         return None
     raw = m.group(1).replace(",", "")
     val = float(raw)
-    if text[m.end():m.end() + 1] == "k":
+    if m.group("suffix"):
         val *= 1000
     return val
 
