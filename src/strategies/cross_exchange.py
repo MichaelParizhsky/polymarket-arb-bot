@@ -32,11 +32,9 @@ from typing import Any
 from src.exchange.kalshi import KalshiClient, KalshiMarket
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
+from src.utils.constants import FEE_RATE
 from src.utils.logger import logger
 from src.utils.metrics import arb_opportunities, edge_detected
-
-
-FEE_RATE = 0.002  # per side; applied to both legs
 
 # Resolution criteria safety: keywords that indicate mechanical/unambiguous resolution
 # (price at specific time). Safe to arb because both platforms resolve identically.

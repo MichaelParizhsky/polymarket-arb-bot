@@ -10,13 +10,23 @@ import json
 import os
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Optional API key for destructive endpoints (set DASHBOARD_API_KEY env var to enable)
+_DASHBOARD_API_KEY: str = os.getenv("DASHBOARD_API_KEY", "")
+
+
+def _check_api_key(x_api_key: str = Header(default="")) -> bool:
+    """Return True if request is authorized. Always passes when no key is configured."""
+    if not _DASHBOARD_API_KEY:
+        return True
+    return x_api_key == _DASHBOARD_API_KEY
 
 _portfolio = None
 _bot_start_time = time.time()
@@ -38,7 +48,9 @@ def register(portfolio, start_time: float, config=None, risk=None, binance=None,
 
 
 @app.post("/api/reset")
-def reset_portfolio():
+def reset_portfolio(x_api_key: str = Header(default="")):
+    if not _check_api_key(x_api_key):
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     global _bot_start_time
     if not _portfolio:
         return JSONResponse({"ok": False, "error": "Bot not running"}, status_code=503)
@@ -726,7 +738,9 @@ _review_running: bool = False
 
 
 @app.post("/api/code_review/run_now")
-async def code_review_run_now():
+async def code_review_run_now(x_api_key: str = Header(default="")):
+    if not _check_api_key(x_api_key):
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     global _review_running
     if _review_running:
         return JSONResponse({"ok": False, "error": "Review already running"}, status_code=409)
@@ -794,14 +808,17 @@ def code_review_list():
 
 _autofix_status: dict = {"state": "idle", "results": [], "error": None, "started_at": None, "finished_at": None}
 _pending_deploys: list[dict] = []
+_pending_deploys_lock = __import__("threading").Lock()
 
 
 def get_pending_deploys() -> list[dict]:
-    return list(_pending_deploys)
+    with _pending_deploys_lock:
+        return list(_pending_deploys)
 
 
 def clear_pending_deploys() -> None:
-    _pending_deploys.clear()
+    with _pending_deploys_lock:
+        _pending_deploys.clear()
 
 
 async def _run_autofix_task() -> None:
@@ -961,7 +978,9 @@ Rules:
 
 
 @app.post("/api/code_review/autofix")
-async def code_review_autofix():
+async def code_review_autofix(x_api_key: str = Header(default="")):
+    if not _check_api_key(x_api_key):
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     global _autofix_status
     if _autofix_status.get("state") == "running":
         return JSONResponse({"ok": False, "error": "Already running"}, status_code=409)
@@ -1031,7 +1050,9 @@ def research_proposal_detail(proposal_id: str):
 
 
 @app.post("/api/research/proposals/{proposal_id}/deploy")
-async def deploy_proposal(proposal_id: str):
+async def deploy_proposal(proposal_id: str, x_api_key: str = Header(default="")):
+    if not _check_api_key(x_api_key):
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     import ast as _ast
     import glob as _glob
     import shutil as _shutil
@@ -1072,13 +1093,14 @@ async def deploy_proposal(proposal_id: str):
         with open(mp, "w") as f:
             json.dump(meta, f, indent=2)
 
-        # Queue for hot-load by main bot loop
-        _pending_deploys.append({
-            "proposal_id": proposal_id,
-            "class_name": meta["class_name"],
-            "file_path": dest,
-            "deployed_at": meta["deployed_at"],
-        })
+        # Queue for hot-load by main bot loop (lock for cross-thread safety)
+        with _pending_deploys_lock:
+            _pending_deploys.append({
+                "proposal_id": proposal_id,
+                "class_name": meta["class_name"],
+                "file_path": dest,
+                "deployed_at": meta["deployed_at"],
+            })
 
         return {"ok": True, "deployed_path": dest, "class_name": meta["class_name"]}
 

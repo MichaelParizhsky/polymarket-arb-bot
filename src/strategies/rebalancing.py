@@ -13,11 +13,8 @@ from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
+from src.utils.constants import FEE_RATE, SLIPPAGE_RATE
 from src.utils.metrics import arb_opportunities, arb_executed, edge_detected
-
-
-FEE_RATE = 0.002        # 0.2% per leg
-SLIPPAGE_RATE = 0.002   # estimated slippage per leg
 
 
 class RebalancingStrategy(BaseStrategy):

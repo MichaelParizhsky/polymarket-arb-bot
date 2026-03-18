@@ -21,6 +21,7 @@ from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
+from src.utils.constants import FEE_RATE, SLIPPAGE_RATE
 from src.utils.metrics import arb_opportunities, edge_detected
 
 
@@ -37,19 +38,30 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
     "crypto_etf": ["etf", "spot bitcoin", "spot eth"],
 }
 
+import json as _json
+import time as _time
+
+_research_topics_cache: dict[str, list[str]] = {}
+_research_topics_cache_ts: float = 0.0
+_RESEARCH_TOPICS_TTL: float = 120.0  # re-read file at most once every 2 minutes
+
+
 def _load_research_topics() -> dict[str, list[str]]:
-    """Load dynamically injected topics from the latest research agent run."""
-    import json as _json
+    """Load dynamically injected topics from the latest research agent run (cached)."""
+    global _research_topics_cache, _research_topics_cache_ts
+    now = _time.monotonic()
+    if now - _research_topics_cache_ts < _RESEARCH_TOPICS_TTL:
+        return _research_topics_cache
     try:
         with open("logs/research_signals.json") as f:
             data = _json.load(f)
         topics = data.get("active_topics", [])
-        if topics:
-            # Group all research-injected keywords under a single "research_hot" cluster
-            return {"research_hot": [kw.lower() for kw in topics[:20]]}
+        result = {"research_hot": [kw.lower() for kw in topics[:20]]} if topics else {}
     except (OSError, ValueError):
-        pass
-    return {}
+        result = {}
+    _research_topics_cache = result
+    _research_topics_cache_ts = now
+    return result
 
 
 # Price threshold regex (e.g., "above 60000", "> 60k")
@@ -77,8 +89,6 @@ def _question_to_topic(question: str) -> str | None:
     return None
 
 
-FEE_RATE = 0.002
-SLIPPAGE_RATE = 0.002
 
 
 class CombinatorialStrategy(BaseStrategy):

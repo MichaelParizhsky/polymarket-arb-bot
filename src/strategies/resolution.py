@@ -21,13 +21,8 @@ from typing import Any
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
 from src.strategies.latency_arb import _days_to_expiry
+from src.utils.constants import FEE_RATE
 from src.utils.metrics import arb_opportunities, edge_detected
-
-# ------------------------------------------------------------------ #
-#  Constants                                                           #
-# ------------------------------------------------------------------ #
-
-FEE_RATE = 0.002            # 0.2% per leg (one-way)
 
 # --- Tier 1: Endgame Sweep (high-conviction, near-certain) ---
 # Price >0.97 means outcome is nearly certain. <4h window = settlement imminent.
