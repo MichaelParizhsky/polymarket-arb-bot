@@ -996,58 +996,79 @@ Rules:
 
 async def _git_commit_push(changed_files: list[str]) -> dict:
     """
-    Commit changed files and push to GitHub using GITHUB_TOKEN env var.
+    Commit changed files to GitHub using the REST API (no git CLI required).
+    Uses GITHUB_TOKEN + GITHUB_REPO env vars.
+    GITHUB_REPO defaults to 'MichaelParizhsky/polymarket-arb-bot'.
     Returns a dict with 'pushed' (bool) and 'message' (str).
     """
-    import subprocess as _sp
+    import base64 as _b64
+    import httpx as _httpx
 
     token = os.getenv("GITHUB_TOKEN", "")
     if not token:
         return {
             "pushed": False,
-            "message": "GITHUB_TOKEN not set — fixes written to disk only. Add GITHUB_TOKEN to Railway env vars to enable auto-push.",
+            "message": "GITHUB_TOKEN not set — fixes written to disk only. "
+                       "Add GITHUB_TOKEN to Railway env vars to enable auto-push.",
         }
 
-    try:
-        def _run(cmd: list[str], **kwargs) -> _sp.CompletedProcess:
-            return _sp.run(cmd, capture_output=True, text=True, timeout=30, **kwargs)
+    repo = os.getenv("GITHUB_REPO", "MichaelParizhsky/polymarket-arb-bot")
+    api = f"https://api.github.com/repos/{repo}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
-        # Configure git identity (required for commit)
-        _run(["git", "config", "user.email", "autofix-bot@railway.local"])
-        _run(["git", "config", "user.name", "AutoFix Bot"])
+    pushed_files = []
+    errors = []
 
-        # Inject token into remote URL
-        url_res = _run(["git", "remote", "get-url", "origin"])
-        original_url = url_res.stdout.strip()
-        auth_url = original_url.replace("https://", f"https://{token}@")
-        _run(["git", "remote", "set-url", "origin", auth_url])
+    async with _httpx.AsyncClient(timeout=30) as client:
+        for rel_path in changed_files:
+            abs_path = os.path.join(".", rel_path)
+            try:
+                with open(abs_path, "rb") as fh:
+                    content_bytes = fh.read()
+            except OSError as exc:
+                errors.append(f"{rel_path}: read error — {exc}")
+                continue
 
-        # Stage only the fixed files
-        for f in changed_files:
-            _run(["git", "add", f])
+            encoded = _b64.b64encode(content_bytes).decode()
 
-        n = len(changed_files)
-        files_str = ", ".join(changed_files)
-        commit_res = _run(["git", "commit", "-m",
-            f"autofix: apply {n} code review fix(es) via dashboard\n\nFixed files: {files_str}"])
+            # Get current file SHA (required by GitHub API to update a file)
+            get_resp = await client.get(f"{api}/contents/{rel_path}", headers=headers)
+            if get_resp.status_code == 200:
+                current_sha = get_resp.json().get("sha", "")
+            elif get_resp.status_code == 404:
+                current_sha = ""  # new file
+            else:
+                errors.append(f"{rel_path}: GitHub GET failed ({get_resp.status_code})")
+                continue
 
-        if commit_res.returncode != 0:
-            # Nothing to commit (fixes may already be staged/identical)
-            _run(["git", "remote", "set-url", "origin", original_url])
-            return {"pushed": False, "message": f"Git commit failed: {commit_res.stderr.strip() or 'nothing to commit'}"}
+            commit_msg = f"autofix: fix {rel_path} via dashboard code review"
+            payload: dict = {
+                "message": commit_msg,
+                "content": encoded,
+                "branch": "main",
+            }
+            if current_sha:
+                payload["sha"] = current_sha
 
-        push_res = _run(["git", "push", "origin", "HEAD"])
+            put_resp = await client.put(
+                f"{api}/contents/{rel_path}", headers=headers, json=payload
+            )
+            if put_resp.status_code in (200, 201):
+                pushed_files.append(rel_path)
+            else:
+                errors.append(f"{rel_path}: GitHub PUT failed ({put_resp.status_code}) — {put_resp.text[:200]}")
 
-        # Always restore clean remote URL (strip token)
-        _run(["git", "remote", "set-url", "origin", original_url])
-
-        if push_res.returncode == 0:
-            return {"pushed": True, "message": f"Pushed {n} fix(es) to GitHub. Railway redeploy triggered."}
-        else:
-            return {"pushed": False, "message": f"Push failed: {push_res.stderr.strip()}"}
-
-    except Exception as exc:
-        return {"pushed": False, "message": f"Git error: {exc}"}
+    if pushed_files:
+        msg = f"Committed {len(pushed_files)} file(s) to GitHub → Railway redeploy triggered."
+        if errors:
+            msg += f" ({len(errors)} error(s): {'; '.join(errors)})"
+        return {"pushed": True, "message": msg, "files": pushed_files}
+    else:
+        return {"pushed": False, "message": f"No files pushed. Errors: {'; '.join(errors) or 'none'}"}
 
 
 @app.post("/api/code_review/autofix")
