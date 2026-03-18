@@ -722,6 +722,36 @@ def research_list():
     return results
 
 
+_review_running: bool = False
+
+
+@app.post("/api/code_review/run_now")
+async def code_review_run_now():
+    global _review_running
+    if _review_running:
+        return JSONResponse({"ok": False, "error": "Review already running"}, status_code=409)
+    _review_running = True
+
+    async def _run():
+        global _review_running
+        try:
+            from src.meta_agent.code_reviewer import run_code_review
+            await run_code_review()
+        except Exception as exc:
+            import src.utils.logger as _log
+            _log.logger.warning(f"Manual code review error: {exc}")
+        finally:
+            _review_running = False
+
+    asyncio.create_task(_run())
+    return {"ok": True}
+
+
+@app.get("/api/code_review/run_now/status")
+def code_review_run_now_status():
+    return {"running": _review_running}
+
+
 @app.get("/api/code_review/latest")
 def code_review_latest():
     files = sorted(glob.glob("logs/code_review_*.json"), reverse=True)
@@ -1567,6 +1597,10 @@ tr:hover td{background:#181818}
 
 <!-- CODE REVIEW TAB -->
 <div class="page" id="tab-codereview">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+    <button id="cr-runnow-btn" onclick="runCodeReviewNow()" style="padding:6px 16px;background:#1b5e20;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:700">▶ Run Review Now</button>
+    <span id="cr-runnow-status" style="font-size:.7rem;color:#555"></span>
+  </div>
   <div class="cards" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
     <div class="card"><div class="lbl">Code Grade</div><div class="val blue" id="cr-grade">--</div></div>
     <div class="card"><div class="lbl">Health Score</div><div class="val" id="cr-score">--</div></div>
@@ -2930,6 +2964,49 @@ async function fetchAgentTimers(){
 fetchAgentTimers();
 setInterval(tickTimers,1000);
 setInterval(fetchAgentTimers,60000);  // re-sync from server every minute
+
+// ------------------------------------------------------------------ //
+//  Code Review — run now button                                       //
+// ------------------------------------------------------------------ //
+let _reviewPollInterval=null;
+
+async function runCodeReviewNow(){
+  const btn=$('cr-runnow-btn');
+  const status=$('cr-runnow-status');
+  btn.disabled=true;
+  status.textContent='Starting…';
+  status.style.color='#ffd740';
+  try{
+    const r=await fetch('/api/code_review/run_now',{method:'POST'});
+    const d=await r.json();
+    if(!d.ok){
+      status.textContent='Error: '+(d.error||'unknown');
+      status.style.color='#ff5252';
+      btn.disabled=false;
+      return;
+    }
+  }catch(e){
+    status.textContent='Request failed: '+e;
+    status.style.color='#ff5252';
+    btn.disabled=false;
+    return;
+  }
+  status.textContent='Running — this takes ~60s…';
+  if(_reviewPollInterval)clearInterval(_reviewPollInterval);
+  _reviewPollInterval=setInterval(async()=>{
+    try{
+      const d=await fetch('/api/code_review/run_now/status').then(r=>r.json());
+      if(!d.running){
+        clearInterval(_reviewPollInterval);_reviewPollInterval=null;
+        status.textContent='Done ✓ — refreshing results…';
+        status.style.color='#00e676';
+        btn.disabled=false;
+        await fetchCodeReview();
+        setTimeout(()=>{status.textContent='';},4000);
+      }
+    }catch(e){console.error('review poll error',e);}
+  },3000);
+}
 
 fetchAll();
 setInterval(fetchAll,3000);
