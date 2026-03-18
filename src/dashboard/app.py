@@ -631,6 +631,58 @@ def meta_latest():
 
 
 # ------------------------------------------------------------------ #
+#  Agent timers endpoint                                               #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/agent_timers")
+def agent_timers():
+    """Return last-run timestamps + intervals so the dashboard can show countdowns."""
+    now = time.time()
+
+    # Meta-agent: runs every META_AGENT_INTERVAL_MINUTES (default 30)
+    meta_interval = int(os.getenv("META_AGENT_INTERVAL_MINUTES", "30")) * 60
+    meta_files = sorted(glob.glob("logs/meta_agent_[0-9]*.json"), reverse=True)
+    meta_last = 0
+    if meta_files:
+        try:
+            meta_last = os.path.getmtime(meta_files[0])
+        except OSError:
+            pass
+
+    # Research: runs every RESEARCH_INTERVAL_HOURS (default 2)
+    research_interval = float(os.getenv("RESEARCH_INTERVAL_HOURS", "2")) * 3600
+    research_files = sorted(glob.glob("logs/research_*.json"), reverse=True)
+    research_last = 0
+    if research_files:
+        try:
+            research_last = os.path.getmtime(research_files[0])
+        except OSError:
+            pass
+
+    # Code review: runs weekly (7 days)
+    review_interval = 7 * 24 * 3600
+    review_files = sorted(glob.glob("logs/code_review_*.json"), reverse=True)
+    review_last = 0
+    if review_files:
+        try:
+            review_last = os.path.getmtime(review_files[0])
+        except OSError:
+            pass
+
+    def _next_in(last_ts, interval):
+        if last_ts == 0:
+            return None  # never run
+        return max(0.0, last_ts + interval - now)
+
+    return {
+        "now": now,
+        "meta_agent":    {"last_run": meta_last,     "interval_secs": meta_interval,     "next_in_secs": _next_in(meta_last, meta_interval)},
+        "research":      {"last_run": research_last,  "interval_secs": research_interval,  "next_in_secs": _next_in(research_last, research_interval)},
+        "code_review":   {"last_run": review_last,    "interval_secs": review_interval,    "next_in_secs": _next_in(review_last, review_interval)},
+    }
+
+
+# ------------------------------------------------------------------ #
 #  Code Review API endpoints                                           #
 # ------------------------------------------------------------------ #
 
@@ -1271,6 +1323,25 @@ tr:hover td{background:#181818}
   <div class="section">
     <h3>Strategy P&L</h3>
     <div class="strat-bars" id="strat-bars"><div class="no-data">Waiting for trades...</div></div>
+  </div>
+
+  <!-- Agent countdown timers -->
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px" id="agent-timers">
+    <div style="background:#111;border-radius:6px;padding:12px 14px;border-left:3px solid #7c4dff">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:#7c4dff;font-weight:700;margin-bottom:4px">Meta-Agent</div>
+      <div style="font-size:1.1rem;font-weight:700;font-family:monospace;color:#e0e0e0" id="timer-meta">--</div>
+      <div style="font-size:.62rem;color:#555;margin-top:2px" id="timer-meta-sub">last run --</div>
+    </div>
+    <div style="background:#111;border-radius:6px;padding:12px 14px;border-left:3px solid #00bcd4">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:#00bcd4;font-weight:700;margin-bottom:4px">Research Agent</div>
+      <div style="font-size:1.1rem;font-weight:700;font-family:monospace;color:#e0e0e0" id="timer-research">--</div>
+      <div style="font-size:.62rem;color:#555;margin-top:2px" id="timer-research-sub">last run --</div>
+    </div>
+    <div style="background:#111;border-radius:6px;padding:12px 14px;border-left:3px solid #ff9800">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:#ff9800;font-weight:700;margin-bottom:4px">Code Review</div>
+      <div style="font-size:1.1rem;font-weight:700;font-family:monospace;color:#e0e0e0" id="timer-review">--</div>
+      <div style="font-size:.62rem;color:#555;margin-top:2px" id="timer-review-sub">last run --</div>
+    </div>
   </div>
 </div>
 
@@ -2804,6 +2875,61 @@ async function deployProposal(){
     btn.disabled=false;btn.textContent='Deploy Strategy';
   }
 }
+
+// ------------------------------------------------------------------ //
+//  Agent countdown timers                                             //
+// ------------------------------------------------------------------ //
+let _timerData = null;
+let _timerFetchedAt = 0;
+
+function fmtCountdown(secs){
+  if(secs==null)return'never run';
+  if(secs<=0)return'<span style="color:#00e676">running soon</span>';
+  const h=Math.floor(secs/3600);
+  const m=Math.floor((secs%3600)/60);
+  const s=Math.floor(secs%60);
+  if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';
+  if(m>0)return m+'m '+String(s).padStart(2,'0')+'s';
+  return String(s)+'s';
+}
+
+function fmtLastRun(ts){
+  if(!ts)return'never';
+  const diff=Math.round((Date.now()/1000)-ts);
+  if(diff<60)return diff+'s ago';
+  if(diff<3600)return Math.floor(diff/60)+'m ago';
+  if(diff<86400)return Math.floor(diff/3600)+'h ago';
+  return Math.floor(diff/86400)+'d ago';
+}
+
+function tickTimers(){
+  if(!_timerData)return;
+  const elapsed=(Date.now()/1000)-_timerFetchedAt;
+  const agents=[
+    {key:'meta_agent',   timerId:'timer-meta',     subId:'timer-meta-sub'},
+    {key:'research',     timerId:'timer-research',  subId:'timer-research-sub'},
+    {key:'code_review',  timerId:'timer-review',    subId:'timer-review-sub'},
+  ];
+  for(const {key,timerId,subId} of agents){
+    const d=_timerData[key];
+    if(!d)continue;
+    const nextIn=d.next_in_secs!=null ? Math.max(0, d.next_in_secs - elapsed) : null;
+    $(timerId).innerHTML=fmtCountdown(nextIn);
+    $(subId).textContent='last run '+fmtLastRun(d.last_run);
+  }
+}
+
+async function fetchAgentTimers(){
+  try{
+    _timerData=await fetch('/api/agent_timers').then(r=>r.json());
+    _timerFetchedAt=Date.now()/1000;
+    tickTimers();
+  }catch(e){console.error('agent timers fetch failed',e);}
+}
+
+fetchAgentTimers();
+setInterval(tickTimers,1000);
+setInterval(fetchAgentTimers,60000);  // re-sync from server every minute
 
 fetchAll();
 setInterval(fetchAll,3000);
