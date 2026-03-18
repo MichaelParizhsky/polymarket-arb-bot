@@ -82,7 +82,8 @@ def status():
     trades_per_hour = round(len(p.trades) / max(uptime / 3600, 0.01), 1)
     return {
         "status": "running",
-        "paper_trading": True,
+        "paper_trading": _config.paper_trading if _config else True,
+        "polymarket_address": (_config.polymarket.funder_address if _config else ""),
         "uptime_seconds": uptime,
         "uptime": _fmt_uptime(uptime),
         "cycle_count": _cycle_count,
@@ -1441,6 +1442,27 @@ tr:hover td{background:#181818}
 
 <!-- OVERVIEW TAB -->
 <div class="page active" id="tab-overview">
+
+  <!-- Polymarket profile link -->
+  <div style="display:flex;justify-content:flex-end;margin-bottom:10px;gap:8px">
+    <a id="poly-profile-link" href="https://polymarket.com/portfolio" target="_blank"
+       style="display:inline-flex;align-items:center;gap:6px;background:#1a2744;color:#90caf9;
+              padding:7px 14px;border-radius:6px;font-size:.72rem;font-weight:700;
+              text-decoration:none;border:1px solid #1e3a6e;transition:background .15s"
+       onmouseover="this.style.background='#243a6e'" onmouseout="this.style.background='#1a2744'">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+      View My Positions on Polymarket
+    </a>
+    <a href="https://polymarket.com/portfolio" target="_blank" id="poly-portfolio-link"
+       style="display:inline-flex;align-items:center;gap:6px;background:#1a2744;color:#69f0ae;
+              padding:7px 14px;border-radius:6px;font-size:.72rem;font-weight:700;
+              text-decoration:none;border:1px solid #1e5a3e;transition:background .15s"
+       onmouseover="this.style.background='#1a3a2e'" onmouseout="this.style.background='#1a2744'">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      Portfolio Overview
+    </a>
+  </div>
+
   <div class="cards">
     <div class="card"><div class="lbl">Cash Balance</div><div class="val blue" id="balance">--</div></div>
     <div class="card"><div class="lbl">Total Value</div><div class="val" id="total-value">--</div><div class="sub" id="total-pnl-sub">--</div></div>
@@ -1980,6 +2002,16 @@ function updateStatus(s){
   $('live-winrate').textContent=wr.toFixed(1)+'%';
   $('live-winrate').className='val '+(wr>=50?'green':'red');
   $('live-trades').textContent=s.total_trades;
+
+  // Update Polymarket links with wallet address if available
+  const addr=s.polymarket_address||'';
+  if(addr){
+    const profileUrl=`https://polymarket.com/profile/${addr}`;
+    const el=$('poly-profile-link');
+    if(el){el.href=profileUrl;el.title=`Wallet: ${addr}`;}
+    const el2=$('poly-portfolio-link');
+    if(el2){el2.href=`https://polymarket.com/portfolio`;}
+  }
 }
 
 function updateStratPnl(data){
