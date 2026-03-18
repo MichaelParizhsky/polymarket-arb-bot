@@ -69,8 +69,8 @@ class ResolutionStrategy(BaseStrategy):
 
     def __init__(self, config, portfolio, risk_manager) -> None:
         super().__init__(config, portfolio, risk_manager)
-        # condition_id -> entry price; prevents doubling up on the same market
-        self._resolution_positions: dict[str, float] = {}
+        # condition_id -> (entry_price, entered_at); prevents doubling up on the same market
+        self._resolution_positions: dict[str, tuple[float, float]] = {}
 
     # ---------------------------------------------------------------- #
     #  Main scan                                                         #
@@ -80,6 +80,12 @@ class ResolutionStrategy(BaseStrategy):
         markets: list[Market] = context.get("markets", [])
         orderbooks: dict[str, Orderbook] = context.get("orderbooks", {})
         signals: list[Signal] = []
+
+        # Prune resolution positions older than 48h (markets long since resolved)
+        cutoff = time.time() - 48 * 3600
+        expired = [cid for cid, (_, entered_at) in self._resolution_positions.items() if entered_at < cutoff]
+        for cid in expired:
+            del self._resolution_positions[cid]
 
         for market in markets:
             if not market.active or market.closed:
@@ -148,7 +154,7 @@ class ResolutionStrategy(BaseStrategy):
                 f"{hours_left:.1f}h left | yes_mid={yes_mid:.3f} | "
                 f"edge={net_edge:.4f} | size=${size_usdc:.2f} | {market.question[:50]}"
             )
-            self._resolution_positions[market.condition_id] = best_ask
+            self._resolution_positions[market.condition_id] = (best_ask, time.time())
             return Signal(
                 strategy="resolution",
                 token_id=yes_token.token_id,
@@ -184,7 +190,7 @@ class ResolutionStrategy(BaseStrategy):
                 f"{hours_left:.1f}h left | yes_mid={yes_mid:.3f} | "
                 f"edge={net_edge:.4f} | size=${size_usdc:.2f} | {market.question[:50]}"
             )
-            self._resolution_positions[market.condition_id] = no_book.best_ask
+            self._resolution_positions[market.condition_id] = (no_book.best_ask, time.time())
             return Signal(
                 strategy="resolution",
                 token_id=no_token.token_id,
@@ -301,7 +307,7 @@ class ResolutionStrategy(BaseStrategy):
             f"size=${size_usdc:.2f} | q={market.question[:60]}"
         )
 
-        self._resolution_positions[market.condition_id] = best_ask
+        self._resolution_positions[market.condition_id] = (best_ask, time.time())
 
         return Signal(
             strategy="resolution",
@@ -370,7 +376,7 @@ class ResolutionStrategy(BaseStrategy):
             f"size=${size_usdc:.2f} | q={market.question[:60]}"
         )
 
-        self._resolution_positions[market.condition_id] = best_ask
+        self._resolution_positions[market.condition_id] = (best_ask, time.time())
 
         return Signal(
             strategy="resolution",

@@ -45,6 +45,17 @@ class MarketMakingStrategy(BaseStrategy):
 
         # Select eligible markets
         eligible = self._select_markets(markets, orderbooks)
+        eligible_ids = {
+            t.token_id
+            for m in eligible
+            for t in m.tokens if t.outcome.lower() == "yes"
+        }
+
+        # Prune stale entries for markets no longer being made
+        stale = [tid for tid in self._last_refresh if tid not in eligible_ids]
+        for tid in stale:
+            self._last_refresh.pop(tid, None)
+            self._quotes.pop(tid, None)
 
         for market in eligible:
             yes_tok = next((t for t in market.tokens if t.outcome.lower() == "yes"), None)

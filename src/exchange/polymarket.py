@@ -60,13 +60,13 @@ class Orderbook:
 
     @property
     def mid(self) -> float | None:
-        if self.best_bid and self.best_ask:
+        if self.best_bid is not None and self.best_ask is not None:
             return (self.best_bid + self.best_ask) / 2
         return None
 
     @property
     def spread(self) -> float | None:
-        if self.best_bid and self.best_ask:
+        if self.best_bid is not None and self.best_ask is not None:
             return self.best_ask - self.best_bid
         return None
 

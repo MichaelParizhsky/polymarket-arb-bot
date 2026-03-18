@@ -407,9 +407,12 @@ class EventDrivenStrategy(BaseStrategy):
     during volatile periods.
     """
 
-    _US_MARKET_OPEN_UTC_HOUR = 13    # 9:30am ET = 13:30 UTC (EST) / 14:30 UTC (EDT)
+    # Widen window to cover both EST (UTC-5) and EDT (UTC-4):
+    # Open:  9:30am ET = 13:30 UTC (EST) or 14:30 UTC (EDT) → use 13:30 to catch both
+    # Close: 4:00pm ET = 21:00 UTC (EDT) or 20:00 UTC (EST) → use 21:00 to catch both
+    _US_MARKET_OPEN_UTC_HOUR = 13
     _US_MARKET_OPEN_UTC_MINUTE = 30
-    _US_MARKET_CLOSE_UTC_HOUR = 20   # 4:00pm ET = 20:00 UTC (EST) / 21:00 UTC (EDT)
+    _US_MARKET_CLOSE_UTC_HOUR = 21
     _US_MARKET_CLOSE_UTC_MINUTE = 0
 
     def __init__(self, config, portfolio, risk_manager) -> None:
@@ -422,6 +425,7 @@ class EventDrivenStrategy(BaseStrategy):
         # LLM ensemble cache: condition_id -> (probability, cached_at_timestamp)
         self._llm_cache: dict[str, tuple[float, float]] = {}
         self._llm_cache_ttl: float = 1800.0  # 30-minute cache per market
+        self._llm_cache_max: int = 500        # prune when exceeding this size
 
     # ------------------------------------------------------------------
     # Public API
@@ -742,6 +746,11 @@ class EventDrivenStrategy(BaseStrategy):
 
             if 0.0 <= prob <= 1.0:
                 self._llm_cache[cache_key] = (prob, time.time())
+                # Prune oldest entries if cache is too large
+                if len(self._llm_cache) > self._llm_cache_max:
+                    oldest = sorted(self._llm_cache, key=lambda k: self._llm_cache[k][1])
+                    for old_key in oldest[:len(self._llm_cache) - self._llm_cache_max // 2]:
+                        del self._llm_cache[old_key]
                 logger.debug(
                     f"[LLM] {market.question[:50]} → {prob:.3f} "
                     f"(conf={confidence})"

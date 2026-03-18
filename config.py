@@ -84,8 +84,8 @@ class StrategyConfig:
     rebalancing_max_spend: float = 200.0
 
     # Combinatorial
-    combo_min_edge: float = 0.03
-    combo_lookback_markets: int = 50
+    combo_min_edge: float = field(default_factory=lambda: _float("COMBO_MIN_EDGE", 0.03))
+    combo_lookback_markets: int = field(default_factory=lambda: _int("COMBO_LOOKBACK_MARKETS", 50))
 
     # Latency arb (mostly disabled — Polymarket dynamic fees make this fee-negative at 50/50)
     latency_price_lag_threshold: float = 0.015  # 1.5% lag triggers entry
@@ -96,7 +96,7 @@ class StrategyConfig:
     mm_min_spread_bps: int = field(default_factory=lambda: _int("MM_MIN_SPREAD_BPS", 10))       # never quote tighter than 10 bps
     mm_order_size: float = field(default_factory=lambda: _float("MM_ORDER_SIZE", 100.0))
     mm_max_inventory: float = field(default_factory=lambda: _float("MM_MAX_INVENTORY", 500.0))
-    mm_skew_factor: float = 0.3
+    mm_skew_factor: float = field(default_factory=lambda: _float("MM_SKEW_FACTOR", 0.3))
     mm_inventory_skew_limit: float = field(default_factory=lambda: _float("MM_INVENTORY_SKEW_LIMIT", 0.30))  # stop quoting adverse side at 30% skew
     mm_max_market_spread_pct: float = field(default_factory=lambda: _float("MM_MAX_MARKET_SPREAD_PCT", 0.06))  # skip markets with >6% bid-ask spread
 
