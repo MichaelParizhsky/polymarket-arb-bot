@@ -36,6 +36,22 @@ from src.utils.constants import FEE_RATE
 from src.utils.logger import logger
 from src.utils.metrics import arb_opportunities, edge_detected
 
+
+def _log_decision(poly_q: str, ticker: str, edge, skipped: bool = False, reason: str = "", signal: bool = False) -> None:
+    """Log a cross-exchange scan decision to the dashboard ring buffer."""
+    try:
+        from src.dashboard.app import log_cross_exchange_decision
+        log_cross_exchange_decision({
+            "poly_question": poly_q[:60],
+            "ticker": ticker,
+            "edge": edge,
+            "skipped": skipped,
+            "signal": signal,
+            "reason": reason,
+        })
+    except Exception:
+        pass
+
 # Resolution criteria safety: keywords that indicate mechanical/unambiguous resolution
 # (price at specific time). Safe to arb because both platforms resolve identically.
 _MECHANICAL_KEYWORDS = {
@@ -202,6 +218,7 @@ class CrossExchangeStrategy(BaseStrategy):
                 logger.debug(
                     f"[CROSS-EXCHANGE] Skipping risky market pair: '{poly_market.question[:40]}'"
                 )
+                _log_decision(poly_market.question, k_market.ticker, edge=None, skipped=True, reason="risky resolution criteria")
                 continue
 
             # Fetch Kalshi orderbook for live bid/ask, fall back to top-level prices.
@@ -210,6 +227,11 @@ class CrossExchangeStrategy(BaseStrategy):
                 continue
 
             question_snippet = poly_market.question[:50]
+
+            # Log every matched pair scan (even if no signal)
+            _log_decision(poly_market.question, k_market.ticker,
+                          edge=max(k_yes_bid - poly_ask - fee_cost, poly_bid - k_yes_ask - fee_cost),
+                          skipped=False, signal=False)
 
             # ---------------------------------------------------------- #
             #  Case A: buy cheap YES on Polymarket, sell YES on Kalshi    #
@@ -224,6 +246,8 @@ class CrossExchangeStrategy(BaseStrategy):
                     f"[CROSS-EXCHANGE] Poly YES@{poly_ask:.4f} vs Kalshi YES@{k_yes_bid:.4f}"
                     f" | edge={edge_a:.4f} | {question_snippet}"
                 )
+                _log_decision(poly_market.question, k_market.ticker, edge=edge_a, signal=True,
+                              reason=f"Buy Poly@{poly_ask:.3f} / Sell Kalshi@{k_yes_bid:.3f}")
 
                 # Always execute the buy leg.
                 signals.append(Signal(
@@ -285,6 +309,8 @@ class CrossExchangeStrategy(BaseStrategy):
                     f"[CROSS-EXCHANGE] Kalshi YES@{k_yes_ask:.4f} vs Poly YES@{poly_bid:.4f}"
                     f" | edge={edge_b:.4f} | {question_snippet}"
                 )
+                _log_decision(poly_market.question, k_market.ticker, edge=edge_b, signal=True,
+                              reason=f"Buy Kalshi@{k_yes_ask:.3f} / Sell Poly@{poly_bid:.3f}")
 
                 # Kalshi buy leg (always).
                 signals.append(Signal(

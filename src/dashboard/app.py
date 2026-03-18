@@ -36,6 +36,18 @@ _risk = None
 _binance_ref = None
 _kalshi_ref = None
 
+# Ring buffer for cross-exchange signal decisions (last 100)
+_cross_exchange_log: list[dict] = []
+_cross_exchange_log_lock = __import__("threading").Lock()
+
+
+def log_cross_exchange_decision(entry: dict) -> None:
+    """Called by CrossExchangeStrategy to record each scan decision."""
+    with _cross_exchange_log_lock:
+        _cross_exchange_log.append({**entry, "ts": time.time()})
+        if len(_cross_exchange_log) > 100:
+            _cross_exchange_log.pop(0)
+
 
 def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None) -> None:
     global _portfolio, _bot_start_time, _config, _risk, _binance_ref, _kalshi_ref
@@ -345,6 +357,100 @@ def system_status():
         "meta_agent": meta_agent,
         "disk": disk,
     }
+
+
+@app.get("/api/kalshi/status")
+def kalshi_status():
+    """Detailed Kalshi connection diagnostics and recent cross-exchange decisions."""
+    has_email    = bool(os.getenv("KALSHI_EMAIL"))
+    has_password = bool(os.getenv("KALSHI_PASSWORD"))
+    has_token    = bool(os.getenv("KALSHI_API_TOKEN"))
+    has_key_id   = bool(os.getenv("KALSHI_API_KEY_ID"))
+    has_priv_key = bool(os.getenv("KALSHI_PRIVATE_KEY"))
+    kalshi_enabled      = os.getenv("KALSHI_ENABLED", "false").lower() in ("true", "1", "yes")
+    cross_ex_enabled    = os.getenv("STRATEGY_CROSS_EXCHANGE", "false").lower() in ("true", "1", "yes")
+    safe_only           = os.getenv("CROSS_EXCHANGE_SAFE_ONLY", "true").lower() in ("true", "1", "yes")
+    min_edge            = float(os.getenv("CROSS_EXCHANGE_MIN_EDGE", "0.05"))
+
+    # Determine auth method and status
+    if has_key_id and has_priv_key:
+        auth_method = "RSA Key (recommended)"
+        auth_ok = True
+    elif has_token:
+        auth_method = "Bearer Token"
+        auth_ok = True
+    elif has_email and has_password:
+        auth_method = "Email + Password"
+        auth_ok = True
+    elif has_email and not has_password:
+        auth_method = "Email set but KALSHI_PASSWORD missing"
+        auth_ok = False
+    elif has_key_id and not has_priv_key:
+        auth_method = "KALSHI_API_KEY_ID set but KALSHI_PRIVATE_KEY missing"
+        auth_ok = False
+    else:
+        auth_method = "No credentials"
+        auth_ok = False
+
+    # Checklist items with pass/fail and fix instructions
+    checklist = [
+        {
+            "label": "KALSHI_ENABLED=true",
+            "ok": kalshi_enabled,
+            "fix": "Add KALSHI_ENABLED=true to Railway env vars",
+        },
+        {
+            "label": "STRATEGY_CROSS_EXCHANGE=true",
+            "ok": cross_ex_enabled,
+            "fix": "Add STRATEGY_CROSS_EXCHANGE=true to Railway env vars",
+        },
+        {
+            "label": f"Auth credentials ({auth_method})",
+            "ok": auth_ok,
+            "fix": (
+                "Add one of: (A) KALSHI_EMAIL + KALSHI_PASSWORD  "
+                "(B) KALSHI_API_TOKEN  "
+                "(C) KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY  "
+                "— get API keys at kalshi.com → Account → API Access"
+            ),
+        },
+    ]
+
+    # Runtime state from the live client reference
+    runtime = {"client_loaded": False, "markets_cached": 0, "last_cache_age_s": None}
+    if _kalshi_ref is not None:
+        runtime["client_loaded"] = True
+        try:
+            runtime["markets_cached"] = len(_kalshi_ref._market_cache)
+            age = time.time() - _kalshi_ref._cache_ts if _kalshi_ref._cache_ts else None
+            runtime["last_cache_age_s"] = round(age, 1) if age else None
+        except Exception:
+            pass
+
+    # Recent cross-exchange decisions
+    with _cross_exchange_log_lock:
+        recent = list(reversed(_cross_exchange_log[-20:]))
+
+    all_ok = all(c["ok"] for c in checklist)
+    return {
+        "overall_status": "active" if all_ok and runtime["client_loaded"] else "misconfigured",
+        "auth_method": auth_method,
+        "auth_ok": auth_ok,
+        "kalshi_enabled": kalshi_enabled,
+        "cross_exchange_enabled": cross_ex_enabled,
+        "safe_only": safe_only,
+        "min_edge_pct": round(min_edge * 100, 1),
+        "checklist": checklist,
+        "runtime": runtime,
+        "recent_decisions": recent,
+    }
+
+
+@app.get("/api/kalshi/decisions")
+def kalshi_decisions():
+    """Return the last 100 cross-exchange scan decisions."""
+    with _cross_exchange_log_lock:
+        return list(reversed(_cross_exchange_log))
 
 
 @app.get("/api/analytics")
@@ -1581,6 +1687,12 @@ tr:hover td{background:#181818}
     <h3>Disk Usage</h3>
     <div id="status-disk"><div class="no-data">Loading...</div></div>
   </div>
+
+  <!-- Kalshi diagnostics -->
+  <div class="section">
+    <h3>Kalshi / Cross-Exchange</h3>
+    <div id="kalshi-diag"><div class="no-data">Loading...</div></div>
+  </div>
 </div>
 
 <!-- ANALYTICS TAB -->
@@ -2101,8 +2213,12 @@ function updateTrades(data,status){
 // ------------------------------------------------------------------ //
 async function fetchSystemStatus(){
   try{
-    const d=await fetch('/api/system').then(r=>r.json());
+    const [d,k]=await Promise.all([
+      fetch('/api/system').then(r=>r.json()),
+      fetch('/api/kalshi/status').then(r=>r.json()),
+    ]);
     renderSystemStatus(d);
+    renderKalshiDiag(k);
   }catch(e){
     $('status-connections').innerHTML='<div class="no-data">Failed to load system status</div>';
   }
@@ -2207,6 +2323,68 @@ function renderSystemStatus(d){
       <div><span style="color:#555;font-size:.65rem;text-transform:uppercase">Log Files</span><div style="font-weight:700;color:#00e5ff;margin-top:4px">${disk.log_files_count||0}</div></div>
       <div><span style="color:#555;font-size:.65rem;text-transform:uppercase">Total Size</span><div style="font-weight:700;color:#00e5ff;margin-top:4px">${(disk.log_files_mb||0).toFixed(2)} MB</div></div>
     </div>`;
+}
+
+// ------------------------------------------------------------------ //
+//  Kalshi diagnostics                                                  //
+// ------------------------------------------------------------------ //
+function renderKalshiDiag(k){
+  const el=$('kalshi-diag');
+  if(!el)return;
+  const overall=k.overall_status==='active';
+  const statusColor=overall?'#00e676':'#ffd740';
+  const statusText=overall?'ACTIVE':'SETUP REQUIRED';
+
+  // Checklist
+  const checkHtml=(k.checklist||[]).map(c=>`
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #1a1a1a">
+      <span style="font-size:1rem;margin-top:1px">${c.ok?'✅':'❌'}</span>
+      <div style="flex:1">
+        <div style="font-size:.75rem;font-weight:700;color:${c.ok?'#00e676':'#ffd740'}">${c.label}</div>
+        ${!c.ok?`<div style="font-size:.68rem;color:#888;margin-top:3px;font-family:monospace">${c.fix}</div>`:''}
+      </div>
+    </div>`).join('');
+
+  // Runtime info
+  const rt=k.runtime||{};
+  const runtimeHtml=rt.client_loaded?`
+    <div style="display:flex;gap:20px;margin-top:10px;font-size:.72rem">
+      <div><span style="color:#555">Markets cached:</span> <span style="color:#00e5ff;font-weight:700">${rt.markets_cached||0}</span></div>
+      <div><span style="color:#555">Cache age:</span> <span style="color:#00e5ff;font-weight:700">${rt.last_cache_age_s!=null?rt.last_cache_age_s+'s':'--'}</span></div>
+      <div><span style="color:#555">Auth:</span> <span style="color:#00e5ff;font-weight:700">${k.auth_method||'--'}</span></div>
+      <div><span style="color:#555">Min edge:</span> <span style="color:#00e5ff;font-weight:700">${k.min_edge_pct||5}%</span></div>
+      <div><span style="color:#555">Safe-only:</span> <span style="color:#00e5ff;font-weight:700">${k.safe_only?'Yes (crypto price only)':'No'}</span></div>
+    </div>`:'<div style="font-size:.7rem;color:#555;margin-top:8px">Client not loaded — enable KALSHI_ENABLED=true and redeploy.</div>';
+
+  // Recent decisions
+  const decisions=k.recent_decisions||[];
+  const decHtml=decisions.length?`
+    <div style="margin-top:12px">
+      <div style="font-size:.65rem;text-transform:uppercase;letter-spacing:.07em;color:#555;margin-bottom:6px">Recent Cross-Exchange Scans (last 20)</div>
+      <div style="display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto">
+        ${decisions.map(d=>{
+          const age=Math.round((Date.now()/1000)-(d.ts||0));
+          const edgePct=d.edge!=null?(d.edge*100).toFixed(2)+'%':'--';
+          const color=d.signal?'#00e676':d.skipped?'#ffd740':'#555';
+          const label=d.signal?'SIGNAL':d.skipped?'SKIPPED':'SCANNED';
+          return`<div style="display:flex;gap:8px;align-items:center;padding:5px 8px;background:#111;border-radius:3px;border-left:3px solid ${color};font-size:.68rem">
+            <span style="font-weight:700;color:${color};min-width:58px">${label}</span>
+            <span style="color:#888;min-width:36px">${age}s ago</span>
+            <span style="color:#e0e0e0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.poly_question||d.ticker||''}</span>
+            <span style="color:#ffd740;min-width:40px;text-align:right">${edgePct}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`:`<div style="font-size:.7rem;color:#555;margin-top:10px">${overall?'No cross-exchange scans logged yet — strategy running.':'Enable Kalshi to see scan decisions here.'}</div>`;
+
+  el.innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-size:1.1rem;font-weight:700;color:${statusColor}">${statusText}</span>
+      <span style="font-size:.68rem;color:#555">${k.auth_method||'No credentials set'}</span>
+    </div>
+    ${checkHtml}
+    ${runtimeHtml}
+    ${decHtml}`;
 }
 
 // ------------------------------------------------------------------ //
