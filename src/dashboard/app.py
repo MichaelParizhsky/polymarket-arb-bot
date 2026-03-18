@@ -711,6 +711,15 @@ def code_review_list():
 # ------------------------------------------------------------------ #
 
 _autofix_status: dict = {"state": "idle", "results": [], "error": None, "started_at": None, "finished_at": None}
+_pending_deploys: list[dict] = []
+
+
+def get_pending_deploys() -> list[dict]:
+    return list(_pending_deploys)
+
+
+def clear_pending_deploys() -> None:
+    _pending_deploys.clear()
 
 
 async def _run_autofix_task() -> None:
@@ -888,6 +897,110 @@ async def code_review_autofix():
 @app.get("/api/code_review/autofix/status")
 def code_review_autofix_status():
     return _autofix_status
+
+
+# ------------------------------------------------------------------ #
+#  Research signals + strategy proposals                              #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/research/signals")
+def research_signals():
+    try:
+        with open("logs/research_signals.json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"active_topics": [], "strategy_focus": None, "param_hints": {}}
+
+
+@app.get("/api/research/proposals/list")
+def research_proposals_list():
+    import glob as _glob
+    metas = sorted(_glob.glob("logs/proposals/*_meta.json"), reverse=True)[:20]
+    results = []
+    for mp in metas:
+        try:
+            with open(mp) as f:
+                results.append(json.load(f))
+        except Exception:
+            pass
+    return results
+
+
+@app.get("/api/research/proposals/{proposal_id}")
+def research_proposal_detail(proposal_id: str):
+    import glob as _glob
+    # Find meta file by id
+    for mp in _glob.glob("logs/proposals/*_meta.json"):
+        try:
+            with open(mp) as f:
+                meta = json.load(f)
+            if meta.get("id") == proposal_id:
+                # Load code
+                code = ""
+                try:
+                    with open(meta["file_path"], encoding="utf-8") as f:
+                        code = f.read()
+                except Exception:
+                    pass
+                return {**meta, "code": code}
+        except Exception:
+            pass
+    return JSONResponse({"error": "Not found"}, status_code=404)
+
+
+@app.post("/api/research/proposals/{proposal_id}/deploy")
+async def deploy_proposal(proposal_id: str):
+    import ast as _ast
+    import glob as _glob
+    import shutil as _shutil
+
+    for mp in _glob.glob("logs/proposals/*_meta.json"):
+        try:
+            with open(mp) as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+        if meta.get("id") != proposal_id:
+            continue
+
+        if meta.get("deployed"):
+            return JSONResponse({"ok": False, "error": "Already deployed"}, status_code=409)
+
+        # Load and validate code
+        try:
+            with open(meta["file_path"], encoding="utf-8") as f:
+                code = f.read()
+            _ast.parse(code)
+        except SyntaxError as exc:
+            return JSONResponse({"ok": False, "error": f"Syntax error: {exc}"}, status_code=400)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+        # Copy to src/strategies/
+        dest = os.path.join("src", "strategies", meta["file_name"])
+        try:
+            _shutil.copy2(meta["file_path"], dest)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": f"Copy failed: {exc}"}, status_code=500)
+
+        # Mark deployed
+        meta["deployed"] = True
+        meta["deployed_at"] = time.time()
+        meta["deployed_path"] = dest
+        with open(mp, "w") as f:
+            json.dump(meta, f, indent=2)
+
+        # Queue for hot-load by main bot loop
+        _pending_deploys.append({
+            "proposal_id": proposal_id,
+            "class_name": meta["class_name"],
+            "file_path": dest,
+            "deployed_at": meta["deployed_at"],
+        })
+
+        return {"ok": True, "deployed_path": dest, "class_name": meta["class_name"]}
+
+    return JSONResponse({"error": "Proposal not found"}, status_code=404)
 
 
 # ------------------------------------------------------------------ #
@@ -1436,6 +1549,23 @@ tr:hover td{background:#181818}
     <div class="card"><div class="lbl">Web Search</div><div class="val" id="res-websearch">--</div><div class="sub" id="res-interval">every -- h</div></div>
   </div>
 
+  <!-- Active Research Signals -->
+  <div class="meta-card" id="res-signals-card" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+      <h3 style="margin:0">Active Research Signals</h3>
+      <span id="res-signals-status" style="font-size:.68rem;color:#555">injected into combinatorial strategy</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span style="font-size:.68rem;color:#888;text-transform:uppercase;letter-spacing:.05em">Hot topics:</span>
+      <div id="res-active-topics" style="display:flex;gap:6px;flex-wrap:wrap"><span style="color:#555;font-size:.68rem">none yet</span></div>
+    </div>
+    <div style="margin-top:6px;display:flex;gap:16px;flex-wrap:wrap">
+      <span style="font-size:.68rem"><span style="color:#888">Strategy focus:</span> <span id="res-signal-focus" style="color:#ffd740">--</span></span>
+      <span style="font-size:.68rem"><span style="color:#888">Confidence:</span> <span id="res-signal-confidence">--</span></span>
+      <span style="font-size:.68rem"><span style="color:#888">Param hints:</span> <span id="res-signal-params" style="font-family:monospace;color:#90caf9">none</span></span>
+    </div>
+  </div>
+
   <!-- Top insights from latest run -->
   <div class="res-insights-card" id="res-insights-card">
     <div class="res-insights-header">
@@ -1461,6 +1591,28 @@ tr:hover td{background:#181818}
   <div class="section" style="margin-top:14px">
     <h3>Research History <span style="color:#555;font-weight:normal;font-size:.65rem">(last 24 runs)</span></h3>
     <div id="res-history"><div class="no-data">No history yet.</div></div>
+  </div>
+
+  <!-- Strategy Proposals -->
+  <div class="section" style="margin-top:14px">
+    <h3>Strategy Proposals <span style="color:#555;font-weight:normal;font-size:.65rem">generated by research agent</span></h3>
+    <div id="res-proposals"><div class="no-data">No proposals yet — generated automatically when a high-relevance strategy finding is found.</div></div>
+  </div>
+
+  <!-- Proposal code viewer modal -->
+  <div id="proposal-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);z-index:1000;overflow:auto;padding:20px">
+    <div style="max-width:800px;margin:0 auto;background:#1a1a1a;border-radius:8px;padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h3 id="modal-title" style="margin:0"></h3>
+        <button onclick="closeProposalModal()" style="background:none;border:none;color:#fff;font-size:1.2rem;cursor:pointer">&#x2715;</button>
+      </div>
+      <div id="modal-finding" style="font-size:.72rem;color:#888;margin-bottom:12px;padding:8px;background:#111;border-radius:4px"></div>
+      <pre id="modal-code" style="background:#0a0a0a;padding:14px;border-radius:4px;overflow:auto;font-size:.7rem;color:#e0e0e0;max-height:60vh;white-space:pre-wrap"></pre>
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+        <button id="modal-deploy-btn" onclick="deployProposal()" style="padding:8px 20px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:700">Deploy Strategy</button>
+        <span id="modal-deploy-status" style="font-size:.72rem;color:#555"></span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2218,11 +2370,15 @@ function renderBalances(d){
 // ------------------------------------------------------------------ //
 async function fetchResearch(){
   try{
-    const [latest,history]=await Promise.all([
+    const [latest,history,signals,proposals]=await Promise.all([
       fetch('/api/research/latest').then(r=>r.json()),
       fetch('/api/research/list').then(r=>r.json()),
+      fetch('/api/research/signals').then(r=>r.json()),
+      fetch('/api/research/proposals/list').then(r=>r.json()),
     ]);
     renderResearch(latest,history);
+    renderResearchSignals(signals);
+    renderProposals(proposals);
   }catch(e){
     console.error('Research fetch failed',e);
   }
@@ -2566,6 +2722,87 @@ function renderAutofixStatus(d){
         </div>
       </div>`).join('')+
     `</div>`;
+}
+
+function renderResearchSignals(s){
+  if(!s||!s.active_topics){return;}
+  const topics=s.active_topics||[];
+  $('res-active-topics').innerHTML=topics.length
+    ? topics.map(t=>`<span style="background:#1a2744;color:#90caf9;padding:2px 8px;border-radius:10px;font-size:.65rem">${t}</span>`).join('')
+    : '<span style="color:#555;font-size:.68rem">none</span>';
+  $('res-signal-focus').textContent=s.strategy_focus||'none';
+  $('res-signal-confidence').textContent=s.confidence||'--';
+  const hints=s.param_hints||{};
+  const hintStr=Object.keys(hints).length
+    ? Object.entries(hints).map(([k,v])=>`${k}=${v}`).join(', ')
+    : 'none';
+  $('res-signal-params').textContent=hintStr;
+}
+
+let _currentProposalId=null;
+
+function renderProposals(proposals){
+  if(!proposals||!proposals.length){
+    $('res-proposals').innerHTML='<div class="no-data">No proposals yet.</div>';
+    return;
+  }
+  $('res-proposals').innerHTML=proposals.map(p=>`
+    <div style="padding:10px 14px;background:#111;border-radius:6px;margin-bottom:8px;display:flex;gap:14px;align-items:flex-start">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+          <span style="font-size:.72rem;font-weight:700;color:#90caf9">${p.class_name||'?'}</span>
+          ${p.deployed?'<span style="font-size:.65rem;background:#1b5e20;color:#00e676;padding:1px 7px;border-radius:8px">deployed</span>':'<span style="font-size:.65rem;background:#1a237e;color:#90caf9;padding:1px 7px;border-radius:8px">proposed</span>'}
+        </div>
+        <div style="font-size:.72rem;font-weight:600;margin-bottom:2px">${p.finding_title||''}</div>
+        <div style="font-size:.68rem;color:#888">${(p.finding_summary||'').substring(0,180)}${(p.finding_summary||'').length>180?'\u2026':''}</div>
+      </div>
+      <button onclick="viewProposal('${p.id}')" style="padding:5px 12px;background:#1a237e;color:#90caf9;border:none;border-radius:4px;cursor:pointer;font-size:.7rem;white-space:nowrap">View Code</button>
+    </div>`).join('');
+}
+
+async function viewProposal(id){
+  try{
+    const d=await fetch('/api/research/proposals/'+id).then(r=>r.json());
+    if(d.error){alert(d.error);return;}
+    _currentProposalId=id;
+    $('modal-title').textContent=d.class_name||'Strategy Proposal';
+    $('modal-finding').textContent=d.finding_title+' \u2014 '+d.finding_summary;
+    $('modal-code').textContent=d.code||'(no code)';
+    $('modal-deploy-btn').disabled=!!d.deployed;
+    $('modal-deploy-btn').textContent=d.deployed?'Already Deployed':'Deploy Strategy';
+    $('modal-deploy-status').textContent=d.deployed?'Deployed \u2014 restart bot to activate':'';
+    $('proposal-modal').style.display='block';
+  }catch(e){alert('Failed to load proposal: '+e);}
+}
+
+function closeProposalModal(){
+  $('proposal-modal').style.display='none';
+  _currentProposalId=null;
+}
+
+async function deployProposal(){
+  if(!_currentProposalId)return;
+  if(!confirm('Deploy this strategy? It will be copied to src/strategies/ and hot-loaded into the running bot.'))return;
+  const btn=$('modal-deploy-btn');
+  btn.disabled=true;btn.textContent='Deploying\u2026';
+  $('modal-deploy-status').textContent='';
+  try{
+    const r=await fetch('/api/research/proposals/'+_currentProposalId+'/deploy',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      $('modal-deploy-status').textContent='\u2705 Deployed to '+d.deployed_path+' \u2014 hot-loading\u2026';
+      $('modal-deploy-status').style.color='#00e676';
+      btn.textContent='Deployed';
+    }else{
+      $('modal-deploy-status').textContent='\u274c '+(d.error||'Unknown error');
+      $('modal-deploy-status').style.color='#ff5252';
+      btn.disabled=false;btn.textContent='Deploy Strategy';
+    }
+  }catch(e){
+    $('modal-deploy-status').textContent='\u274c '+e;
+    $('modal-deploy-status').style.color='#ff5252';
+    btn.disabled=false;btn.textContent='Deploy Strategy';
+  }
 }
 
 fetchAll();

@@ -37,6 +37,21 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
     "crypto_etf": ["etf", "spot bitcoin", "spot eth"],
 }
 
+def _load_research_topics() -> dict[str, list[str]]:
+    """Load dynamically injected topics from the latest research agent run."""
+    import json as _json
+    try:
+        with open("logs/research_signals.json") as f:
+            data = _json.load(f)
+        topics = data.get("active_topics", [])
+        if topics:
+            # Group all research-injected keywords under a single "research_hot" cluster
+            return {"research_hot": [kw.lower() for kw in topics[:20]]}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
 # Price threshold regex (e.g., "above 60000", "> 60k")
 PRICE_RE = re.compile(r"[>$]?\s*(\d[\d,]*(?:\.\d+)?)\s*[kK]?\b")
 
@@ -79,10 +94,16 @@ class CombinatorialStrategy(BaseStrategy):
 
         # 1. Cluster markets by topic
         clusters: dict[str, list[Market]] = defaultdict(list)
+        # Merge in research-injected topics for this cycle
+        dynamic_topics = {**TOPIC_KEYWORDS, **_load_research_topics()}
         for m in markets:
             if not m.active or m.closed:
                 continue
-            topic = _question_to_topic(m.question)
+            q_lower = m.question.lower()
+            topic = next(
+                (t for t, kws in dynamic_topics.items() if any(kw in q_lower for kw in kws)),
+                None,
+            )
             if topic:
                 clusters[topic].append(m)
 

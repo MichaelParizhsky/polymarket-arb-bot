@@ -73,6 +73,7 @@ class ArbBot:
         # Rate limiting
         self._last_trade_time: float = 0.0
         self._token_last_traded: dict[str, float] = {}
+        self._dynamic_strategies: list = []  # strategies deployed at runtime via dashboard
 
     def _build_strategies(self) -> None:
         cfg = self.config.strategies
@@ -106,6 +107,8 @@ class ArbBot:
             )
         logger.info(f"Loaded {len(self._strategies)} strategies: "
                     f"{[s.name for s in self._strategies]}")
+        # Re-add any runtime-deployed strategies
+        self._strategies.extend(self._dynamic_strategies)
 
     async def run(self) -> None:
         """Main bot loop."""
@@ -212,6 +215,9 @@ class ArbBot:
         summary_interval = 300   # print summary every 5 minutes
 
         while self._running:
+            # Check for dashboard-deployed strategies every 10 cycles
+            if self._cycle_count % 10 == 0:
+                self._process_pending_deploys()
             cycle_start = time.perf_counter()
             self._cycle_count += 1
             import src.dashboard.app as _dash_mod
@@ -673,6 +679,46 @@ class ArbBot:
                 logger.info(f"[Config] Restored {len(applied)} auto-tuned parameter(s) from disk: {applied}")
         except Exception as exc:
             logger.warning(f"[Config] Could not load saved config: {exc}")
+
+    def _process_pending_deploys(self) -> None:
+        """Hot-load any strategy files deployed via the dashboard."""
+        import importlib.util as _ilu
+        import src.dashboard.app as _dash_mod
+        from src.strategies.base import BaseStrategy
+
+        pending = _dash_mod.get_pending_deploys()
+        if not pending:
+            return
+        _dash_mod.clear_pending_deploys()
+
+        for deploy in pending:
+            file_path = deploy.get("file_path", "")
+            class_name = deploy.get("class_name", "")
+            if not file_path or not os.path.exists(file_path):
+                logger.warning(f"Deploy: file not found: {file_path}")
+                continue
+            try:
+                spec = _ilu.spec_from_file_location(f"dynamic_{class_name}", file_path)
+                mod = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                # Find the Strategy subclass
+                klass = None
+                for name, obj in mod.__dict__.items():
+                    if (isinstance(obj, type)
+                            and issubclass(obj, BaseStrategy)
+                            and obj is not BaseStrategy
+                            and name == class_name):
+                        klass = obj
+                        break
+                if not klass:
+                    logger.warning(f"Deploy: class {class_name} not found in {file_path}")
+                    continue
+                instance = klass(self.config, self.portfolio, self.risk)
+                self._dynamic_strategies.append(instance)
+                self._strategies.append(instance)
+                logger.info(f"[Deploy] Hot-loaded strategy: {class_name} from {file_path}")
+            except Exception as exc:
+                logger.error(f"Deploy: failed to load {file_path}: {exc}")
 
     def _prune_meta_agent_logs(self, keep: int = 48) -> None:
         """Delete oldest meta_agent_*.json files, keeping only the most recent `keep`."""
