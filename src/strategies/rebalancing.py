@@ -84,33 +84,38 @@ class RebalancingStrategy(BaseStrategy):
                 if size_usdc < 1.0:
                     return []
 
+                # Both legs must buy the same number of contracts so they cancel at resolution.
                 actual_contracts = size_usdc / yes_book.best_ask
+                yes_leg_usdc = actual_contracts * yes_book.best_ask
+                no_leg_usdc = actual_contracts * no_book.best_ask
 
                 self.log(
                     f"LONG REBAL | {market.question[:60]} | "
                     f"YES@{yes_book.best_ask:.3f} + NO@{no_book.best_ask:.3f} = {ask_sum:.3f} | "
-                    f"edge={net_edge:.3f} | size=${size_usdc:.2f}"
+                    f"edge={net_edge:.3f} | contracts={actual_contracts:.2f}"
                 )
-                # Two signals: buy YES and buy NO
+                # Two signals: buy YES and buy NO (same contract count on each leg)
                 signals.append(Signal(
                     strategy="rebalancing",
                     token_id=yes_token.token_id,
                     side="BUY",
                     price=yes_book.best_ask,
-                    size_usdc=size_usdc,
+                    size_usdc=yes_leg_usdc,
                     edge=net_edge,
                     notes=f"Long rebal YES | market={market.condition_id[:8]}",
-                    metadata={"pair_token_id": no_token.token_id, "ask_sum": ask_sum},
+                    metadata={"pair_token_id": no_token.token_id, "ask_sum": ask_sum,
+                              "contracts": actual_contracts},
                 ))
                 signals.append(Signal(
                     strategy="rebalancing",
                     token_id=no_token.token_id,
                     side="BUY",
                     price=no_book.best_ask,
-                    size_usdc=actual_contracts * no_book.best_ask,
+                    size_usdc=no_leg_usdc,
                     edge=net_edge,
                     notes=f"Long rebal NO | market={market.condition_id[:8]}",
-                    metadata={"pair_token_id": yes_token.token_id, "ask_sum": ask_sum},
+                    metadata={"pair_token_id": yes_token.token_id, "ask_sum": ask_sum,
+                              "contracts": actual_contracts},
                 ))
 
         # --- Case 2: Sell YES + Sell NO (sum of bids > 1) ---

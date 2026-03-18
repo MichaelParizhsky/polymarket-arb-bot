@@ -32,10 +32,10 @@ _INCLUDE_PATTERNS = [
 _SKIP_IF_CONTAINS = ["__init__"]
 
 # Per-file char limit; larger files get truncated
-_MAX_FILE_CHARS = 10_000
+_MAX_FILE_CHARS = 18_000
 
 # Total input char cap (controls total token cost)
-_MAX_TOTAL_CHARS = 120_000
+_MAX_TOTAL_CHARS = 160_000
 
 # Priority files — included in full even if total cap is approaching
 _PRIORITY_FILES = {"main.py", "config.py", "src/risk/risk_manager.py"}

@@ -11,9 +11,7 @@ def _bool(key: str, default: bool = False) -> bool:
 
 
 def _float(key: str, default: float) -> float:
-    val = os.getenv(key, "").strip()
-    if not val:
-        return default
+    val = os.getenv(key, str(default)).strip()
     try:
         return float(val)
     except ValueError:
@@ -21,9 +19,7 @@ def _float(key: str, default: float) -> float:
 
 
 def _int(key: str, default: int) -> int:
-    val = os.getenv(key, "").strip()
-    if not val:
-        return default
+    val = os.getenv(key, str(default)).strip()
     try:
         return int(val)
     except ValueError:
