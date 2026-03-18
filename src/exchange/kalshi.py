@@ -129,19 +129,25 @@ class KalshiClient:
     # ------------------------------------------------------------------ #
 
     async def __aenter__(self) -> "KalshiClient":
-        self._http = httpx.AsyncClient(
-            base_url=self.API_BASE,
-            timeout=httpx.Timeout(10.0),
-            headers={"User-Agent": "polymarket-arb-bot/1.0"},
-        )
-        # Try to acquire a token if we only have email+password.
-        if not self._token and self._email and self._password:
-            await self._login()
+        await self._ensure_http()
         return self
 
     async def __aexit__(self, *_: Any) -> None:
         if self._http:
             await self._http.aclose()
+            self._http = None
+
+    async def _ensure_http(self) -> None:
+        """Lazily create the HTTP client and authenticate. Safe to call multiple times."""
+        if self._http is None:
+            self._http = httpx.AsyncClient(
+                base_url=self.API_BASE,
+                timeout=httpx.Timeout(10.0),
+                headers={"User-Agent": "polymarket-arb-bot/1.0"},
+            )
+            # Try to acquire a token if we only have email+password.
+            if not self._token and self._email and self._password:
+                await self._login()
 
     # ------------------------------------------------------------------ #
     #  Auth helpers                                                        #
@@ -213,6 +219,7 @@ class KalshiClient:
             self._warn_no_creds()
             return []
 
+        await self._ensure_http()
         start = time.perf_counter()
         try:
             resp = await self._http.get(
@@ -264,6 +271,7 @@ class KalshiClient:
             self._warn_no_creds()
             return None
 
+        await self._ensure_http()
         start = time.perf_counter()
         try:
             resp = await self._http.get(
