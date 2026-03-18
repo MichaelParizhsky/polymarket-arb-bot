@@ -211,9 +211,9 @@ class MarketMakingStrategy(BaseStrategy):
             "time": time.time(),
         }
         mm_inventory.set(sum(
-            p.cost_basis for p in self.portfolio.positions.values()
-            if self.portfolio.positions.get(p.token_id, None) and
-               any(s.notes and "MM" in s.notes for s in [])  # simplified
+            self.portfolio.positions[tid].cost_basis
+            for tid in self._quotes
+            if tid in self.portfolio.positions
         ))
 
         return signals

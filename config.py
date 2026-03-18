@@ -11,11 +11,23 @@ def _bool(key: str, default: bool = False) -> bool:
 
 
 def _float(key: str, default: float) -> float:
-    return float(os.getenv(key, default))
+    val = os.getenv(key, "").strip()
+    if not val:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
 
 
 def _int(key: str, default: int) -> int:
-    return int(os.getenv(key, default))
+    val = os.getenv(key, "").strip()
+    if not val:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        return default
 
 
 @dataclass

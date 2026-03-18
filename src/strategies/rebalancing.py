@@ -9,7 +9,6 @@ Edge = |sum - 1.0| - fees - slippage
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
@@ -31,19 +30,17 @@ class RebalancingStrategy(BaseStrategy):
         markets: list[Market] = context.get("markets", [])
         signals: list[Signal] = []
 
-        # Process markets in parallel batches
-        tasks = [self._check_market(m, context) for m in markets if m.active and not m.closed]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for result in results:
-            if isinstance(result, Exception):
-                self.log(f"Market check error: {result}", "debug")
-            elif result:
-                signals.extend(result)
+        # _check_market does no I/O — run synchronously to avoid task scheduling overhead
+        for m in markets:
+            if m.active and not m.closed:
+                try:
+                    signals.extend(self._check_market(m, context))
+                except Exception as exc:
+                    self.log(f"Market check error: {exc}", "debug")
 
         return signals
 
-    async def _check_market(self, market: Market, context: dict) -> list[Signal]:
+    def _check_market(self, market: Market, context: dict) -> list[Signal]:
         """Check a single market for YES+NO imbalance."""
         if len(market.tokens) < 2:
             return []

@@ -38,8 +38,9 @@ CRYPTO_MARKETS: dict[str, list[str]] = {
 }
 
 
-def _sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
+def _norm_cdf(x: float) -> float:
+    """Exact standard normal CDF using math.erfc."""
+    return math.erfc(-x / math.sqrt(2)) / 2
 
 
 def _fair_value_above_target(
@@ -49,8 +50,8 @@ def _fair_value_above_target(
     vol: float = 0.80,  # implied annual vol for crypto
 ) -> float:
     """
-    Black-Scholes inspired probability that price will be >= target at expiry.
-    Simplified: uses log-normal drift assumption.
+    Black-Scholes risk-neutral probability that price will be >= target at expiry.
+    Uses exact normal CDF (math.erfc) instead of a sigmoid approximation.
     """
     if spot <= 0 or target <= 0 or days_to_expiry <= 0:
         return 0.5
@@ -58,9 +59,9 @@ def _fair_value_above_target(
     sigma_sqrt_t = vol * math.sqrt(t)
     if sigma_sqrt_t < 1e-8:
         return 1.0 if spot >= target else 0.0
-    # Risk-neutral probability of S_T >= K
+    # Risk-neutral d2: P(S_T >= K) = N(d2)
     d2 = (math.log(spot / target) + (-0.5 * vol ** 2) * t) / sigma_sqrt_t
-    return _sigmoid(d2 * 2.5)   # sigmoid approximation of N(d2)
+    return _norm_cdf(d2)
 
 
 def _days_to_expiry(end_date_iso: str) -> float:

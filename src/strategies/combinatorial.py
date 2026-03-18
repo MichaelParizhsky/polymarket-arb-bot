@@ -49,7 +49,7 @@ def _extract_price_level(text: str) -> float | None:
         return None
     raw = m.group(1).replace(",", "")
     val = float(raw)
-    if "k" in text[m.start():m.end() + 2]:
+    if text[m.end():m.end() + 1] == "k":
         val *= 1000
     return val
 

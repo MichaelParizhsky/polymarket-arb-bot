@@ -26,7 +26,7 @@ class RiskManager:
         if self._hard_stop:
             return False, "Hard stop active"
 
-        # Drawdown check
+        # Drawdown check applies to all trade directions
         total = self.portfolio.total_value()
         drawdown = (self.portfolio.starting_balance - total) / self.portfolio.starting_balance
         if drawdown >= self.config.risk.max_drawdown_pct:
@@ -36,15 +36,19 @@ class RiskManager:
             )
             return False, f"Drawdown limit hit: {drawdown:.1%}"
 
-        # Balance check
+        # SELL trades liquidate positions and return USDC — skip buy-side checks
+        if side.upper() == "SELL":
+            return True, "OK"
+
+        # Balance check (BUY only)
         if usdc_amount > self.portfolio.usdc_balance:
             return False, f"Insufficient balance: need ${usdc_amount:.2f}"
 
-        # Per-position size
+        # Per-position size (BUY only)
         if usdc_amount > self.config.risk.max_position_size:
             return False, f"Position too large: ${usdc_amount:.2f} > ${self.config.risk.max_position_size:.2f}"
 
-        # Total exposure
+        # Total exposure (BUY only — sells reduce exposure)
         current_exposure = self.portfolio.exposure()
         if current_exposure + usdc_amount > self.config.risk.max_total_exposure:
             return False, (
