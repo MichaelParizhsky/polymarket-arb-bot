@@ -364,8 +364,9 @@ class PolymarketClient:
                 token_id=token_id,
                 amount=amount_usdc,
             )
-            signed = client.create_market_order(order_args)
-            resp = client.post_order(signed, OrderType.FOK)
+            loop = asyncio.get_event_loop()
+            signed = await loop.run_in_executor(None, client.create_market_order, order_args)
+            resp = await loop.run_in_executor(None, client.post_order, signed, OrderType.FOK)
             return OrderResult(
                 order_id=resp.get("orderID", "unknown"),
                 status=resp.get("status", "UNKNOWN"),
@@ -405,8 +406,9 @@ class PolymarketClient:
                 size=size,
                 side=BUY if side == "BUY" else SELL,
             )
-            signed = client.create_order(order_args)
-            resp = client.post_order(signed, OrderType.GTC)
+            loop = asyncio.get_event_loop()
+            signed = await loop.run_in_executor(None, client.create_order, order_args)
+            resp = await loop.run_in_executor(None, client.post_order, signed, OrderType.GTC)
             return OrderResult(
                 order_id=resp.get("orderID", "unknown"),
                 status=resp.get("status", "LIVE"),

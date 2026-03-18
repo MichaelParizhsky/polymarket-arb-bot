@@ -923,12 +923,25 @@ Rules:
                 max_tokens=1024,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw = response.content[0].text.strip()
-            # Strip markdown code fences if present
+            # Use next() to skip non-text blocks (e.g. thinking blocks)
+            raw = next((b.text for b in response.content if hasattr(b, "text")), "").strip()
+            if not raw:
+                raise ValueError("Empty response from Claude")
+            # Extract JSON — strip markdown fences, find first { ... } block
             if raw.startswith("```"):
-                raw = raw.split("```")[1]
+                parts = raw.split("```")
+                raw = parts[1] if len(parts) > 1 else raw
                 if raw.startswith("json"):
                     raw = raw[4:]
+                raw = raw.strip()
+            # If there's prose before the JSON object, find the first {
+            brace = raw.find("{")
+            if brace > 0:
+                raw = raw[brace:]
+            # Truncate after the last } to strip trailing prose
+            rbrace = raw.rfind("}")
+            if rbrace >= 0:
+                raw = raw[:rbrace + 1]
             fix = json.loads(raw)
         except Exception as e:
             result_entry["status"] = "error"

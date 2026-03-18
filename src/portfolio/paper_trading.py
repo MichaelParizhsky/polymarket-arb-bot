@@ -300,6 +300,21 @@ class PaperPortfolio:
             "win_rate": self.win_rate(),
             "closed_positions": recent_closed,
             "pnl_history": recent_pnl,
+            # Persist positions directly so load_from_json doesn't have to
+            # reconstruct them from a truncated trade history window.
+            "positions": {
+                tid: {
+                    "token_id": pos.token_id,
+                    "market_question": pos.market_question,
+                    "outcome": pos.outcome,
+                    "contracts": round(pos.contracts, 6),
+                    "avg_cost": round(pos.avg_cost, 6),
+                    "strategy": pos.strategy,
+                    "opened_at": pos.opened_at,
+                    "realized_pnl": round(pos.realized_pnl, 6),
+                }
+                for tid, pos in self.positions.items()
+            },
             "trades": [
                 {
                     "trade_id": t.trade_id,
@@ -343,30 +358,47 @@ class PaperPortfolio:
                 self.trades.append(trade)
             self._trade_counter = len(self.trades)
             self.closed_positions = data.get("closed_positions", [])
-            # Restore positions from open trades
-            self.positions = {}
-            for t in self.trades:
-                if t.side == "BUY":
-                    if t.token_id in self.positions:
+
+            # Restore positions: prefer the saved positions dict (exact state),
+            # fall back to reconstructing from trade history for old save files.
+            if "positions" in data:
+                self.positions = {}
+                for tid, p in data["positions"].items():
+                    self.positions[tid] = Position(
+                        token_id=p["token_id"],
+                        market_question=p.get("market_question", ""),
+                        outcome=p.get("outcome", ""),
+                        contracts=p["contracts"],
+                        avg_cost=p["avg_cost"],
+                        strategy=p.get("strategy", ""),
+                        opened_at=p.get("opened_at", time.time()),
+                        realized_pnl=p.get("realized_pnl", 0.0),
+                    )
+            else:
+                # Legacy fallback: reconstruct from truncated trade history
+                self.positions = {}
+                for t in self.trades:
+                    if t.side == "BUY":
+                        if t.token_id in self.positions:
+                            pos = self.positions[t.token_id]
+                            total = pos.contracts + t.contracts
+                            pos.avg_cost = (pos.cost_basis + t.usdc_amount) / total
+                            pos.contracts = total
+                        else:
+                            self.positions[t.token_id] = Position(
+                                token_id=t.token_id,
+                                market_question="",
+                                outcome="",
+                                contracts=t.contracts,
+                                avg_cost=t.price,
+                                strategy=t.strategy,
+                                opened_at=t.timestamp,
+                            )
+                    elif t.side == "SELL" and t.token_id in self.positions:
                         pos = self.positions[t.token_id]
-                        total = pos.contracts + t.contracts
-                        pos.avg_cost = (pos.cost_basis + t.usdc_amount) / total
-                        pos.contracts = total
-                    else:
-                        self.positions[t.token_id] = Position(
-                            token_id=t.token_id,
-                            market_question="",
-                            outcome="",
-                            contracts=t.contracts,
-                            avg_cost=t.price,
-                            strategy=t.strategy,
-                            opened_at=t.timestamp,
-                        )
-                elif t.side == "SELL" and t.token_id in self.positions:
-                    pos = self.positions[t.token_id]
-                    pos.contracts -= t.contracts
-                    if pos.contracts < 0.001:
-                        del self.positions[t.token_id]
+                        pos.contracts -= t.contracts
+                        if pos.contracts < 0.001:
+                            del self.positions[t.token_id]
             logger.info(
                 f"[PAPER] Restored state: {len(self.trades)} trades, "
                 f"{len(self.positions)} positions, balance=${self.usdc_balance:.2f}"

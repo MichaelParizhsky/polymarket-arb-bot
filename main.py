@@ -345,6 +345,10 @@ class ArbBot:
         """Execute trading signals with risk checks."""
         # Deduplicate: same token_id + side should only execute once per cycle
         seen: set[tuple[str, str]] = set()
+        # Track tokens whose paired leg was skipped so we don't execute one side alone.
+        # A rebalancing arb requires both YES and NO to fill — executing only one leg
+        # creates an unhedged directional position instead of a risk-free arb.
+        skipped_pairs: set[str] = set()
 
         now = time.time()
         min_interval = self.config.risk.min_trade_interval
@@ -360,16 +364,28 @@ class ArbBot:
                 logger.critical("Hard stop active — no new trades")
                 break
 
+            # Skip if this signal's paired leg was already skipped
+            if sig.token_id in skipped_pairs:
+                logger.debug(f"Skipping {sig.token_id[:16]} — paired leg was skipped")
+                continue
+
             # Global rate limit: enforce minimum gap between any two trades
             since_last = now - self._last_trade_time
             if since_last < min_interval:
                 logger.debug(f"Rate limit: {since_last:.0f}s since last trade (need {min_interval}s)")
-                break  # skip rest of signals this cycle
+                # Mark the paired leg as skipped too so we don't execute half the arb
+                pair_id = (sig.metadata or {}).get("pair_token_id")
+                if pair_id:
+                    skipped_pairs.add(pair_id)
+                continue  # don't break — other unrelated signals may still be valid
 
             # Per-token cooldown: don't hammer the same market
             token_last = self._token_last_traded.get(sig.token_id, 0)
             if now - token_last < token_cooldown:
                 logger.debug(f"Token cooldown: {sig.token_id[:16]} traded {now-token_last:.0f}s ago")
+                pair_id = (sig.metadata or {}).get("pair_token_id")
+                if pair_id:
+                    skipped_pairs.add(pair_id)
                 continue
 
             ok, reason = self.risk.check_trade(
@@ -377,6 +393,9 @@ class ArbBot:
             )
             if not ok:
                 logger.debug(f"Signal rejected [{sig.strategy}] {sig.side} {sig.token_id[:16]}: {reason}")
+                pair_id = (sig.metadata or {}).get("pair_token_id")
+                if pair_id:
+                    skipped_pairs.add(pair_id)
                 continue
 
             # Execute via portfolio
