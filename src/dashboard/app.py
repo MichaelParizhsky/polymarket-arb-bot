@@ -707,6 +707,190 @@ def code_review_list():
 
 
 # ------------------------------------------------------------------ #
+#  Auto-fix endpoints                                                  #
+# ------------------------------------------------------------------ #
+
+_autofix_status: dict = {"state": "idle", "results": [], "error": None, "started_at": None, "finished_at": None}
+
+
+async def _run_autofix_task() -> None:
+    """Read the latest code review, then ask Claude to fix each high/medium finding."""
+    global _autofix_status
+    import ast as _ast
+    import anthropic as _anthropic
+
+    _autofix_status["results"] = []
+    _autofix_status["error"] = None
+
+    # Load latest review
+    files = sorted(glob.glob("logs/code_review_*.json"), reverse=True)
+    if not files:
+        _autofix_status["state"] = "error"
+        _autofix_status["error"] = "No code review found. Run the weekly review first."
+        _autofix_status["finished_at"] = time.time()
+        return
+
+    try:
+        with open(files[0]) as f:
+            review = json.load(f)
+    except Exception as e:
+        _autofix_status["state"] = "error"
+        _autofix_status["error"] = f"Failed to load review: {e}"
+        _autofix_status["finished_at"] = time.time()
+        return
+
+    findings = [
+        fi for fi in (review.get("findings") or [])
+        if fi.get("severity") in ("high", "medium") and fi.get("file")
+    ]
+
+    if not findings:
+        _autofix_status["state"] = "done"
+        _autofix_status["results"] = [{"status": "info", "message": "No high/medium findings to fix."}]
+        _autofix_status["finished_at"] = time.time()
+        return
+
+    client = _anthropic.AsyncAnthropic()
+
+    for finding in findings:
+        file_path = finding.get("file", "")
+        result_entry = {
+            "file": file_path,
+            "title": finding.get("title", ""),
+            "severity": finding.get("severity", ""),
+            "status": "pending",
+            "message": "",
+        }
+        _autofix_status["results"].append(result_entry)
+
+        # Read source file
+        abs_path = os.path.join(".", file_path)
+        try:
+            with open(abs_path, encoding="utf-8") as f:
+                source = f.read()
+        except Exception as e:
+            result_entry["status"] = "skip"
+            result_entry["message"] = f"Cannot read file: {e}"
+            continue
+
+        if len(source) > 12000:
+            source = source[:12000] + "\n# ... (truncated)"
+
+        prompt = f"""You are a code fixer. A code review found this issue in `{file_path}`:
+
+**Title:** {finding.get('title', '')}
+**Severity:** {finding.get('severity', '')}
+**Category:** {finding.get('category', '')}
+**Description:** {finding.get('description', '')}
+**Suggestion:** {finding.get('suggestion', '')}
+
+Here is the current file content:
+```python
+{source}
+```
+
+Respond with a JSON object (and nothing else) in this exact format:
+{{
+  "fixable": true,
+  "old_string": "exact substring to replace (must be unique in the file)",
+  "new_string": "replacement substring",
+  "explanation": "one-line explanation of what was changed"
+}}
+
+If the issue is not programmatically fixable (e.g. architectural, already fixed, or requires context you lack), respond with:
+{{
+  "fixable": false,
+  "explanation": "reason"
+}}
+
+Rules:
+- old_string must appear EXACTLY once in the file
+- Make the minimal change needed
+- Do not add docstrings, comments, or extra formatting
+- Do not rewrite the whole file"""
+
+        try:
+            response = await client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            fix = json.loads(raw)
+        except Exception as e:
+            result_entry["status"] = "error"
+            result_entry["message"] = f"Claude error: {e}"
+            continue
+
+        if not fix.get("fixable"):
+            result_entry["status"] = "skip"
+            result_entry["message"] = fix.get("explanation", "Not fixable.")
+            continue
+
+        old_str = fix.get("old_string", "")
+        new_str = fix.get("new_string", "")
+
+        if not old_str or old_str not in source:
+            result_entry["status"] = "skip"
+            result_entry["message"] = "old_string not found in file (may already be fixed)."
+            continue
+
+        if source.count(old_str) > 1:
+            result_entry["status"] = "skip"
+            result_entry["message"] = "old_string is not unique — skipping to avoid incorrect edit."
+            continue
+
+        new_source = source.replace(old_str, new_str, 1)
+
+        # Validate syntax if Python file
+        if file_path.endswith(".py"):
+            try:
+                _ast.parse(new_source)
+            except SyntaxError as e:
+                result_entry["status"] = "error"
+                result_entry["message"] = f"Syntax error after fix: {e}"
+                continue
+
+        try:
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(new_source)
+            result_entry["status"] = "fixed"
+            result_entry["message"] = fix.get("explanation", "Fixed.")
+        except Exception as e:
+            result_entry["status"] = "error"
+            result_entry["message"] = f"Write failed: {e}"
+
+    _autofix_status["state"] = "done"
+    _autofix_status["finished_at"] = time.time()
+
+
+@app.post("/api/code_review/autofix")
+async def code_review_autofix():
+    global _autofix_status
+    if _autofix_status.get("state") == "running":
+        return JSONResponse({"ok": False, "error": "Already running"}, status_code=409)
+    _autofix_status = {
+        "state": "running",
+        "results": [],
+        "error": None,
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+    asyncio.create_task(_run_autofix_task())
+    return {"ok": True}
+
+
+@app.get("/api/code_review/autofix/status")
+def code_review_autofix_status():
+    return _autofix_status
+
+
+# ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
 
@@ -1224,6 +1408,21 @@ tr:hover td{background:#181818}
   <div class="section" style="margin-top:14px">
     <h3>Review History</h3>
     <div id="cr-history"><div class="no-data">No history yet.</div></div>
+  </div>
+
+  <!-- Auto-Fix Panel -->
+  <div class="meta-card" style="margin-top:14px" id="cr-autofix-card">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Auto-Fix with Claude</h3>
+      <button id="cr-autofix-btn" onclick="triggerAutofix()" style="padding:6px 16px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:700">
+        ▶ Run Auto-Fix
+      </button>
+      <span id="cr-autofix-status" style="font-size:.7rem;color:#555"></span>
+    </div>
+    <div style="font-size:.68rem;color:#555;margin-top:4px">
+      Sends each high &amp; medium finding to Claude Sonnet, which applies targeted edits and validates syntax.
+    </div>
+    <div id="cr-autofix-results" style="margin-top:10px"></div>
   </div>
 </div>
 
@@ -2282,6 +2481,91 @@ async function resetPortfolio(){
       alert('Reset failed: '+(d.error||'unknown error'));
     }
   }catch(e){alert('Reset failed: '+e);}
+}
+
+// ------------------------------------------------------------------ //
+//  Auto-fix                                                           //
+// ------------------------------------------------------------------ //
+let _autofixPolling=null;
+
+async function triggerAutofix(){
+  const btn=$('cr-autofix-btn');
+  btn.disabled=true;
+  btn.textContent='Running…';
+  $('cr-autofix-status').textContent='Starting…';
+  $('cr-autofix-results').innerHTML='';
+  try{
+    const r=await fetch('/api/code_review/autofix',{method:'POST'});
+    const d=await r.json();
+    if(!d.ok){
+      $('cr-autofix-status').textContent='Error: '+(d.error||'unknown');
+      btn.disabled=false;btn.textContent='▶ Run Auto-Fix';
+      return;
+    }
+  }catch(e){
+    $('cr-autofix-status').textContent='Request failed: '+e;
+    btn.disabled=false;btn.textContent='▶ Run Auto-Fix';
+    return;
+  }
+  // Start polling
+  if(_autofixPolling)clearInterval(_autofixPolling);
+  _autofixPolling=setInterval(pollAutofix,2000);
+}
+
+async function pollAutofix(){
+  try{
+    const d=await fetch('/api/code_review/autofix/status').then(r=>r.json());
+    renderAutofixStatus(d);
+    if(d.state!=='running'){
+      clearInterval(_autofixPolling);_autofixPolling=null;
+      const btn=$('cr-autofix-btn');
+      btn.disabled=false;btn.textContent='▶ Run Auto-Fix';
+    }
+  }catch(e){console.error('autofix poll error',e);}
+}
+
+function renderAutofixStatus(d){
+  const statusEl=$('cr-autofix-status');
+  if(d.state==='running'){
+    const n=d.results?d.results.length:0;
+    statusEl.textContent=`Running… (${n} processed so far)`;
+    statusEl.style.color='#ffd740';
+  }else if(d.state==='done'){
+    const fixed=(d.results||[]).filter(r=>r.status==='fixed').length;
+    const total=(d.results||[]).length;
+    statusEl.textContent=`Done — ${fixed}/${total} fixes applied`;
+    statusEl.style.color='#00e676';
+  }else if(d.state==='error'){
+    statusEl.textContent='Error: '+(d.error||'unknown');
+    statusEl.style.color='#ff5252';
+  }else{
+    statusEl.textContent='';
+  }
+
+  const results=d.results||[];
+  if(!results.length){
+    $('cr-autofix-results').innerHTML='';
+    return;
+  }
+
+  const statusIcon={fixed:'✅',skip:'⏭',error:'❌',pending:'⏳',info:'ℹ️'};
+  const statusColor={fixed:'#00e676',skip:'#555',error:'#ff5252',pending:'#ffd740',info:'#90caf9'};
+
+  $('cr-autofix-results').innerHTML=`<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">`+
+    results.map(r=>`
+      <div style="display:flex;gap:10px;align-items:flex-start;padding:7px 10px;background:#111;border-radius:4px;border-left:3px solid ${statusColor[r.status]||'#555'}">
+        <span style="font-size:.9rem;min-width:20px">${statusIcon[r.status]||'•'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:.68rem;font-weight:700;color:${statusColor[r.status]||'#555'}">${(r.status||'').toUpperCase()}</span>
+            <span style="font-size:.68rem;color:#ffd740">${r.severity||''}</span>
+            <span style="font-size:.68rem;color:#888;font-family:monospace">${r.file||''}</span>
+          </div>
+          <div style="font-size:.72rem;font-weight:600;margin-top:2px">${r.title||''}</div>
+          <div style="font-size:.68rem;color:#888;margin-top:2px">${r.message||''}</div>
+        </div>
+      </div>`).join('')+
+    `</div>`;
 }
 
 fetchAll();
