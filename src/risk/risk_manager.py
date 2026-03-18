@@ -46,6 +46,9 @@ class RiskManager:
 
         # SELL trades liquidate positions and return USDC — skip buy-side checks
         if side.upper() == "SELL":
+            position = self.portfolio.positions.get(token_id)
+            if position is None or position.contracts <= 0:
+                return False, f"No position to sell: {token_id}"
             return True, "OK"
 
         # Balance check (BUY only)
