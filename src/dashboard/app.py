@@ -806,7 +806,7 @@ def code_review_list():
 #  Auto-fix endpoints                                                  #
 # ------------------------------------------------------------------ #
 
-_autofix_status: dict = {"state": "idle", "results": [], "error": None, "started_at": None, "finished_at": None}
+_autofix_status: dict = {"state": "idle", "results": [], "error": None, "started_at": None, "finished_at": None, "git": None}
 _pending_deploys: list[dict] = []
 _pending_deploys_lock = __import__("threading").Lock()
 
@@ -973,8 +973,68 @@ Rules:
             result_entry["status"] = "error"
             result_entry["message"] = f"Write failed: {e}"
 
+    # --- Commit and push any fixed files to GitHub so changes survive redeploys ---
+    fixed_files = [r["file"] for r in _autofix_status["results"] if r["status"] == "fixed"]
+    git_result = await _git_commit_push(fixed_files) if fixed_files else {"pushed": False, "message": "No files to commit."}
+    _autofix_status["git"] = git_result
     _autofix_status["state"] = "done"
     _autofix_status["finished_at"] = time.time()
+
+
+async def _git_commit_push(changed_files: list[str]) -> dict:
+    """
+    Commit changed files and push to GitHub using GITHUB_TOKEN env var.
+    Returns a dict with 'pushed' (bool) and 'message' (str).
+    """
+    import subprocess as _sp
+
+    token = os.getenv("GITHUB_TOKEN", "")
+    if not token:
+        return {
+            "pushed": False,
+            "message": "GITHUB_TOKEN not set — fixes written to disk only. Add GITHUB_TOKEN to Railway env vars to enable auto-push.",
+        }
+
+    try:
+        def _run(cmd: list[str], **kwargs) -> _sp.CompletedProcess:
+            return _sp.run(cmd, capture_output=True, text=True, timeout=30, **kwargs)
+
+        # Configure git identity (required for commit)
+        _run(["git", "config", "user.email", "autofix-bot@railway.local"])
+        _run(["git", "config", "user.name", "AutoFix Bot"])
+
+        # Inject token into remote URL
+        url_res = _run(["git", "remote", "get-url", "origin"])
+        original_url = url_res.stdout.strip()
+        auth_url = original_url.replace("https://", f"https://{token}@")
+        _run(["git", "remote", "set-url", "origin", auth_url])
+
+        # Stage only the fixed files
+        for f in changed_files:
+            _run(["git", "add", f])
+
+        n = len(changed_files)
+        files_str = ", ".join(changed_files)
+        commit_res = _run(["git", "commit", "-m",
+            f"autofix: apply {n} code review fix(es) via dashboard\n\nFixed files: {files_str}"])
+
+        if commit_res.returncode != 0:
+            # Nothing to commit (fixes may already be staged/identical)
+            _run(["git", "remote", "set-url", "origin", original_url])
+            return {"pushed": False, "message": f"Git commit failed: {commit_res.stderr.strip() or 'nothing to commit'}"}
+
+        push_res = _run(["git", "push", "origin", "HEAD"])
+
+        # Always restore clean remote URL (strip token)
+        _run(["git", "remote", "set-url", "origin", original_url])
+
+        if push_res.returncode == 0:
+            return {"pushed": True, "message": f"Pushed {n} fix(es) to GitHub. Railway redeploy triggered."}
+        else:
+            return {"pushed": False, "message": f"Push failed: {push_res.stderr.strip()}"}
+
+    except Exception as exc:
+        return {"pushed": False, "message": f"Git error: {exc}"}
 
 
 @app.post("/api/code_review/autofix")
@@ -2816,7 +2876,10 @@ function renderAutofixStatus(d){
   }else if(d.state==='done'){
     const fixed=(d.results||[]).filter(r=>r.status==='fixed').length;
     const total=(d.results||[]).length;
-    statusEl.textContent=`Done — ${fixed}/${total} fixes applied`;
+    const git=d.git||{};
+    const gitMsg=git.pushed?` ✅ Pushed to GitHub — Railway redeploying`
+      :git.message?` ⚠️ ${git.message}`:` (no git push)`;
+    statusEl.innerHTML=`Done — ${fixed}/${total} fixes applied.<br><span style="font-size:.7rem;color:${git.pushed?'#00e676':'#ffd740'}">${gitMsg}</span>`;
     statusEl.style.color='#00e676';
   }else if(d.state==='error'){
     statusEl.textContent='Error: '+(d.error||'unknown');
