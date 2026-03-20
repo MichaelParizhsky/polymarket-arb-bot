@@ -104,7 +104,8 @@ class ArbBot:
             )
         if cfg.event_driven_enabled:
             self._strategies.append(
-                EventDrivenStrategy(self.config, self.portfolio, self.risk)
+                EventDrivenStrategy(self.config, self.portfolio, self.risk,
+                                    news_monitor=self._news_monitor)
             )
         if cfg.cross_exchange_enabled and self._kalshi:
             self._strategies.append(
