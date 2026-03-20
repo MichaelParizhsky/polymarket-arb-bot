@@ -28,6 +28,9 @@ def _check_api_key(x_api_key: str = Header(default="")) -> bool:
         return True
     return x_api_key == _DASHBOARD_API_KEY
 
+import os as _os
+_peer_bot_url: str = _os.getenv("PEER_BOT_URL", "").rstrip("/")
+
 _portfolio = None
 _bot_start_time = time.time()
 _cycle_count = 0
@@ -1371,6 +1374,59 @@ async def api_ensemble_recent():
 
 
 # ------------------------------------------------------------------ #
+#  Compare endpoint                                                    #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/compare")
+async def api_compare():
+    import httpx, time
+
+    # Bot A data (local — same as /api/status)
+    bot_a = {"available": True, "name": "Bot A (All Strategies)"}
+    try:
+        bal = _portfolio.get_balance() if _portfolio else 0
+        pnl = getattr(_portfolio, 'total_pnl', 0) if _portfolio else 0
+        pos = len(getattr(_portfolio, 'positions', {})) if _portfolio else 0
+        strat_pnl = getattr(_portfolio, 'strategy_pnl', {}) if _portfolio else {}
+        trades = len(getattr(_portfolio, 'trades', [])) if _portfolio else 0
+        bot_a.update({
+            "balance": round(float(bal), 2),
+            "total_pnl": round(float(pnl), 2),
+            "open_positions": int(pos),
+            "strategy_pnl": {k: round(float(v), 4) for k, v in strat_pnl.items()},
+            "total_trades": int(trades),
+        })
+    except Exception as e:
+        bot_a["error"] = str(e)
+
+    # Bot B data (remote)
+    bot_b = {"available": False, "name": "Bot B (Quick/MM)"}
+    peer_url = _peer_bot_url
+    if peer_url:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r_status = await client.get(f"{peer_url}/api/status")
+                r_pnl = await client.get(f"{peer_url}/api/strategy_pnl")
+            if r_status.status_code == 200:
+                s = r_status.json()
+                bot_b.update({
+                    "available": True,
+                    "balance": s.get("balance_usdc", 0),
+                    "total_pnl": s.get("total_pnl", 0),
+                    "open_positions": s.get("open_positions", 0),
+                    "total_trades": s.get("total_trades", 0),
+                })
+            if r_pnl.status_code == 200:
+                bot_b["strategy_pnl"] = r_pnl.json()
+        except Exception as e:
+            bot_b["error"] = str(e)
+    else:
+        bot_b["error"] = "PEER_BOT_URL not set"
+
+    return {"bot_a": bot_a, "bot_b": bot_b, "ts": time.time()}
+
+
+# ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
 
@@ -1607,6 +1663,7 @@ tr:hover td{background:#181818}
   <div class="tab" onclick="showTab('codereview')">Code Review</div>
   <div class="tab" onclick="showTab('research')">Research</div>
   <div class="tab" onclick="showTab('ai-intel')">AI Intel</div>
+  <div class="tab" onclick="showTab('compare')">Compare</div>
 </div>
 
 <!-- OVERVIEW TAB -->
@@ -2099,6 +2156,84 @@ tr:hover td{background:#181818}
 
 </div>
 
+<div class="page" id="tab-compare">
+  <div class="section">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <h3>Bot Comparison</h3>
+      <span id="compare-ts" style="font-size:.65rem;color:#555">--</span>
+    </div>
+
+    <div id="compare-b-warning" style="display:none;background:#2a2000;border:1px solid #554400;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:.75rem;color:#ffd740"></div>
+
+    <!-- Side-by-side cards -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+      <!-- Bot A card -->
+      <div style="background:#111;border:1px solid #1e2e1e;border-top:3px solid #00e676;border-radius:8px;padding:16px">
+        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:#00e676;margin-bottom:12px" id="compare-a-name">Bot A</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Balance</span>
+            <span id="compare-a-bal" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Total PnL</span>
+            <span id="compare-a-pnl">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Open Positions</span>
+            <span id="compare-a-pos" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Total Trades</span>
+            <span id="compare-a-trades" style="color:#e0e0e0">--</span>
+          </div>
+        </div>
+      </div>
+      <!-- Bot B card -->
+      <div style="background:#111;border:1px solid #1a1a2e;border-top:3px solid #7986cb;border-radius:8px;padding:16px">
+        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:#7986cb;margin-bottom:12px" id="compare-b-name">Bot B</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Balance</span>
+            <span id="compare-b-bal" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Total PnL</span>
+            <span id="compare-b-pnl">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Open Positions</span>
+            <span id="compare-b-pos" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Total Trades</span>
+            <span id="compare-b-trades" style="color:#e0e0e0">--</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Strategy PnL comparison table -->
+    <h3 style="margin-bottom:10px">Strategy PnL Comparison</h3>
+    <table>
+      <thead><tr>
+        <th>Strategy</th>
+        <th>Bot A PnL</th>
+        <th>Bot B PnL</th>
+      </tr></thead>
+      <tbody id="compare-strat-tbody">
+        <tr><td colspan="3" style="color:#555;text-align:center">No data yet</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Setup instructions shown when PEER_BOT_URL not set -->
+    <div id="compare-setup" style="display:none;margin-top:20px;background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:16px;font-size:.75rem;color:#888;line-height:1.7">
+      <div style="color:#ffd740;font-weight:700;margin-bottom:8px">Setup required</div>
+      Set the <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;color:#00e5ff">PEER_BOT_URL</code> environment variable to the base URL of Bot B's dashboard (e.g. <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;color:#00e5ff">https://botb.example.com</code>) and restart this bot.
+    </div>
+  </div>
+</div>
+
 <div id="last-update">--</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -2115,8 +2250,8 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview','research','ai-intel'];
-let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null;
+const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview','research','ai-intel','compare'];
+let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -2162,6 +2297,14 @@ function showTab(name){
     if(_ensembleInterval){clearInterval(_ensembleInterval);_ensembleInterval=null;}
     if(_newsInterval){clearInterval(_newsInterval);_newsInterval=null;}
     if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
+  }
+
+  if(name==='compare'){
+    fetchCompare();
+    if(_compareInterval)clearInterval(_compareInterval);
+    _compareInterval=setInterval(fetchCompare,30000);
+  } else {
+    if(_compareInterval){clearInterval(_compareInterval);_compareInterval=null;}
   }
 }
 
@@ -3574,6 +3717,76 @@ function updateQrBadge(logData){
   const hasQR=(logData||[]).some(e=>(e.strategy||'').toLowerCase().includes('quick'));
   badge.textContent=hasQR?'ACTIVE':'INACTIVE';
   badge.style.color=hasQR?'#00e676':'#555';
+}
+
+// ------------------------------------------------------------------ //
+//  Compare tab                                                         //
+// ------------------------------------------------------------------ //
+
+async function fetchCompare(){
+  try{
+    const d=await fetch('/api/compare').then(r=>r.json());
+    const a=d.bot_a||{};
+    const b=d.bot_b||{};
+
+    // Timestamp
+    $('compare-ts').textContent=d.ts?'Updated '+new Date(d.ts*1000).toLocaleTimeString():'--';
+
+    // Bot A card
+    $('compare-a-name').textContent=a.name||'Bot A';
+    $('compare-a-bal').textContent=a.balance!=null?fmt(a.balance):'--';
+    const aPnl=$('compare-a-pnl');
+    aPnl.textContent=a.total_pnl!=null?fmtPnl(a.total_pnl):'--';
+    aPnl.style.color=a.total_pnl!=null?(a.total_pnl>=0?'#00e676':'#ff5252'):'#888';
+    $('compare-a-pos').textContent=a.open_positions!=null?a.open_positions:'--';
+    $('compare-a-trades').textContent=a.total_trades!=null?a.total_trades:'--';
+
+    // Bot B card + warning
+    $('compare-b-name').textContent=b.name||'Bot B';
+    const warn=$('compare-b-warning');
+    const setup=$('compare-setup');
+    if(!b.available){
+      warn.style.display='block';
+      warn.textContent='Bot B unavailable: '+(b.error||'unknown error');
+      if((b.error||'').includes('PEER_BOT_URL not set')){
+        setup.style.display='block';
+      }
+      $('compare-b-bal').textContent='--';
+      $('compare-b-pnl').textContent='--';
+      $('compare-b-pos').textContent='--';
+      $('compare-b-trades').textContent='--';
+    } else {
+      warn.style.display='none';
+      setup.style.display='none';
+      $('compare-b-bal').textContent=b.balance!=null?fmt(b.balance):'--';
+      const bPnl=$('compare-b-pnl');
+      bPnl.textContent=b.total_pnl!=null?fmtPnl(b.total_pnl):'--';
+      bPnl.style.color=b.total_pnl!=null?(b.total_pnl>=0?'#00e676':'#ff5252'):'#888';
+      $('compare-b-pos').textContent=b.open_positions!=null?b.open_positions:'--';
+      $('compare-b-trades').textContent=b.total_trades!=null?b.total_trades:'--';
+    }
+
+    // Strategy PnL table
+    const sa=a.strategy_pnl||{};
+    const sb=b.strategy_pnl||{};
+    const strats=[...new Set([...Object.keys(sa),...Object.keys(sb)])].sort();
+    const tbody=$('compare-strat-tbody');
+    if(!strats.length){
+      tbody.innerHTML='<tr><td colspan="3" style="color:#555;text-align:center">No strategy PnL data</td></tr>';
+    } else {
+      tbody.innerHTML=strats.map(s=>{
+        const av=sa[s];
+        const bv=sb[s];
+        const aCell=av!=null?`<span style="color:${av>=0?'#00e676':'#ff5252'}">${fmtPnl(av)}</span>`:'<span style="color:#555">--</span>';
+        const bCell=bv!=null?`<span style="color:${bv>=0?'#00e676':'#ff5252'}">${fmtPnl(bv)}</span>`:'<span style="color:#555">--</span>';
+        return `<tr><td style="color:#ccc">${s}</td><td>${aCell}</td><td>${bCell}</td></tr>`;
+      }).join('');
+    }
+  }catch(e){
+    console.error('compare fetch error',e);
+    const warn=$('compare-b-warning');
+    if(warn){warn.style.display='block';warn.textContent='Fetch error: '+e.message;}
+  }
 }
 
 fetchAll();
