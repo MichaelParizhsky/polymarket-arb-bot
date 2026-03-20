@@ -215,7 +215,10 @@ class PaperPortfolio:
         return self.total_value(price_map) - self.starting_balance
 
     def realized_pnl(self) -> float:
-        return sum(t.usdc_amount * (1 if t.side == "SELL" else -1) for t in self.trades)
+        """Fee-adjusted realized P&L: closed positions + partial sells on open positions."""
+        closed = self.realized_closed_pnl()
+        partial = sum(pos.realized_pnl for pos in self.positions.values())
+        return closed + partial
 
     def total_fees_paid(self) -> float:
         return sum(t.fee for t in self.trades)
@@ -275,7 +278,7 @@ class PaperPortfolio:
         the file size bounded. The meta-agent only needs recent data for
         rolling strategy analysis; older history doesn't improve decisions.
         """
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
         # Rolling windows — enough for meaningful analysis, bounded disk use
         MAX_TRADES = 500
@@ -330,8 +333,13 @@ class PaperPortfolio:
                 for t in recent_trades
             ],
         }
-        with open(path, "w") as f:
-            json.dump(data, f, separators=(",", ":"))  # compact JSON, no indent
+        import tempfile
+        abs_path = os.path.abspath(path)
+        dir_name = os.path.dirname(abs_path)
+        with tempfile.NamedTemporaryFile("w", dir=dir_name, delete=False, suffix=".tmp") as tmp:
+            tmp_path = tmp.name
+            json.dump(data, tmp, separators=(",", ":"))  # compact JSON, no indent
+        os.replace(tmp_path, abs_path)  # atomic on POSIX, best-effort on Windows
 
     def load_from_json(self, path: str = "logs/portfolio_state.json") -> bool:
         """Restore portfolio state from a previous run. Returns True if loaded."""
