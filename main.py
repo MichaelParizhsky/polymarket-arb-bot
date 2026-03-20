@@ -32,7 +32,6 @@ from src.exchange.polymarket_ws import PolymarketWSFeed
 from src.exchange.kalshi import KalshiClient
 from src.strategies.rebalancing import RebalancingStrategy
 from src.strategies.combinatorial import CombinatorialStrategy
-from src.strategies.latency_arb import LatencyArbStrategy
 from src.strategies.market_making import MarketMakingStrategy
 from src.strategies.resolution import ResolutionStrategy
 from src.strategies.event_driven import EventDrivenStrategy
@@ -91,10 +90,6 @@ class ArbBot:
             self._strategies.append(
                 CombinatorialStrategy(self.config, self.portfolio, self.risk)
             )
-        if cfg.latency_arb_enabled:
-            self._strategies.append(
-                LatencyArbStrategy(self.config, self.portfolio, self.risk, self.binance)
-            )
         if cfg.market_making_enabled:
             self._strategies.append(
                 MarketMakingStrategy(self.config, self.portfolio, self.risk)
@@ -125,7 +120,6 @@ class ArbBot:
         all_flags = {
             "RebalancingStrategy": cfg.rebalancing_enabled,
             "CombinatorialStrategy": cfg.combinatorial_enabled,
-            "LatencyArbStrategy": cfg.latency_arb_enabled,
             "MarketMakingStrategy": cfg.market_making_enabled,
             "ResolutionStrategy": cfg.resolution_enabled,
             "EventDrivenStrategy": cfg.event_driven_enabled,
@@ -249,8 +243,6 @@ class ArbBot:
 
             # Start background tasks
             asyncio.create_task(self._meta_agent_loop())
-            asyncio.create_task(self._code_review_loop())
-            asyncio.create_task(self._research_loop())
             asyncio.create_task(self._auto_close_resolved_loop())
 
             try:
@@ -404,7 +396,28 @@ class ArbBot:
         min_interval = self.config.risk.min_trade_interval
         token_cooldown = self.config.risk.token_cooldown
 
+        # Identify paired signals (rebalancing YES+NO pairs).
+        # If rate budget can't cover even 1 trade, skip BOTH legs to avoid an unhedged position.
+        pair_groups: dict[str, list] = {}
         for sig in signals:
+            pair_id = (sig.metadata or {}).get("pair_token_id")
+            if pair_id:
+                key = "_".join(sorted([sig.token_id, pair_id]))
+                pair_groups.setdefault(key, []).append(sig)
+
+        skip_token_ids: set[str] = set()
+        since_last = now - self._last_trade_time
+        for key, legs in pair_groups.items():
+            if len(legs) >= 2 and since_last < min_interval:
+                # Not enough rate budget for even 1 trade — skip both legs
+                for leg in legs:
+                    skip_token_ids.add(leg.token_id)
+
+        for sig in signals:
+            if sig.token_id in skip_token_ids:
+                logger.debug(f"Skipping paired signal for {sig.token_id[:12]} — insufficient rate budget")
+                continue
+
             key = (sig.token_id, sig.side)
             if key in seen:
                 continue
@@ -448,10 +461,46 @@ class ArbBot:
                     skipped_pairs.add(pair_id)
                 continue
 
-            # Execute via portfolio
+            # Execute via portfolio (paper) or live order (live)
             contracts = sig.size_usdc / max(sig.price, 0.001)
-            if sig.side == "BUY":
-                # Find market context for this token
+            trade = None
+
+            if not self.paper and sig.side == "BUY":
+                # Live: place limit order and handle immediate FILLED result
+                result = await self.poly.place_limit_order(
+                    token_id=sig.token_id,
+                    side=sig.side,
+                    price=sig.price,
+                    size=contracts,
+                )
+                if result and result.status == "FILLED":
+                    market_question, outcome = self._find_market_info(sig.token_id, context)
+                    fill_contracts = (
+                        result.filled_size
+                        if hasattr(result, "filled_size") and result.filled_size
+                        else contracts
+                    )
+                    fill_price = (
+                        result.avg_fill_price
+                        if hasattr(result, "avg_fill_price") and result.avg_fill_price
+                        else sig.price
+                    )
+                    trade = self.portfolio.buy(
+                        token_id=sig.token_id,
+                        contracts=fill_contracts,
+                        price=fill_price,
+                        strategy=sig.strategy,
+                        market_question=market_question,
+                        outcome=outcome,
+                        notes=sig.notes,
+                    )
+                    if trade:
+                        trades_total.labels(strategy=sig.strategy, side=sig.side).inc()
+                        arb_executed.labels(strategy=sig.strategy).inc()
+                        self._last_trade_time = time.time()
+                        self._token_last_traded[sig.token_id] = time.time()
+            elif sig.side == "BUY":
+                # Paper: simulate directly
                 market_question, outcome = self._find_market_info(sig.token_id, context)
                 trade = self.portfolio.buy(
                     token_id=sig.token_id,
@@ -471,22 +520,25 @@ class ArbBot:
                     notes=sig.notes,
                 )
 
-            if trade:
+            if trade and not (not self.paper and sig.side == "BUY"):
+                # For paper BUY and all SELL paths: increment metrics here
+                # (live BUY path already incremented above when result.status == "FILLED")
                 trades_total.labels(strategy=sig.strategy, side=sig.side).inc()
                 arb_executed.labels(strategy=sig.strategy).inc()
                 self._last_trade_time = time.time()
                 self._token_last_traded[sig.token_id] = time.time()
+
+            if trade and sig.side == "BUY" and self._hedge_manager is not None:
                 # Auto-hedge crypto BUY positions via Binance perpetual futures
-                if sig.side == "BUY" and self._hedge_manager is not None:
-                    market_question, _ = self._find_market_info(sig.token_id, context)
-                    market_tags = self._find_market_tags(sig.token_id, context)
-                    await self._hedge_manager.maybe_open_hedge(
-                        token_id=sig.token_id,
-                        market_question=market_question,
-                        market_tags=market_tags,
-                        side=sig.side,
-                        size_usdc=sig.size_usdc,
-                    )
+                market_question, _ = self._find_market_info(sig.token_id, context)
+                market_tags = self._find_market_tags(sig.token_id, context)
+                await self._hedge_manager.maybe_open_hedge(
+                    token_id=sig.token_id,
+                    market_question=market_question,
+                    market_tags=market_tags,
+                    side=sig.side,
+                    size_usdc=sig.size_usdc,
+                )
 
     def _find_market_info(
         self, token_id: str, context: dict[str, Any]
@@ -792,7 +844,6 @@ class ArbBot:
         "MAX_MARKETS":             ("strategies", "max_markets",              int),
         "STRATEGY_REBALANCING":    ("strategies", "rebalancing_enabled",      bool),
         "STRATEGY_COMBINATORIAL":  ("strategies", "combinatorial_enabled",    bool),
-        "STRATEGY_LATENCY_ARB":    ("strategies", "latency_arb_enabled",      bool),
         "STRATEGY_MARKET_MAKING":  ("strategies", "market_making_enabled",    bool),
         "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),
         "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),

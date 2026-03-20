@@ -9,6 +9,7 @@ import glob
 import json
 import os
 import time
+import threading as _threading
 
 from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +43,9 @@ _kalshi_ref = None
 _news_monitor_ref = None
 _hedge_manager_ref = None
 _ensemble_strategy_ref = None
+
+# Lock protecting reads of the portfolio object from the dashboard thread
+_portfolio_lock = _threading.RLock()
 
 # Ring buffer for cross-exchange signal decisions (last 100)
 _cross_exchange_log: list[dict] = []
@@ -104,11 +108,21 @@ def bot_info():
 def status():
     if not _portfolio:
         return {"status": "starting"}
-    p = _portfolio
     uptime = int(time.time() - _bot_start_time)
-    total_pnl = round(p.total_pnl(), 2)
-    realized = round(p.realized_closed_pnl(), 2)
-    trades_per_hour = round(len(p.trades) / max(uptime / 3600, 0.01), 1)
+    with _portfolio_lock:
+        p = _portfolio
+        total_pnl = round(p.total_pnl(), 2)
+        realized = round(p.realized_closed_pnl(), 2)
+        n_trades = len(p.trades)
+        balance = round(p.usdc_balance, 2)
+        starting_balance = round(p.starting_balance, 2)
+        total_value = round(p.total_value(), 2)
+        open_positions = len(p.positions)
+        closed_positions = len(p.closed_positions)
+        exposure = round(p.exposure(), 2)
+        fees_paid = round(p.total_fees_paid(), 2)
+        win_rate = p.win_rate()
+    trades_per_hour = round(n_trades / max(uptime / 3600, 0.01), 1)
     return {
         "status": "running",
         "paper_trading": _config.paper_trading if _config else True,
@@ -116,19 +130,19 @@ def status():
         "uptime_seconds": uptime,
         "uptime": _fmt_uptime(uptime),
         "cycle_count": _cycle_count,
-        "balance": round(p.usdc_balance, 2),
-        "starting_balance": round(p.starting_balance, 2),
-        "total_value": round(p.total_value(), 2),
+        "balance": balance,
+        "starting_balance": starting_balance,
+        "total_value": total_value,
         "pnl": total_pnl,
-        "pnl_pct": round((total_pnl / p.starting_balance) * 100, 3),
+        "pnl_pct": round((total_pnl / starting_balance) * 100, 3),
         "realized_pnl": realized,
-        "realized_pnl_pct": round((realized / p.starting_balance) * 100, 3),
-        "open_positions": len(p.positions),
-        "closed_positions": len(p.closed_positions),
-        "total_trades": len(p.trades),
-        "exposure": round(p.exposure(), 2),
-        "fees_paid": round(p.total_fees_paid(), 2),
-        "win_rate": p.win_rate(),
+        "realized_pnl_pct": round((realized / starting_balance) * 100, 3),
+        "open_positions": open_positions,
+        "closed_positions": closed_positions,
+        "total_trades": n_trades,
+        "exposure": exposure,
+        "fees_paid": fees_paid,
+        "win_rate": win_rate,
         "trades_per_hour": trades_per_hour,
     }
 
@@ -137,13 +151,17 @@ def status():
 def pnl_history():
     if not _portfolio:
         return []
-    return _portfolio.pnl_history
+    with _portfolio_lock:
+        snapshot = list(_portfolio.pnl_history)
+    return snapshot
 
 
 @app.get("/api/positions")
 def positions():
     if not _portfolio:
         return []
+    with _portfolio_lock:
+        items = list(_portfolio.positions.items())
     return [
         {
             "token_id": tid[:16] + "...",
@@ -155,7 +173,7 @@ def positions():
             "strategy": pos.strategy,
             "opened_at": int(pos.opened_at),
         }
-        for tid, pos in _portfolio.positions.items()
+        for tid, pos in items
     ]
 
 
@@ -163,7 +181,8 @@ def positions():
 def closed_positions(limit: int = 100):
     if not _portfolio:
         return []
-    recent = list(reversed(_portfolio.closed_positions))[:limit]
+    with _portfolio_lock:
+        recent = list(reversed(_portfolio.closed_positions))[:limit]
     return recent
 
 
@@ -171,7 +190,8 @@ def closed_positions(limit: int = 100):
 def trades(limit: int = 100):
     if not _portfolio:
         return []
-    recent = list(reversed(_portfolio.trades))[:limit]
+    with _portfolio_lock:
+        recent = list(reversed(_portfolio.trades))[:limit]
     return [
         {
             "trade_id": t.trade_id,
@@ -192,7 +212,9 @@ def trades(limit: int = 100):
 def strategy_pnl():
     if not _portfolio:
         return {}
-    return {k: round(v, 2) for k, v in _portfolio.strategy_pnl().items()}
+    with _portfolio_lock:
+        pnl_map = _portfolio.strategy_pnl()
+    return {k: round(v, 2) for k, v in pnl_map.items()}
 
 
 @app.get("/api/strategy_trades")
@@ -200,8 +222,10 @@ def strategy_trades():
     """Trade counts per strategy over time buckets."""
     if not _portfolio:
         return {}
+    with _portfolio_lock:
+        trades_snapshot = list(_portfolio.trades)
     counts: dict[str, int] = {}
-    for t in _portfolio.trades:
+    for t in trades_snapshot:
         counts[t.strategy] = counts.get(t.strategy, 0) + 1
     return counts
 
@@ -473,7 +497,16 @@ def kalshi_decisions():
 @app.get("/api/analytics")
 def analytics():
     """Return strategy analytics, hourly PnL, health history, LLM decisions, edge distribution."""
-    p = _portfolio
+    with _portfolio_lock:
+        p = _portfolio
+        if p is not None:
+            _trades = list(p.trades)
+            _closed = list(p.closed_positions)
+            _pnl_history = list(p.pnl_history)
+        else:
+            _trades = []
+            _closed = []
+            _pnl_history = []
 
     # --- Strategy ROI, win rates, trade counts, volumes, fees ---
     strategy_roi: dict[str, float] = {}
@@ -487,7 +520,7 @@ def analytics():
         vol_map: dict[str, float] = {}
         fee_map: dict[str, float] = {}
         count_map: dict[str, int] = {}
-        for t in p.trades:
+        for t in _trades:
             s = t.strategy
             count_map[s] = count_map.get(s, 0) + 1
             vol_map[s] = vol_map.get(s, 0.0) + t.usdc_amount
@@ -499,7 +532,8 @@ def analytics():
         # PnL per strategy
         strat_pnl = {}
         try:
-            strat_pnl = p.strategy_pnl()
+            with _portfolio_lock:
+                strat_pnl = p.strategy_pnl()
         except Exception:
             pass
 
@@ -514,7 +548,7 @@ def analytics():
         # Win rates from closed_positions
         wins_map: dict[str, int] = {}
         total_map: dict[str, int] = {}
-        for cp in p.closed_positions:
+        for cp in _closed:
             s = getattr(cp, "strategy", None) or cp.get("strategy", "") if isinstance(cp, dict) else getattr(cp, "strategy", "")
             rp = cp.get("realized_pnl", 0) if isinstance(cp, dict) else getattr(cp, "realized_pnl", 0)
             total_map[s] = total_map.get(s, 0) + 1
@@ -525,12 +559,12 @@ def analytics():
 
     # --- Hourly PnL (last 24h) ---
     hourly_pnl: list[dict] = []
-    if p is not None and p.pnl_history:
+    if p is not None and _pnl_history:
         now = time.time()
         cutoff = now - 86400
         # bucket by hour
         buckets: dict[int, list[float]] = {}
-        for point in p.pnl_history:
+        for point in _pnl_history:
             t_val = point.get("t", 0)
             if t_val < cutoff:
                 continue
@@ -567,7 +601,7 @@ def analytics():
     # --- LLM decisions (trades with [LLM] in notes) ---
     llm_decisions: list[dict] = []
     if p is not None:
-        for t in reversed(p.trades):
+        for t in reversed(_trades):
             notes = t.notes if isinstance(t.notes, str) else ""
             if "[LLM]" in notes:
                 llm_decisions.append({
@@ -588,7 +622,7 @@ def analytics():
     }
     if p is not None:
         import re as _re
-        for t in p.trades:
+        for t in _trades:
             notes = t.notes if isinstance(t.notes, str) else ""
             m = _re.search(r"edge[=:]\s*([\d.]+)", notes, _re.IGNORECASE)
             if m:
@@ -684,8 +718,9 @@ async def balances():
 
     # --- Bot summary ---
     uptime_hours = round((now - _bot_start_time) / 3600, 2) if _bot_start_time else 0
-    bot_trades = len(_portfolio.trades) if _portfolio else 0
-    bot_pnl = round(_portfolio.total_pnl(), 2) if _portfolio else 0.0
+    with _portfolio_lock:
+        bot_trades = len(_portfolio.trades) if _portfolio else 0
+        bot_pnl = round(_portfolio.total_pnl(), 2) if _portfolio else 0.0
 
     return {
         "billing_cycle": {
@@ -1390,11 +1425,12 @@ async def api_compare():
     # Bot A data (local — same as /api/status)
     bot_a = {"available": True, "name": "Bot A (All Strategies)"}
     try:
-        bal = _portfolio.get_balance() if _portfolio else 0
-        pnl = getattr(_portfolio, 'total_pnl', 0) if _portfolio else 0
-        pos = len(getattr(_portfolio, 'positions', {})) if _portfolio else 0
-        strat_pnl = getattr(_portfolio, 'strategy_pnl', {}) if _portfolio else {}
-        trades = len(getattr(_portfolio, 'trades', [])) if _portfolio else 0
+        with _portfolio_lock:
+            bal = _portfolio.get_balance() if _portfolio else 0
+            pnl = getattr(_portfolio, 'total_pnl', 0) if _portfolio else 0
+            pos = len(getattr(_portfolio, 'positions', {})) if _portfolio else 0
+            strat_pnl = dict(getattr(_portfolio, 'strategy_pnl', {}) if _portfolio else {})
+            trades = len(getattr(_portfolio, 'trades', [])) if _portfolio else 0
         bot_a.update({
             "balance": round(float(bal), 2),
             "total_pnl": round(float(pnl), 2),

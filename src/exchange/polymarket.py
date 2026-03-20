@@ -342,19 +342,38 @@ class PolymarketClient:
     async def _simulate_limit_order(
         self, token_id: str, side: str, price: float, size: float
     ) -> OrderResult:
-        """Simulate a limit order placement."""
+        """Simulate a limit order placement, filling immediately if price crosses best quote."""
         order_id = f"paper_lim_{token_id[:8]}_{int(time.time()*1000)}"
+        fill_status = "LIVE"
+        fill_price = price
+        filled_size = 0.0
+
+        try:
+            book = await self.get_orderbook(token_id)
+            if side.upper() == "BUY" and book.best_ask is not None and price >= book.best_ask:
+                fill_price = book.best_ask
+                fill_status = "FILLED"
+                filled_size = size
+            elif side.upper() == "SELL" and book.best_bid is not None and price <= book.best_bid:
+                fill_price = book.best_bid
+                fill_status = "FILLED"
+                filled_size = size
+        except Exception:
+            pass  # fallback: order stays LIVE
+
         logger.info(
-            f"[PAPER] LIMIT {side} {size:.2f} contracts @ {price:.4f} "
-            f"token={token_id[:16]}..."
+            f"[PAPER] LIMIT {side} {size:.2f} @ {price:.4f} → {fill_status} "
+            f"(fill_price={fill_price:.4f})"
         )
         return OrderResult(
             order_id=order_id,
-            status="LIVE",
-            price=price,
+            status=fill_status,
+            price=fill_price,
             size=size,
             side=side,
             token_id=token_id,
+            filled_size=filled_size,
+            avg_fill_price=fill_price if fill_status == "FILLED" else 0.0,
         )
 
     # ------------------------------------------------------------------ #
@@ -372,12 +391,18 @@ class PolymarketClient:
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
             loop = asyncio.get_running_loop()
             order_args = MarketOrderArgs(token_id=token_id, amount=amount_usdc)
-            signed = await loop.run_in_executor(
-                None, self._clob_client.create_market_order, order_args
-            )
-            resp = await loop.run_in_executor(
-                None, self._clob_client.post_order, signed, OrderType.FOK
-            )
+            try:
+                signed = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._clob_client.create_market_order, order_args),
+                    timeout=5.0,
+                )
+                resp = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._clob_client.post_order, signed, OrderType.FOK),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"[LIVE] Order placement timed out for token={token_id[:16]}")
+                return None
             return OrderResult(
                 order_id=resp.get("orderID", "unknown"),
                 status=resp.get("status", "UNKNOWN"),
@@ -408,8 +433,18 @@ class PolymarketClient:
                 side=BUY if side == "BUY" else SELL,
             )
             loop = asyncio.get_running_loop()
-            signed = await loop.run_in_executor(None, self._clob_client.create_order, order_args)
-            resp = await loop.run_in_executor(None, self._clob_client.post_order, signed, OrderType.GTC)
+            try:
+                signed = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._clob_client.create_order, order_args),
+                    timeout=5.0,
+                )
+                resp = await asyncio.wait_for(
+                    loop.run_in_executor(None, self._clob_client.post_order, signed, OrderType.GTC),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"[LIVE] Order placement timed out for token={token_id[:16]}")
+                return None
             return OrderResult(
                 order_id=resp.get("orderID", "unknown"),
                 status=resp.get("status", "LIVE"),

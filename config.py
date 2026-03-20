@@ -101,7 +101,7 @@ class StrategyConfig:
     cross_exchange_safe_only: bool = field(default_factory=lambda: _bool("CROSS_EXCHANGE_SAFE_ONLY", True))  # only trade mechanical-resolution markets
 
     # LLM ensemble for event-driven directional trading
-    ensemble_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_ENSEMBLE", True))
+    ensemble_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_ENSEMBLE", False))
     ensemble_min_edge: float = field(default_factory=lambda: _float("ENSEMBLE_MIN_EDGE", 0.05))  # 5% edge vs LLM estimate to trade
     ensemble_max_markets_per_cycle: int = field(default_factory=lambda: _int("ENSEMBLE_MAX_MARKETS", 5))  # limit LLM API calls per cycle
 
@@ -110,7 +110,7 @@ class StrategyConfig:
 
     # New strategies
     resolution_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_RESOLUTION", True))
-    event_driven_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_EVENT_DRIVEN", True))
+    event_driven_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_EVENT_DRIVEN", False))
     cross_exchange_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_CROSS_EXCHANGE", False))
     futures_hedge_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_FUTURES_HEDGE", False))
 
