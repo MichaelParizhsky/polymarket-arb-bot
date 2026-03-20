@@ -69,6 +69,7 @@ class ArbBot:
         self._futures_hedge: FuturesHedge | None = None
         self._hedge_manager: HedgeManager | None = None
         self._news_monitor = None  # set in run() if NewsMonitor available
+        self._ensemble_strategy = None  # set in _build_strategies() if enabled
 
         # Strategies
         self._strategies = []
@@ -116,9 +117,8 @@ class ArbBot:
                 QuickResolutionStrategy(self.config, self.portfolio, self.risk)
             )
         if cfg.ensemble_enabled:
-            self._strategies.append(
-                EnsembleStrategy(self.config, self.portfolio, self.risk)
-            )
+            self._ensemble_strategy = EnsembleStrategy(self.config, self.portfolio, self.risk)
+            self._strategies.append(self._ensemble_strategy)
         strategy_names = [s.name for s in self._strategies]
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture
@@ -191,7 +191,10 @@ class ArbBot:
         # Register portfolio with dashboard
         dashboard_register(self.portfolio, self._start_time,
                            config=self.config, risk=self.risk,
-                           binance=self.binance, kalshi=self._kalshi)
+                           binance=self.binance, kalshi=self._kalshi,
+                           news_monitor=self._news_monitor,
+                           hedge_manager=self._hedge_manager,
+                           ensemble_strategy=self._ensemble_strategy)
 
         # Start dashboard server in a dedicated thread with its own event loop.
         # This isolates the dashboard from the trading bot's asyncio loop so that
