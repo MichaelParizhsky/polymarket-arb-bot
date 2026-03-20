@@ -32,7 +32,7 @@ ENDGAME_YES_HIGH = 0.999    # YES must be below this (not already at payout)
 ENDGAME_ASK_MAX = 0.998     # only buy if ask < $0.998 (at least 0.2c left)
 ENDGAME_NO_LOW = 0.001      # YES price at most this for NO endgame entry
 ENDGAME_NO_HIGH = 0.030     # YES price at most this for NO endgame entry
-ENDGAME_HOURS = 4.0         # only within 4 hours of resolution
+ENDGAME_HOURS = 4.0         # only within 4 hours of resolution (keep for backward compat)
 ENDGAME_MIN_EDGE = 0.002    # minimum 0.2c net edge (fees are 0.2%, target >0.4% gross)
 
 # --- Tier 2: Near-term resolution (moderate conviction) ---
@@ -44,12 +44,12 @@ NO_LIKELY_LOW = 0.030       # YES price at most this (NO strongly likely)
 NO_LIKELY_HIGH = 0.10       # YES price at most this (tightened from 0.20)
 NO_ASK_MAX = 0.96
 
-HOURS_THRESHOLD_OUTER = 24.0   # only consider markets closing within 24h
-HOURS_THRESHOLD_INNER = 12.0   # only trade markets closing within 12h (tightened from 24h)
-MIN_NET_EDGE = 0.04             # raised from 0.02 — tier 2 requires 4% edge for uncertainty premium
+MAX_HOURS_TO_SCAN = 48.0        # Scan up to 48h out; edge requirements scale with time
+HOURS_THRESHOLD_INNER = 12.0   # Tier 2 only within 12h
+HOURS_THRESHOLD_ENDGAME = 4.0  # Tier 1 only within 4h (alias for ENDGAME_HOURS)
 
 # Market quality filters — only trade resolution strategy on liquid markets
-MIN_VOLUME_24H = 1000.0  # USDC — skip markets with <$1000 daily volume
+MIN_VOLUME_24H = 500.0  # Lowered from 1000 — sports markets have $200-800 daily volume
 MIN_LIQUIDITY_DEPTH = 100.0  # USDC at best ask required
 
 # Category-specific edge requirements (higher for noisy categories)
@@ -59,6 +59,18 @@ CATEGORY_EDGE_MULTIPLIER = {
     "politics": 1.0,  # Standard
     "other": 1.0,
 }
+
+
+def _required_edge(hours_left: float) -> float:
+    """Edge requirement scales down with time — less time = less adverse-move risk."""
+    if hours_left <= 1.0:
+        return 0.015   # <1h: 1.5% sufficient
+    elif hours_left <= 4.0:
+        return 0.020   # <4h: 2%
+    elif hours_left <= 12.0:
+        return 0.025   # <12h: 2.5%
+    else:
+        return 0.030   # >12h: 3%
 
 
 # ------------------------------------------------------------------ #
@@ -88,14 +100,28 @@ class ResolutionStrategy(BaseStrategy):
         orderbooks: dict[str, Orderbook] = context.get("orderbooks", {})
         signals: list[Signal] = []
 
+        # Diagnostic counters
+        n_expired = 0
+        n_volume = 0
+        n_no_edge = 0
+        markets_scanned = 0
+
         # Prune resolution positions older than 48h (markets long since resolved)
         cutoff = time.time() - 48 * 3600
-        expired = [cid for cid, (_, entered_at) in self._resolution_positions.items() if entered_at < cutoff]
-        for cid in expired:
+        stale = [cid for cid, (_, entered_at) in self._resolution_positions.items() if entered_at < cutoff]
+        for cid in stale:
             del self._resolution_positions[cid]
 
         for market in markets:
             if not market.active or market.closed:
+                continue
+
+            dte_days = _days_to_expiry(market.end_date_iso)
+            hours_left = dte_days * 24.0
+
+            # Only scan markets resolving within MAX_HOURS_TO_SCAN (48h)
+            if hours_left > MAX_HOURS_TO_SCAN or hours_left <= 0:
+                n_expired += 1
                 continue
 
             # Skip illiquid markets
@@ -105,18 +131,20 @@ class ResolutionStrategy(BaseStrategy):
                     f"Resolution: skipping {market.question[:50]} — volume ${volume:.0f} < ${MIN_VOLUME_24H:.0f}",
                     "debug",
                 )
+                n_volume += 1
                 continue
+
+            # Skip if we already have a resolution position on this market
+            if market.condition_id in self._resolution_positions:
+                continue
+
+            markets_scanned += 1
 
             # Apply category-specific edge multiplier
             category = getattr(market, 'category', 'other').lower()
             edge_multiplier = CATEGORY_EDGE_MULTIPLIER.get(category, 1.0)
 
-            dte_days = _days_to_expiry(market.end_date_iso)
-            hours_left = dte_days * 24.0
-
-            # Skip if we already have a resolution position on this market
-            if market.condition_id in self._resolution_positions:
-                continue
+            sig = None
 
             # Tier 1: Endgame sweep (<4h, high confidence)
             if hours_left <= ENDGAME_HOURS:
@@ -124,13 +152,24 @@ class ResolutionStrategy(BaseStrategy):
                 if sig is not None:
                     signals.append(sig)
                     continue  # don't double-signal same market
+                # Tier 1 failed — cascade to Tier 2 (e.g. 92% conviction with 30 min left)
+                if hours_left <= HOURS_THRESHOLD_INNER:
+                    sig = self._evaluate_market(market, orderbooks, hours_left, edge_multiplier)
 
-            # Tier 2: Near-term resolution (<12h, moderate confidence)
-            if hours_left <= HOURS_THRESHOLD_INNER:
+            # Tier 2 only: <12h but not in endgame window
+            elif hours_left <= HOURS_THRESHOLD_INNER:
                 sig = self._evaluate_market(market, orderbooks, hours_left, edge_multiplier)
-                if sig is not None:
-                    signals.append(sig)
 
+            if sig is not None:
+                signals.append(sig)
+            else:
+                n_no_edge += 1
+
+        self.log(
+            f"Resolution scan: {markets_scanned} markets checked → "
+            f"{len(signals)} signals | "
+            f"skipped: {n_expired} out-of-window, {n_volume} low-volume, {n_no_edge} no-edge"
+        )
         return signals
 
     def _evaluate_endgame(
@@ -314,7 +353,7 @@ class ResolutionStrategy(BaseStrategy):
         gross_edge = 1.0 - best_ask
         net_edge = gross_edge - FEE_RATE
 
-        required_edge = MIN_NET_EDGE * edge_multiplier
+        required_edge = _required_edge(hours_left) * edge_multiplier
         if net_edge < required_edge:
             return None
 
@@ -385,7 +424,7 @@ class ResolutionStrategy(BaseStrategy):
         gross_edge = 1.0 - best_ask
         net_edge = gross_edge - FEE_RATE
 
-        required_edge = MIN_NET_EDGE * edge_multiplier
+        required_edge = _required_edge(hours_left) * edge_multiplier
         if net_edge < required_edge:
             return None
 

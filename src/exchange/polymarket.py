@@ -198,6 +198,96 @@ class PolymarketClient:
             logger.debug(f"Refreshed market cache: {len(self._market_cache)} markets")
         return list(self._market_cache.values())
 
+    async def get_expiring_markets(self, max_hours: float = 48.0) -> list[Market]:
+        """
+        Fetch markets expiring within the next `max_hours` hours, sorted by end_date ascending.
+        Supplements get_markets() so near-expiry markets are never missed due to pagination.
+        """
+        import datetime as _dt
+        now = _dt.datetime.utcnow()
+
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": 200,
+            "order": "end_date_min",
+            "ascending": "true",
+        }
+
+        try:
+            resp = await self._http.get(
+                f"{self.GAMMA_BASE}/markets",
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.warning(f"get_expiring_markets error: {exc}")
+            return []
+
+        markets_raw = data if isinstance(data, list) else data.get("data", [])
+        markets = []
+        for raw in markets_raw:
+            try:
+                token_ids = raw.get("clobTokenIds") or []
+                if isinstance(token_ids, str):
+                    token_ids = json.loads(token_ids)
+                outcomes = raw.get("outcomes") or ["Yes", "No"]
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+
+                tokens = [
+                    Token(token_id=str(tid), outcome=str(out))
+                    for tid, out in zip(token_ids, outcomes)
+                ]
+                if len(tokens) < 2:
+                    continue
+
+                condition_id = raw.get("conditionId") or raw.get("id") or ""
+                end_date_iso = raw.get("endDateIso") or raw.get("endDate", "")
+
+                if not end_date_iso:
+                    continue
+
+                try:
+                    end_dt = _dt.datetime.fromisoformat(
+                        end_date_iso.replace("Z", "")
+                    )
+                    hours_left = (end_dt - now).total_seconds() / 3600
+                    if not (0 < hours_left <= max_hours):
+                        continue
+                except ValueError:
+                    continue
+
+                markets.append(Market(
+                    condition_id=str(condition_id),
+                    question=raw.get("question", ""),
+                    tokens=tokens,
+                    active=raw.get("active", False),
+                    closed=raw.get("closed", True),
+                    end_date_iso=end_date_iso,
+                    tags=[raw.get("category", "")] if raw.get("category") else [],
+                    volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
+                    liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
+                ))
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.debug(f"get_expiring_markets: skipping malformed market: {exc}")
+
+        logger.info(f"get_expiring_markets: found {len(markets)} markets expiring within {max_hours}h")
+        return markets
+
+    _expiring_cache: list = []
+    _expiring_cache_ts: float = 0.0
+
+    async def get_expiring_markets_cached(self, max_hours: float = 48.0) -> list[Market]:
+        """Cached version of get_expiring_markets with 60s TTL."""
+        if time.time() - self._expiring_cache_ts < 60.0 and self._expiring_cache:
+            return self._expiring_cache
+        markets = await self.get_expiring_markets(max_hours=max_hours)
+        self._expiring_cache = markets
+        self._expiring_cache_ts = time.time()
+        return markets
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=0.5, max=3))
     async def get_orderbook(self, token_id: str) -> Orderbook:
         """Fetch live orderbook for a token."""

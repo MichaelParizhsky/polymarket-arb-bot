@@ -25,6 +25,7 @@ Market type detection:
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 from typing import Any
@@ -35,15 +36,45 @@ from src.strategies.latency_arb import _days_to_expiry
 from src.utils.constants import calc_taker_fee, MIN_TRADE_USDC
 from src.utils.metrics import arb_opportunities, edge_detected
 
+logger = logging.getLogger(__name__)
+
 # Regex to detect short-duration crypto market questions
 _CRYPTO_SHORT_RE = re.compile(
     r"\b(5[\s-]?min|15[\s-]?min|5m|15m|hourly|1[\s-]?hour)\b",
     re.IGNORECASE,
 )
+
+_SPORTS_KEYWORDS = frozenset([
+    "nba", "nfl", "nhl", "mlb", "nascar", "mls", "ufc", "boxing",
+    "super bowl", "world series", "stanley cup", "playoffs", "championship",
+    "win", "wins", "score", "points", "quarter", "inning", "period",
+    "soccer", "football", "basketball", "baseball", "hockey", "tennis",
+    "fifa", "ncaa", "march madness", "bowl game",
+    "mma", "match", "game", "series",
+])
+
 _SPORTS_RE = re.compile(
-    r"\b(nba|nfl|mlb|nhl|soccer|football|basketball|baseball|tennis|ufc|mma|match|game|series)\b",
+    r"\b(" + "|".join(re.escape(k) for k in _SPORTS_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
+
+
+def _tiered_conviction(hours_left: float, base_conviction: float) -> tuple[float, float]:
+    """
+    Returns (conviction_threshold, min_edge) tiered by time remaining.
+    Closer to expiry → lower conviction needed (outcome more certain)
+    AND lower required edge (less time for adverse moves).
+    """
+    if hours_left <= 0.5:          # <30 min
+        return (base_conviction, 0.006)
+    elif hours_left <= 2.0:        # <2 hours
+        return (max(base_conviction - 0.06, 0.75), 0.010)
+    elif hours_left <= 6.0:        # <6 hours
+        return (max(base_conviction - 0.10, 0.72), 0.015)
+    elif hours_left <= 12.0:       # <12 hours
+        return (max(base_conviction - 0.14, 0.70), 0.020)
+    else:                          # 12-24 hours
+        return (max(base_conviction - 0.18, 0.68), 0.025)
 
 
 def _detect_market_type(question: str) -> str:
@@ -75,10 +106,17 @@ class QuickResolutionStrategy(BaseStrategy):
         signals: list[Signal] = []
 
         cfg = self.config.strategies
-        max_hours = cfg.quick_resolution_max_hours
+        max_hours = getattr(cfg, 'quick_resolution_max_hours', 24.0)
         min_conviction = cfg.quick_resolution_min_conviction
         min_edge = cfg.quick_resolution_min_edge
         max_spend = cfg.quick_resolution_max_spend
+
+        QR_MIN_VOLUME = 100.0  # Quick resolution uses lower volume floor — sports markets are lower volume
+
+        skipped_no_time = 0
+        skipped_no_conviction = 0
+        skipped_no_edge = 0
+        skipped_no_volume = 0
 
         # Prune stale entries (markets long resolved — keep 12h window)
         cutoff = time.time() - 12 * 3600
@@ -96,7 +134,17 @@ class QuickResolutionStrategy(BaseStrategy):
             # Only consider markets within the max_hours window
             dte_days = _days_to_expiry(market.end_date_iso)
             hours_left = dte_days * 24.0
-            if hours_left <= 0 or hours_left > max_hours:
+            if hours_left > max_hours or hours_left <= 0:
+                skipped_no_time += 1
+                continue
+
+            # Volume filter (lower floor for quick resolution)
+            volume = getattr(market, 'volume_24h', 0.0) or 0.0
+            if volume < QR_MIN_VOLUME:
+                logger.debug(
+                    f"QuickRes: skip {market.question[:50]} — volume ${volume:.0f} < ${QR_MIN_VOLUME:.0f}"
+                )
+                skipped_no_volume += 1
                 continue
 
             # Skip if already entered this market
@@ -119,6 +167,10 @@ class QuickResolutionStrategy(BaseStrategy):
             yes_mid = yes_book.mid
             market_type = _detect_market_type(market.question)
 
+            conviction_threshold, effective_min_edge = _tiered_conviction(
+                hours_left, min_conviction
+            )
+
             sig = self._evaluate(
                 market=market,
                 yes_token_id=yes_token.token_id,
@@ -128,12 +180,26 @@ class QuickResolutionStrategy(BaseStrategy):
                 yes_mid=yes_mid,
                 hours_left=hours_left,
                 market_type=market_type,
-                min_conviction=min_conviction,
-                min_edge=min_edge,
+                min_conviction=conviction_threshold,
+                min_edge=effective_min_edge,
                 max_spend=max_spend,
             )
             if sig is not None:
                 signals.append(sig)
+            else:
+                # Attribute the skip reason based on conviction vs edge
+                yes_mid_val = yes_mid
+                if yes_mid_val >= conviction_threshold or yes_mid_val <= (1.0 - conviction_threshold):
+                    skipped_no_edge += 1
+                else:
+                    skipped_no_conviction += 1
+
+        if skipped_no_time + skipped_no_conviction + skipped_no_edge + skipped_no_volume > 0:
+            logger.info(
+                f"QuickRes scan: {len(signals)} signals | skipped: "
+                f"{skipped_no_time} time, {skipped_no_conviction} conviction, "
+                f"{skipped_no_edge} edge, {skipped_no_volume} volume"
+            )
 
         return signals
 

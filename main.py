@@ -341,6 +341,12 @@ class ArbBot:
     async def _build_context(self) -> dict[str, Any]:
         """Fetch all market data needed by strategies."""
         markets = await self.poly.get_markets_cached()
+        expiring = await self.poly.get_expiring_markets_cached(max_hours=48.0)
+
+        # Merge: expiring markets lead the list so they survive the volume sort cap.
+        # Deduplicate by condition_id; expiring entries take priority.
+        seen_ids = {m.condition_id for m in expiring}
+        markets = list(expiring) + [m for m in markets if m.condition_id not in seen_ids]
 
         # Filter to markets resolving within MAX_DAYS_TO_RESOLUTION
         max_days = self.config.strategies.max_days_to_resolution
