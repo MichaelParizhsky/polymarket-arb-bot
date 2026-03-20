@@ -1438,6 +1438,7 @@ async def api_compare():
             exposure       = round(p.exposure(), 2) if p else 0
             fees_paid      = round(p.total_fees_paid(), 2) if p else 0
             win_rate       = p.win_rate() if p else 0
+            realized_pnl   = round(p.realized_closed_pnl(), 2) if p else 0
             strat_pnl      = {k: round(float(v), 2) for k, v in p.strategy_pnl().items()} if p else {}
             strat_trades   = {}
             if p:
@@ -1455,6 +1456,7 @@ async def api_compare():
             "exposure":         exposure,
             "fees_paid":        fees_paid,
             "win_rate":         win_rate,
+            "realized_pnl":     realized_pnl,
             "trades_per_hour":  trades_per_hour,
             "strategy_pnl":     strat_pnl,
             "strategy_trades":  strat_trades,
@@ -1489,6 +1491,7 @@ async def api_compare():
                     "exposure":         s.get("exposure", 0),
                     "fees_paid":        s.get("fees_paid", 0),
                     "win_rate":         s.get("win_rate", 0),
+                    "realized_pnl":     s.get("realized_pnl", 0),
                     "trades_per_hour":  s.get("trades_per_hour", 0),
                 })
                 # Grab bot name from peer if available
@@ -2271,6 +2274,10 @@ tr:hover td{background:#181818}
             <span id="compare-a-pnl">--</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Realized PnL</span>
+            <span id="compare-a-realized">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">ROI</span>
             <span id="compare-a-roi" style="color:#e0e0e0">--</span>
           </div>
@@ -2311,6 +2318,10 @@ tr:hover td{background:#181818}
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">Total PnL</span>
             <span id="compare-b-pnl">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Realized PnL</span>
+            <span id="compare-b-realized">--</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">ROI</span>
@@ -3863,6 +3874,10 @@ function _fillCompareCard(prefix, bot){
   const pnl=bot.total_pnl;
   pnlEl.textContent=pnl!=null?fmtPnl(pnl):'--';
   pnlEl.style.color=pnl!=null?(pnl>=0?'#00e676':'#ff5252'):'#888';
+  const realEl=$(`compare-${prefix}-realized`);
+  const rpnl=bot.realized_pnl;
+  realEl.textContent=rpnl!=null?fmtPnl(rpnl):'--';
+  realEl.style.color=rpnl!=null?(rpnl>=0?'#00e676':'#ff5252'):'#888';
   const roi=bot.pnl_pct;
   const roiEl=$(`compare-${prefix}-roi`);
   if(roi!=null){
@@ -3896,7 +3911,7 @@ async function fetchCompare(){
       warn.style.display='block';
       warn.textContent='Bot B unavailable: '+(b.error||'unknown error');
       setup.style.display=(b.error||'').includes('PEER_BOT_URL not set')?'block':'none';
-      ['bal','pnl','roi','wr','fees','exp','pos','trades','tph'].forEach(f=>{
+      ['bal','pnl','realized','roi','wr','fees','exp','pos','trades','tph'].forEach(f=>{
         const el=$(`compare-b-${f}`);
         if(el) el.textContent='--';
       });
