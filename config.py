@@ -64,8 +64,8 @@ class RiskConfig:
     max_slippage: float = field(default_factory=lambda: _float("MAX_SLIPPAGE", 0.005))
     max_drawdown_pct: float = 0.15  # Stop trading at 15% drawdown
     max_open_orders: int = 20
-    min_trade_interval: int = field(default_factory=lambda: _int("MIN_TRADE_INTERVAL", 60))   # seconds between any two trades
-    token_cooldown: int = field(default_factory=lambda: _int("TOKEN_COOLDOWN", 300))           # seconds before re-trading same token
+    min_trade_interval: int = field(default_factory=lambda: _int("MIN_TRADE_INTERVAL", 15))   # seconds between any two trades (Polymarket allows 3500 orders/10s)
+    token_cooldown: int = field(default_factory=lambda: _int("TOKEN_COOLDOWN", 120))           # seconds before re-trading same token
 
 
 @dataclass
@@ -109,6 +109,14 @@ class StrategyConfig:
     event_driven_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_EVENT_DRIVEN", True))
     cross_exchange_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_CROSS_EXCHANGE", False))
     futures_hedge_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_FUTURES_HEDGE", False))
+
+    # Quick resolution: targets markets resolving within a few hours (5-min, 15-min crypto, sports)
+    # Faster capital recycling — high conviction entries at price extremes
+    quick_resolution_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_QUICK_RESOLUTION", True))
+    quick_resolution_max_hours: float = field(default_factory=lambda: float(os.getenv("QUICK_RESOLUTION_MAX_HOURS", "6")))
+    quick_resolution_min_conviction: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_CONVICTION", 0.88))
+    quick_resolution_min_edge: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_EDGE", 0.015))
+    quick_resolution_max_spend: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MAX_SPEND", 150.0))
 
     # Markets coverage
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))

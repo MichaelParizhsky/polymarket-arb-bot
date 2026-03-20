@@ -99,12 +99,34 @@ class PolymarketClient:
         self._market_cache: dict[str, Market] = {}
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 30.0  # seconds
+        self._clob_client = None  # initialised once in __aenter__ for live mode
 
     async def __aenter__(self) -> "PolymarketClient":
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(10.0),
             headers={"User-Agent": "polymarket-arb-bot/1.0"},
         )
+        # Pre-build the ClobClient once for the session to avoid per-order overhead
+        if not self.paper_trading and self.config.private_key:
+            try:
+                from py_clob_client.client import ClobClient
+                from py_clob_client.constants import POLYGON
+                self._clob_client = ClobClient(
+                    host=self.CLOB_BASE,
+                    chain_id=POLYGON,
+                    key=self.config.private_key,
+                    creds={
+                        "api_key": self.config.api_key,
+                        "api_secret": self.config.api_secret,
+                        "api_passphrase": self.config.api_passphrase,
+                    },
+                    signature_type=2,
+                    funder=self.config.funder_address,
+                )
+                logger.info("ClobClient initialised (session-level)")
+            except Exception as exc:
+                logger.warning(f"ClobClient init failed: {exc}")
+                self._clob_client = None
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -342,31 +364,20 @@ class PolymarketClient:
     async def _live_market_order(
         self, token_id: str, side: str, amount_usdc: float
     ) -> OrderResult | None:
-        """Execute a real market order via CLOB API."""
+        """Execute a real market order via CLOB API (FOK — full fill or cancel)."""
+        if not self._clob_client:
+            logger.error("ClobClient not initialised — cannot place live order")
+            return None
         try:
-            from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            from py_clob_client.constants import POLYGON
-
-            client = ClobClient(
-                host=self.CLOB_BASE,
-                chain_id=POLYGON,
-                key=self.config.private_key,
-                creds={
-                    "api_key": self.config.api_key,
-                    "api_secret": self.config.api_secret,
-                    "api_passphrase": self.config.api_passphrase,
-                },
-                signature_type=2,
-                funder=self.config.funder_address,
+            loop = asyncio.get_running_loop()
+            order_args = MarketOrderArgs(token_id=token_id, amount=amount_usdc)
+            signed = await loop.run_in_executor(
+                None, self._clob_client.create_market_order, order_args
             )
-            order_args = MarketOrderArgs(
-                token_id=token_id,
-                amount=amount_usdc,
+            resp = await loop.run_in_executor(
+                None, self._clob_client.post_order, signed, OrderType.FOK
             )
-            loop = asyncio.get_event_loop()
-            signed = await loop.run_in_executor(None, client.create_market_order, order_args)
-            resp = await loop.run_in_executor(None, client.post_order, signed, OrderType.FOK)
             return OrderResult(
                 order_id=resp.get("orderID", "unknown"),
                 status=resp.get("status", "UNKNOWN"),
@@ -383,32 +394,22 @@ class PolymarketClient:
         self, token_id: str, side: str, price: float, size: float
     ) -> OrderResult | None:
         """Post a real GTC limit order."""
+        if not self._clob_client:
+            logger.error("ClobClient not initialised — cannot place live limit order")
+            return None
         try:
-            from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import LimitOrderArgs, OrderType
-            from py_clob_client.constants import POLYGON, BUY, SELL
+            from py_clob_client.constants import BUY, SELL
 
-            client = ClobClient(
-                host=self.CLOB_BASE,
-                chain_id=POLYGON,
-                key=self.config.private_key,
-                creds={
-                    "api_key": self.config.api_key,
-                    "api_secret": self.config.api_secret,
-                    "api_passphrase": self.config.api_passphrase,
-                },
-                signature_type=2,
-                funder=self.config.funder_address,
-            )
             order_args = LimitOrderArgs(
                 token_id=token_id,
                 price=price,
                 size=size,
                 side=BUY if side == "BUY" else SELL,
             )
-            loop = asyncio.get_event_loop()
-            signed = await loop.run_in_executor(None, client.create_order, order_args)
-            resp = await loop.run_in_executor(None, client.post_order, signed, OrderType.GTC)
+            loop = asyncio.get_running_loop()
+            signed = await loop.run_in_executor(None, self._clob_client.create_order, order_args)
+            resp = await loop.run_in_executor(None, self._clob_client.post_order, signed, OrderType.GTC)
             return OrderResult(
                 order_id=resp.get("orderID", "unknown"),
                 status=resp.get("status", "LIVE"),

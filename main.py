@@ -38,6 +38,7 @@ from src.strategies.resolution import ResolutionStrategy
 from src.strategies.event_driven import EventDrivenStrategy
 from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
+from src.strategies.quick_resolution import QuickResolutionStrategy
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
 from src.meta_agent.analyzer import PortfolioSnapshot
@@ -104,6 +105,10 @@ class ArbBot:
         if cfg.cross_exchange_enabled and self._kalshi:
             self._strategies.append(
                 CrossExchangeStrategy(self.config, self.portfolio, self.risk, self._kalshi)
+            )
+        if cfg.quick_resolution_enabled:
+            self._strategies.append(
+                QuickResolutionStrategy(self.config, self.portfolio, self.risk)
             )
         logger.info(f"Loaded {len(self._strategies)} strategies: "
                     f"{[s.name for s in self._strategies]}")
@@ -202,6 +207,7 @@ class ArbBot:
             asyncio.create_task(self._meta_agent_loop())
             asyncio.create_task(self._code_review_loop())
             asyncio.create_task(self._research_loop())
+            asyncio.create_task(self._auto_close_resolved_loop())
 
             try:
                 await self._main_loop()
@@ -443,6 +449,67 @@ class ArbBot:
                 price_map[tid] = book.mid
         return price_map
 
+    async def _auto_close_resolved_loop(self) -> None:
+        """
+        Periodically scan open positions for markets that have resolved.
+        A resolved binary market pays $1.00 for winning tokens and $0.00 for losing ones.
+        We detect resolution when the best_bid >= 0.995 (winner) or best_ask <= 0.005 (loser)
+        and close the position at that price.
+        """
+        check_interval = 30  # seconds between resolution checks
+
+        while self._running:
+            await asyncio.sleep(check_interval)
+            if not self._running or not self.poly:
+                continue
+
+            try:
+                open_positions = {
+                    tid: pos for tid, pos in self.portfolio.positions.items()
+                    if pos.contracts > 0
+                }
+                if not open_positions:
+                    continue
+
+                for token_id, pos in list(open_positions.items()):
+                    try:
+                        book = await self.poly.get_orderbook(token_id)
+                    except Exception:
+                        continue
+
+                    # Winning resolution: bid >= 0.995 — sell at near $1.00
+                    if book.best_bid is not None and book.best_bid >= 0.995:
+                        trade = self.portfolio.sell(
+                            token_id=token_id,
+                            contracts=pos.contracts,
+                            price=book.best_bid,
+                            strategy="auto_close",
+                            notes=f"[AUTO-CLOSE] resolved winner @ {book.best_bid:.4f}",
+                        )
+                        if trade:
+                            logger.info(
+                                f"[AUTO-CLOSE] Closed resolved winner {token_id[:16]}... "
+                                f"@ {book.best_bid:.4f} | {pos.contracts:.2f} contracts"
+                            )
+                    # Losing resolution: ask <= 0.005 — position is worthless, sell at market
+                    elif book.best_ask is not None and book.best_ask <= 0.005:
+                        trade = self.portfolio.sell(
+                            token_id=token_id,
+                            contracts=pos.contracts,
+                            price=book.best_ask or 0.001,
+                            strategy="auto_close",
+                            notes=f"[AUTO-CLOSE] resolved loser @ {book.best_ask:.4f}",
+                        )
+                        if trade:
+                            logger.info(
+                                f"[AUTO-CLOSE] Closed resolved loser {token_id[:16]}... "
+                                f"@ {book.best_ask:.4f} | loss={pos.cost_basis:.2f} USDC"
+                            )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.debug(f"Auto-close loop error: {exc}")
+
     async def _meta_agent_loop(self) -> None:
         """Run Claude meta-agent analysis every 30 minutes."""
         import json
@@ -650,6 +717,7 @@ class ArbBot:
         "STRATEGY_MARKET_MAKING":  ("strategies", "market_making_enabled",    bool),
         "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),
         "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),
+        "STRATEGY_QUICK_RESOLUTION": ("strategies", "quick_resolution_enabled", bool),
     }
 
     def _apply_config_overrides(self, overrides: dict) -> list[str]:

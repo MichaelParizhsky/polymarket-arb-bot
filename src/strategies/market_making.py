@@ -39,8 +39,6 @@ class MarketMakingStrategy(BaseStrategy):
         self._refresh_interval: float = 10.0   # seconds between quote refresh
 
     async def scan(self, context: dict[str, Any]) -> list[Signal]:
-        if self.config.paper_trading:
-            return []
         markets: list[Market] = context.get("markets", [])
         orderbooks: dict[str, Orderbook] = context.get("orderbooks", {})
         signals: list[Signal] = []

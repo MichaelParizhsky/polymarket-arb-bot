@@ -105,6 +105,11 @@ Use **`/cbt-trading`** to:
 - Strategies use `combo_min_edge` from `StrategyConfig` for cross-exchange min edge (same knob as combinatorial)
 - Cross-exchange strategy disabled by default (`STRATEGY_CROSS_EXCHANGE=False`) — requires Kalshi credentials
 - `FEE_RATE = 0.002` per side (hardcoded in cross_exchange.py) — factor this into any edge calculations
+- **Confirmed rate limits (March 2026)**: POST /order 500 req/10s burst, 3,000 req/10min sustained (5 req/s average). MIN_TRADE_INTERVAL=15s is well within limits.
+- **Taker fees by market type** (confirmed): standard=0.2% flat, crypto_5m=`0.25*(p*(1-p))^2` (max 1.56% at 50%), sports=0.30% flat, dcm=0.30% flat
+- **Latency arb on 5/15-min crypto markets is dead** — dynamic fees at 50% probability exceed arb margin. QuickResolutionStrategy targets only high-conviction extremes (>88% or <12%).
+- **AsyncClobClient** is available in py-clob-client 0.34.6 — future upgrade would eliminate all `run_in_executor` overhead in `polymarket.py`
+- **Batch orders**: up to 15 orders per request via the CLOB batch endpoint
 
 ## Feedback Loop
 
