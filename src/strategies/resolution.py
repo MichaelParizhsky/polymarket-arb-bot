@@ -48,6 +48,18 @@ HOURS_THRESHOLD_OUTER = 24.0   # only consider markets closing within 24h
 HOURS_THRESHOLD_INNER = 12.0   # only trade markets closing within 12h (tightened from 24h)
 MIN_NET_EDGE = 0.04             # raised from 0.02 — tier 2 requires 4% edge for uncertainty premium
 
+# Market quality filters — only trade resolution strategy on liquid markets
+MIN_VOLUME_24H = 1000.0  # USDC — skip markets with <$1000 daily volume
+MIN_LIQUIDITY_DEPTH = 100.0  # USDC at best ask required
+
+# Category-specific edge requirements (higher for noisy categories)
+CATEGORY_EDGE_MULTIPLIER = {
+    "sports": 1.5,    # Sports have high information asymmetry
+    "crypto": 1.2,
+    "politics": 1.0,  # Standard
+    "other": 1.0,
+}
+
 
 # ------------------------------------------------------------------ #
 #  Strategy                                                            #
@@ -86,6 +98,19 @@ class ResolutionStrategy(BaseStrategy):
             if not market.active or market.closed:
                 continue
 
+            # Skip illiquid markets
+            volume = getattr(market, 'volume_24h', 0.0) or 0.0
+            if volume < MIN_VOLUME_24H:
+                self.log(
+                    f"Resolution: skipping {market.question[:50]} — volume ${volume:.0f} < ${MIN_VOLUME_24H:.0f}",
+                    "debug",
+                )
+                continue
+
+            # Apply category-specific edge multiplier
+            category = getattr(market, 'category', 'other').lower()
+            edge_multiplier = CATEGORY_EDGE_MULTIPLIER.get(category, 1.0)
+
             dte_days = _days_to_expiry(market.end_date_iso)
             hours_left = dte_days * 24.0
 
@@ -95,14 +120,14 @@ class ResolutionStrategy(BaseStrategy):
 
             # Tier 1: Endgame sweep (<4h, high confidence)
             if hours_left <= ENDGAME_HOURS:
-                sig = self._evaluate_endgame(market, orderbooks, hours_left)
+                sig = self._evaluate_endgame(market, orderbooks, hours_left, edge_multiplier)
                 if sig is not None:
                     signals.append(sig)
                     continue  # don't double-signal same market
 
             # Tier 2: Near-term resolution (<12h, moderate confidence)
             if hours_left <= HOURS_THRESHOLD_INNER:
-                sig = self._evaluate_market(market, orderbooks, hours_left)
+                sig = self._evaluate_market(market, orderbooks, hours_left, edge_multiplier)
                 if sig is not None:
                     signals.append(sig)
 
@@ -113,6 +138,7 @@ class ResolutionStrategy(BaseStrategy):
         market: Market,
         orderbooks: dict[str, Orderbook],
         hours_left: float,
+        edge_multiplier: float = 1.0,
     ) -> Signal | None:
         """
         Tier 1 — Endgame sweep: buy near-certain YES/NO within 4h of resolution.
@@ -134,7 +160,8 @@ class ResolutionStrategy(BaseStrategy):
             if best_ask is None or best_ask >= ENDGAME_ASK_MAX:
                 return None
             net_edge = (1.0 - best_ask) - FEE_RATE
-            if net_edge < ENDGAME_MIN_EDGE:
+            required_edge = ENDGAME_MIN_EDGE * edge_multiplier
+            if net_edge < required_edge:
                 return None
 
             arb_opportunities.labels(strategy="resolution").inc()
@@ -170,7 +197,8 @@ class ResolutionStrategy(BaseStrategy):
             if no_book.best_ask >= ENDGAME_ASK_MAX:
                 return None
             net_edge = (1.0 - no_book.best_ask) - FEE_RATE
-            if net_edge < ENDGAME_MIN_EDGE:
+            required_edge = ENDGAME_MIN_EDGE * edge_multiplier
+            if net_edge < required_edge:
                 return None
 
             arb_opportunities.labels(strategy="resolution").inc()
@@ -209,6 +237,7 @@ class ResolutionStrategy(BaseStrategy):
         market: Market,
         orderbooks: dict[str, Orderbook],
         hours_left: float,
+        edge_multiplier: float = 1.0,
     ) -> Signal | None:
         """
         Evaluate a single market for a resolution trade.
@@ -240,6 +269,7 @@ class ResolutionStrategy(BaseStrategy):
                 yes_book=yes_book,
                 yes_mid=yes_mid,
                 hours_left=hours_left,
+                edge_multiplier=edge_multiplier,
             )
 
         # --- NO resolution path ---
@@ -256,6 +286,7 @@ class ResolutionStrategy(BaseStrategy):
                 no_mid=no_mid,
                 yes_mid=yes_mid,
                 hours_left=hours_left,
+                edge_multiplier=edge_multiplier,
             )
 
         return None
@@ -271,6 +302,7 @@ class ResolutionStrategy(BaseStrategy):
         yes_book: Orderbook,
         yes_mid: float,
         hours_left: float,
+        edge_multiplier: float = 1.0,
     ) -> Signal | None:
         best_ask = yes_book.best_ask
         if best_ask is None:
@@ -282,7 +314,8 @@ class ResolutionStrategy(BaseStrategy):
         gross_edge = 1.0 - best_ask
         net_edge = gross_edge - FEE_RATE
 
-        if net_edge < MIN_NET_EDGE:
+        required_edge = MIN_NET_EDGE * edge_multiplier
+        if net_edge < required_edge:
             return None
 
         arb_opportunities.labels(strategy="resolution").inc()
@@ -340,6 +373,7 @@ class ResolutionStrategy(BaseStrategy):
         no_mid: float,
         yes_mid: float,
         hours_left: float,
+        edge_multiplier: float = 1.0,
     ) -> Signal | None:
         best_ask = no_book.best_ask
         if best_ask is None:
@@ -351,7 +385,8 @@ class ResolutionStrategy(BaseStrategy):
         gross_edge = 1.0 - best_ask
         net_edge = gross_edge - FEE_RATE
 
-        if net_edge < MIN_NET_EDGE:
+        required_edge = MIN_NET_EDGE * edge_multiplier
+        if net_edge < required_edge:
             return None
 
         arb_opportunities.labels(strategy="resolution").inc()

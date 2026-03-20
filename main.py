@@ -56,6 +56,12 @@ class ArbBot:
         self.config = CONFIG
         self.paper = self.config.paper_trading
 
+        try:
+            from src.utils.database import init_db
+            init_db()
+        except ImportError:
+            logger.debug("src.utils.database not available — skipping init_db()")
+
         # Core components
         self.portfolio = PaperPortfolio(starting_balance=self.config.starting_balance)
         self.portfolio.load_from_json()  # restore state from previous run if available
@@ -90,9 +96,15 @@ class ArbBot:
             self._strategies.append(
                 CombinatorialStrategy(self.config, self.portfolio, self.risk)
             )
-        if cfg.market_making_enabled:
+        if getattr(cfg, 'market_making_enabled', False):
             self._strategies.append(
                 MarketMakingStrategy(self.config, self.portfolio, self.risk)
+            )
+            logger.info("Market making strategy ENABLED")
+        else:
+            logger.warning(
+                "Market making strategy DISABLED (adverse selection risk — "
+                "enable with STRATEGY_MARKET_MAKING_ENABLED=true)"
             )
         if cfg.resolution_enabled:
             self._strategies.append(
@@ -111,7 +123,11 @@ class ArbBot:
             self._strategies.append(
                 QuickResolutionStrategy(self.config, self.portfolio, self.risk)
             )
-        if cfg.ensemble_enabled:
+        # EnsembleStrategy disabled: LLMs lack calibration for real-time probability
+        # estimation. Replace with a properly trained ML model before re-enabling.
+        # ensemble = EnsembleStrategy(...)
+        # self.strategies.append(ensemble)
+        if False and cfg.ensemble_enabled:  # noqa: SIM210 — intentionally disabled
             self._ensemble_strategy = EnsembleStrategy(self.config, self.portfolio, self.risk)
             self._strategies.append(self._ensemble_strategy)
         strategy_names = [s.name for s in self._strategies]
@@ -273,16 +289,33 @@ class ArbBot:
                     await asyncio.sleep(5)
                     continue
 
-                # Run all strategies in parallel
-                all_signals = []
-                strategy_tasks = [s.scan(context) for s in self._strategies]
-                results = await asyncio.gather(*strategy_tasks, return_exceptions=True)
+                # Run all strategies concurrently
+                results = await asyncio.gather(
+                    *[strategy.scan(context) for strategy in self._strategies],
+                    return_exceptions=True
+                )
 
-                for strat, result in zip(self._strategies, results):
+                all_signals = []
+                for strategy, result in zip(self._strategies, results):
                     if isinstance(result, Exception):
-                        logger.error(f"Strategy {strat.name} error: {result}")
-                    else:
-                        all_signals.extend(result)
+                        logger.error(f"Strategy {strategy.__class__.__name__} scan failed: {result}")
+                        continue
+                    all_signals.extend(result or [])
+
+                # Filter signals from strategies that have exceeded their loss budget
+                disabled_by_budget = set()
+                strategy_pnl_map = self.portfolio.strategy_pnl()
+                for strat_name, budget in self.config.risk.strategy_loss_budget.items():
+                    strategy_pnl = strategy_pnl_map.get(strat_name, 0.0)
+                    if strategy_pnl < -budget:
+                        disabled_by_budget.add(strat_name)
+                        logger.warning(
+                            f"Strategy {strat_name} disabled: loss budget ${budget:.0f} exceeded "
+                            f"(current: ${strategy_pnl:.2f})"
+                        )
+
+                if disabled_by_budget:
+                    all_signals = [s for s in all_signals if s.strategy not in disabled_by_budget]
 
                 # Execute signals through risk manager
                 if all_signals:
@@ -499,6 +532,7 @@ class ArbBot:
                         arb_executed.labels(strategy=sig.strategy).inc()
                         self._last_trade_time = time.time()
                         self._token_last_traded[sig.token_id] = time.time()
+                        self.portfolio.save_to_json()
             elif sig.side == "BUY":
                 # Paper: simulate directly
                 market_question, outcome = self._find_market_info(sig.token_id, context)
@@ -527,6 +561,7 @@ class ArbBot:
                 arb_executed.labels(strategy=sig.strategy).inc()
                 self._last_trade_time = time.time()
                 self._token_last_traded[sig.token_id] = time.time()
+                self.portfolio.save_to_json()
 
             if trade and sig.side == "BUY" and self._hedge_manager is not None:
                 # Auto-hedge crypto BUY positions via Binance perpetual futures

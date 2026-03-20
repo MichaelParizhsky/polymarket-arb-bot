@@ -14,6 +14,36 @@ Rate-limit: at most ensemble_max_markets_per_cycle markets per scan cycle.
 
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# DEPRECATED — DO NOT ENABLE
+# ===========================================================================
+# This strategy is disabled because:
+#
+# 1. CATEGORY ERROR: LLMs (Claude, GPT) are text-completion models, not
+#    calibrated probability estimators. They cannot accurately assess current
+#    market probabilities because they lack real-time information and are
+#    trained on historical distributions.
+#
+# 2. SYSTEMATIC BIAS: Both Claude and GPT share similar training data
+#    distributions. The "consensus check" (max 10% difference) only filters
+#    disagreement, not shared systematic errors. Both models will agree on
+#    the wrong answer.
+#
+# 3. STALE CACHE: The 15-minute TTL cache means the bot trades on stale LLM
+#    estimates even when the market has moved 20% in the interim.
+#
+# 4. NEGATIVE EV: After Claude API + OpenAI API costs, this strategy must
+#    generate enough alpha to cover ~$0.01-0.05 per signal just to break
+#    even. Given the fundamental flaws above, this is unlikely.
+#
+# REPLACEMENT PATH:
+#    Train a gradient-boosted model (XGBoost/LightGBM) on resolved Polymarket
+#    markets. Features: category, days_to_resolution, current_price,
+#    volume_24h, question_embedding. Calibrate with isotonic regression on
+#    held-out data. Only then can you have a statistically valid edge signal
+#    from ML.
+# ---------------------------------------------------------------------------
+
 import asyncio
 import json
 import os
@@ -356,8 +386,15 @@ class EnsembleStrategy(BaseStrategy):
     # Main scan entry point
     # ------------------------------------------------------------------
 
-    async def scan(self, context: dict[str, Any]) -> list[Signal]:
+    async def scan(self, context) -> list:
+        # DEPRECATED: See module header for explanation
+        # This strategy is disabled pending replacement with a calibrated ML model
+        return []
+
+    async def _scan_disabled(self, context: dict[str, Any]) -> list[Signal]:
         """
+        Original scan logic — preserved for reference but never called.
+
         Scan candidate markets and return trade signals.
 
         Expected context keys:

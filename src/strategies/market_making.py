@@ -37,6 +37,7 @@ class MarketMakingStrategy(BaseStrategy):
         self._quotes: dict[str, dict] = {}
         self._last_refresh: dict[str, float] = {}
         self._refresh_interval: float = 10.0   # seconds between quote refresh
+        self._price_cache: dict[str, list[float]] = {}  # token_id -> recent mid prices
 
     async def scan(self, context: dict[str, Any]) -> list[Signal]:
         markets: list[Market] = context.get("markets", [])
@@ -72,6 +73,35 @@ class MarketMakingStrategy(BaseStrategy):
             if now - last < self._refresh_interval:
                 continue
 
+            # Record current mid in price history (cap at 60 entries ~10 min at 10s refresh)
+            if book.mid is not None:
+                history = self._price_cache.setdefault(token_id, [])
+                history.append(book.mid)
+                if len(history) > 60:
+                    del history[:-60]
+
+            # Adverse selection check — skip market if risk is too high
+            price_history = self._price_cache.get(token_id, [])
+            as_score = self._compute_adverse_selection_score(market.condition_id, book, price_history)
+            AS_THRESHOLD = getattr(self.config.strategy, 'mm_adverse_selection_threshold', 0.6) if hasattr(self.config, 'strategy') else 0.6
+            if as_score >= AS_THRESHOLD:
+                self.log(
+                    f"MM: skipping {market.question[:40]} — adverse selection score {as_score:.2f} >= {AS_THRESHOLD:.2f}",
+                    "debug",
+                )
+                continue
+
+            # Inventory skew check — stop posting bids if too long
+            yes_token_id = token_id
+            inventory_skew = self._compute_inventory_skew(yes_token_id, context.get('portfolio'))
+            if inventory_skew > 0.7:
+                self.log(
+                    f"MM: skipping bid for {market.question[:40]} — inventory skew {inventory_skew:.2f} too long",
+                    "debug",
+                )
+                # Only post asks (selling side) when inventory is heavy
+                # Skip bid side
+
             # Check existing quotes — cancel if they've moved too far from mid
             if token_id in self._quotes:
                 signals.extend(self._cancel_stale_quotes(token_id, book))
@@ -83,6 +113,77 @@ class MarketMakingStrategy(BaseStrategy):
                 self._last_refresh[token_id] = now
 
         return signals
+
+    def _compute_adverse_selection_score(self, market_id: str, orderbook, price_history: list[float]) -> float:
+        """
+        Estimate adverse selection risk for a market (0.0 = low risk, 1.0 = high risk).
+
+        Adverse selection occurs when informed traders take your limit orders because
+        they know the market will move against you.
+
+        Signals of high adverse selection:
+        - Recent price velocity (large moves = informed trading)
+        - Order book imbalance (one side much thicker = directional pressure)
+        - Thin spread (other MMs already competed away the edge)
+        """
+        score = 0.0
+
+        # 1. Price velocity check
+        if len(price_history) >= 2:
+            recent_move = abs(price_history[-1] - price_history[-min(len(price_history), 12)])
+            if recent_move > 0.05:   # >5% move recently
+                score += 0.5
+            elif recent_move > 0.02:  # >2% move recently
+                score += 0.25
+
+        # 2. Order book imbalance check
+        if orderbook and hasattr(orderbook, 'bids') and hasattr(orderbook, 'asks'):
+            bid_depth = sum(getattr(level, 'size', 0) for level in (orderbook.bids or [])[:5])
+            ask_depth = sum(getattr(level, 'size', 0) for level in (orderbook.asks or [])[:5])
+            total_depth = bid_depth + ask_depth
+            if total_depth > 0:
+                imbalance = abs(bid_depth - ask_depth) / total_depth
+                if imbalance > 0.7:   # 70%+ imbalance = strong directional pressure
+                    score += 0.4
+                elif imbalance > 0.5:
+                    score += 0.2
+
+        # 3. Spread tightness (if spread is very tight, other MMs are already there)
+        if orderbook:
+            best_bid = getattr(orderbook, 'best_bid', 0) or 0
+            best_ask = getattr(orderbook, 'best_ask', 1) or 1
+            spread = best_ask - best_bid
+            if spread < 0.02:   # <2% spread — already crowded
+                score += 0.2
+
+        return min(score, 1.0)
+
+    def _compute_inventory_skew(self, token_id: str, portfolio) -> float:
+        """
+        Compute how skewed our inventory is for this token.
+        Returns: positive = long heavy, negative = short heavy
+        Range: -1.0 to 1.0
+
+        If we're long heavy (holding lots of YES), we should skew ask price lower
+        and bid price higher to reduce inventory. Stop posting new bids at 0.7+ skew.
+        """
+        if portfolio is None:
+            return 0.0
+
+        positions = getattr(portfolio, 'positions', None) or {}
+        position = positions.get(token_id)
+        if not position:
+            return 0.0
+
+        if isinstance(position, dict):
+            contracts = position.get('contracts', 0) or 0
+        else:
+            contracts = getattr(position, 'contracts', 0) or 0
+
+        max_inventory = 500.0  # $500 USD equivalent
+
+        skew = min(contracts / max_inventory, 1.0) if contracts > 0 else 0.0
+        return skew
 
     def _select_markets(
         self, markets: list[Market], orderbooks: dict[str, Orderbook]

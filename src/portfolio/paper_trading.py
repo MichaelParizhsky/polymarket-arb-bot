@@ -14,6 +14,19 @@ from src.utils.logger import logger
 from src.utils.metrics import (
     portfolio_balance, portfolio_pnl, open_positions, total_exposure
 )
+from src.utils.database import log_trade, init_db
+
+
+def _estimate_slippage(volume_24h: float) -> float:
+    """Liquidity-adjusted slippage estimate."""
+    if volume_24h >= 100_000:
+        return 0.002   # 0.2% — liquid market
+    elif volume_24h >= 10_000:
+        return 0.008   # 0.8% — medium market
+    elif volume_24h >= 1_000:
+        return 0.020   # 2.0% — thin market
+    else:
+        return 0.040   # 4.0% — very thin, likely partial fill
 
 
 @dataclass
@@ -70,6 +83,7 @@ class PaperPortfolio:
         self.pnl_history: list[dict] = [{"t": time.time(), "value": starting_balance, "pnl": 0.0}]
         # Closed positions history for win-rate and realized P&L tracking
         self.closed_positions: list[dict] = []
+        init_db()
 
     # ------------------------------------------------------------------ #
     #  Core operations                                                      #
@@ -84,9 +98,13 @@ class PaperPortfolio:
         market_question: str = "",
         outcome: str = "",
         notes: str = "",
+        market=None,
     ) -> Optional[Trade]:
         """Simulate buying outcome tokens."""
-        cost = contracts * price
+        volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
+        slippage_rate = _estimate_slippage(volume_24h)
+        slippage = price * slippage_rate
+        cost = contracts * (price + slippage)
         fee = cost * 0.002
 
         if cost + fee > self.usdc_balance:
@@ -128,8 +146,22 @@ class PaperPortfolio:
         self._update_metrics()
         logger.info(
             f"[PAPER] BUY {contracts:.2f} {outcome} @ {price:.4f} "
-            f"cost=${cost:.2f} fee=${fee:.2f} balance=${self.usdc_balance:.2f} [{strategy}]"
+            f"cost=${cost:.2f} fee=${fee:.2f} slippage={slippage_rate:.1%} balance=${self.usdc_balance:.2f} [{strategy}]"
         )
+        try:
+            log_trade(
+                strategy=strategy,
+                token_id=token_id,
+                side="BUY",
+                usdc_amount=cost,
+                price=price,
+                contracts=contracts,
+                fee=fee,
+                slippage=slippage,
+                is_paper=True,
+            )
+        except Exception as exc:
+            logger.warning(f"[PAPER] DB log_trade failed: {exc}")
         return trade
 
     def sell(
@@ -139,6 +171,7 @@ class PaperPortfolio:
         price: float,
         strategy: str,
         notes: str = "",
+        market=None,
     ) -> Optional[Trade]:
         """Simulate selling outcome tokens."""
         pos = self.positions.get(token_id)
@@ -149,7 +182,10 @@ class PaperPortfolio:
             )
             return None
 
-        proceeds = contracts * price
+        volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
+        slippage_rate = _estimate_slippage(volume_24h)
+        slippage = price * slippage_rate
+        proceeds = contracts * (price - slippage)
         fee = proceeds * 0.002
         net_proceeds = proceeds - fee
         realized = contracts * (price - pos.avg_cost) - fee
@@ -186,8 +222,22 @@ class PaperPortfolio:
 
         logger.info(
             f"[PAPER] SELL {contracts:.2f} tokens @ {price:.4f} "
-            f"proceeds=${net_proceeds:.2f} realized_pnl=${realized:+.2f} [{strategy}]"
+            f"proceeds=${net_proceeds:.2f} realized_pnl=${realized:+.2f} slippage={slippage_rate:.1%} [{strategy}]"
         )
+        try:
+            log_trade(
+                strategy=strategy,
+                token_id=token_id,
+                side="SELL",
+                usdc_amount=proceeds,
+                price=price,
+                contracts=contracts,
+                fee=fee,
+                slippage=slippage,
+                is_paper=True,
+            )
+        except Exception as exc:
+            logger.warning(f"[PAPER] DB log_trade failed: {exc}")
         return trade
 
     def register_limit_order(self, order_id: str, order_info: dict) -> None:

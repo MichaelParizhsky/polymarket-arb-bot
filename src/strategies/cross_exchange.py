@@ -26,6 +26,7 @@ The minimum net edge threshold is read from
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -359,6 +360,72 @@ class CrossExchangeStrategy(BaseStrategy):
                     ))
 
         return signals
+
+    # ------------------------------------------------------------------ #
+    #  Atomic two-leg execution                                            #
+    # ------------------------------------------------------------------ #
+
+    async def _execute_atomic(
+        self,
+        poly_token_id: str,
+        poly_side: str,
+        poly_amount: float,
+        kalshi_ticker: str,
+        kalshi_side: str,
+        kalshi_amount: float,
+    ) -> bool:
+        """
+        Execute both exchange legs atomically.
+        If one leg fails, automatically attempt to unwind the other.
+        5-second timeout per leg.
+        """
+        poly_result = None
+        kalshi_result = None
+
+        try:
+            # Place Polymarket leg first (more liquid)
+            poly_result = await asyncio.wait_for(
+                self._place_poly_order(poly_token_id, poly_side, poly_amount),
+                timeout=5.0,
+            )
+
+            if not poly_result or poly_result.get("status") == "error":
+                logger.warning("Cross-exchange: Poly leg failed, aborting")
+                return False
+
+            # Place Kalshi leg
+            kalshi_result = await asyncio.wait_for(
+                self._place_kalshi_order(kalshi_ticker, kalshi_side, kalshi_amount),
+                timeout=5.0,
+            )
+
+            if not kalshi_result or kalshi_result.get("status") == "error":
+                logger.error(
+                    "Cross-exchange: Kalshi leg failed after Poly executed. Unwinding Poly position."
+                )
+                # Attempt to unwind the Poly leg
+                try:
+                    await asyncio.wait_for(
+                        self._unwind_poly_order(poly_token_id, poly_side, poly_amount),
+                        timeout=5.0,
+                    )
+                    logger.info("Cross-exchange: Poly unwind successful")
+                except Exception as unwind_err:
+                    logger.critical(
+                        f"Cross-exchange: UNWIND FAILED. Manual intervention required. Error: {unwind_err}"
+                    )
+                return False
+
+            logger.info("Cross-exchange: Both legs executed successfully")
+            return True
+
+        except asyncio.TimeoutError as e:
+            logger.error(f"Cross-exchange: Timeout on leg execution: {e}")
+            if poly_result and not kalshi_result:
+                logger.error(
+                    "Cross-exchange: Poly executed but Kalshi timed out. Manual unwind may be needed."
+                )
+            return False
 
     # ------------------------------------------------------------------ #
     #  Resolution safety check                                             #

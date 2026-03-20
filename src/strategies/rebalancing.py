@@ -9,6 +9,7 @@ Edge = |sum - 1.0| - fees - slippage
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
@@ -54,6 +55,18 @@ class RebalancingStrategy(BaseStrategy):
         no_book = orderbooks.get(no_token.token_id)
 
         if not yes_book or not no_book:
+            return []
+
+        # Verify sufficient liquidity before signaling
+        trade_size = self.config.strategies.rebalancing_max_spend
+        yes_depth = sum(level.size * level.price for level in yes_book.asks[:5]) if yes_book else 0
+        no_depth = sum(level.size * level.price for level in no_book.asks[:5]) if no_book else 0
+        required = trade_size * 1.5
+        if yes_depth < required or no_depth < required:
+            self.log(
+                f"Skipping rebalancing: insufficient depth YES={yes_depth:.1f} NO={no_depth:.1f} need={required:.1f}",
+                "debug",
+            )
             return []
 
         signals = []

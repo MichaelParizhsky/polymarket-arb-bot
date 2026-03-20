@@ -66,6 +66,18 @@ class RiskConfig:
     max_open_orders: int = 20
     min_trade_interval: int = field(default_factory=lambda: _int("MIN_TRADE_INTERVAL", 15))   # seconds between any two trades (Polymarket allows 3500 orders/10s)
     token_cooldown: int = field(default_factory=lambda: _int("TOKEN_COOLDOWN", 120))           # seconds before re-trading same token
+    hard_stop_max_count: int = 3
+    hard_stop_window_hours: int = 24
+    strategy_loss_budget: dict = field(default_factory=lambda: {
+        "rebalancing": 300.0,
+        "combinatorial": 400.0,
+        "market_making": 200.0,
+        "resolution": 600.0,
+        "event_driven": 300.0,
+        "cross_exchange": 500.0,
+        "quick_resolution": 400.0,
+        "futures_hedge": 200.0,
+    })
 
 
 @dataclass

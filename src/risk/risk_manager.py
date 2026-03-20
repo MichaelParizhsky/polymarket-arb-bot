@@ -3,6 +3,8 @@ Risk management: position sizing, drawdown protection, exposure limits.
 """
 from __future__ import annotations
 
+import time
+
 from src.utils.logger import logger
 
 
@@ -11,6 +13,14 @@ class RiskManager:
         self.config = config
         self.portfolio = portfolio
         self._hard_stop = False
+        self._permanent_lock = False
+        self._hard_stop_count: int = 0
+        self._hard_stop_timestamps: list[float] = []
+        self._strategy_pnl: dict[str, float] = {
+            strategy: 0.0
+            for strategy in config.risk.strategy_loss_budget
+        }
+        self._category_exposure: dict[str, float] = {}
 
     def check_trade(
         self,
@@ -23,25 +33,36 @@ class RiskManager:
         Returns (allowed, reason).
         Validates a proposed trade against risk limits.
         """
+        # Permanent lock — requires manual reset via reset_permanent_lock()
+        if self._permanent_lock:
+            return False, "Permanent lock active — manual reset required"
+
         if self._hard_stop:
-            total = self.portfolio.total_value()
-            recovery_threshold = self.portfolio.starting_balance * (1 - self.config.risk.max_drawdown_pct * 0.5)
-            if total >= recovery_threshold:
-                self._hard_stop = False
-                logger.warning(
-                    f"Hard stop auto-reset: portfolio ${total:.2f} recovered above threshold ${recovery_threshold:.2f}"
-                )
-            else:
-                return False, "Hard stop active"
+            return False, "Hard stop active"
 
         # Drawdown check applies to all trade directions
         total = self.portfolio.total_value()
         drawdown = (self.portfolio.starting_balance - total) / self.portfolio.starting_balance
         if drawdown >= self.config.risk.max_drawdown_pct:
             self._hard_stop = True
+            now = time.time()
+            self._hard_stop_timestamps.append(now)
+            window_seconds = self.config.risk.hard_stop_window_hours * 3600
+            self._hard_stop_timestamps = [
+                ts for ts in self._hard_stop_timestamps
+                if now - ts <= window_seconds
+            ]
+            self._hard_stop_count = len(self._hard_stop_timestamps)
             logger.critical(
-                f"HARD STOP: drawdown {drawdown:.1%} >= limit {self.config.risk.max_drawdown_pct:.1%}"
+                f"HARD STOP: drawdown {drawdown:.1%} >= limit {self.config.risk.max_drawdown_pct:.1%} "
+                f"(stop #{self._hard_stop_count} in {self.config.risk.hard_stop_window_hours}h window)"
             )
+            if self._hard_stop_count >= self.config.risk.hard_stop_max_count:
+                self._permanent_lock = True
+                logger.critical(
+                    f"PERMANENT LOCK: {self._hard_stop_count} hard stops within "
+                    f"{self.config.risk.hard_stop_window_hours}h — manual reset required via reset_permanent_lock()"
+                )
             return False, f"Drawdown limit hit: {drawdown:.1%}"
 
         # SELL trades liquidate positions and return USDC — skip buy-side checks
@@ -50,6 +71,15 @@ class RiskManager:
             if position is None or position.contracts <= 0:
                 return False, f"No position to sell: {token_id}"
             return True, "OK"
+
+        # Strategy loss budget check (BUY only)
+        strategy_loss = abs(min(0.0, self._strategy_pnl.get(strategy, 0.0)))
+        budget = self.config.risk.strategy_loss_budget.get(strategy, float("inf"))
+        if strategy_loss >= budget:
+            logger.warning(
+                f"Strategy loss budget exhausted: {strategy} — loss ${strategy_loss:.2f} >= budget ${budget:.2f}"
+            )
+            return False, f"Strategy loss budget exhausted: {strategy}"
 
         # Balance check (BUY only)
         if usdc_amount > self.portfolio.usdc_balance:
@@ -90,12 +120,66 @@ class RiskManager:
         return min(raw_size, available, self.config.risk.max_position_size)
 
     def is_hard_stopped(self) -> bool:
-        return self._hard_stop
+        return self._hard_stop or self._permanent_lock
 
     def reset_hard_stop(self) -> None:
         """Manual override — use carefully."""
         self._hard_stop = False
         logger.warning("Hard stop reset manually")
+
+    def reset_permanent_lock(self) -> None:
+        """Clear the permanent lock — requires explicit human intervention."""
+        self._permanent_lock = False
+        self._hard_stop = False
+        self._hard_stop_timestamps.clear()
+        self._hard_stop_count = 0
+        logger.warning("Permanent lock reset manually — trading re-enabled")
+
+    def record_trade_result(self, strategy: str, pnl: float) -> None:
+        """Update per-strategy PnL tracking."""
+        self._strategy_pnl[strategy] = self._strategy_pnl.get(strategy, 0.0) + pnl
+
+    def check_orderbook_depth(
+        self, orderbook, side: str, required_usdc: float
+    ) -> tuple[bool, str]:
+        """
+        Returns (ok, reason).
+        For a BUY, checks the top 5 ask levels can absorb required_usdc * 1.5.
+        """
+        levels = orderbook.asks if side.upper() == "BUY" else orderbook.bids
+        available_usdc = sum(level.price * level.size for level in levels[:5])
+        needed = required_usdc * 1.5
+        if available_usdc >= needed:
+            return True, "ok"
+        return (
+            False,
+            f"Insufficient depth: {available_usdc:.1f} USDC available, need {needed:.1f}",
+        )
+
+    def check_correlation(
+        self, category: str, usdc_amount: float
+    ) -> tuple[bool, str]:
+        """
+        Returns (ok, reason).
+        Rejects trade if a single category would exceed 40% of total exposure.
+        """
+        total_exposure = sum(self._category_exposure.values())
+        current_category = self._category_exposure.get(category, 0.0)
+        new_category = current_category + usdc_amount
+        denominator = max(total_exposure, 1.0)
+        if new_category / denominator > 0.40:
+            return (
+                False,
+                f"Correlation limit: category '{category}' would be "
+                f"{new_category / denominator:.1%} of exposure (limit 40%)",
+            )
+        return True, "ok"
+
+    def record_category_exposure(self, category: str, delta: float) -> None:
+        """Update category exposure when a trade executes or closes."""
+        self._category_exposure[category] = (
+            self._category_exposure.get(category, 0.0) + delta
+        )
 
     def portfolio_health_score(self) -> dict:
         """
@@ -158,7 +242,11 @@ class RiskManager:
         total_score = round(capital_score + exposure_score + liquidity_score + concentration_score, 1)
         grade = "HEALTHY" if total_score >= 75 else "FAIR" if total_score >= 50 else "WEAK" if total_score >= 25 else "CRITICAL"
 
-        if self._hard_stop:
+        if self._permanent_lock:
+            total_score = 0.0
+            grade = "CRITICAL"
+            flags.insert(0, "PERMANENT LOCK ACTIVE — manual reset required")
+        elif self._hard_stop:
             total_score = 0.0
             grade = "CRITICAL"
             flags.insert(0, "HARD STOP ACTIVE")

@@ -10,6 +10,27 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+try:
+    from src.utils.database import propose_parameter_change, get_pending_parameter_proposals
+    _DB_AVAILABLE = True
+except ImportError:
+    _DB_AVAILABLE = False
+
+# Minimum trades a strategy must have in the analysis window before tuning is attempted.
+MIN_TRADES_FOR_TUNING = 10
+
+# Only edge-threshold parameters may be proposed by the meta-agent.
+# Position sizes and strategy enable/disable are NOT eligible.
+ALLOWED_TUNE_PARAMS = frozenset({
+    "MIN_EDGE_THRESHOLD",
+    "REBALANCING_MIN_EDGE",
+    "COMBO_MIN_EDGE",
+    "CROSS_EXCHANGE_MIN_EDGE",
+    "ENSEMBLE_MIN_EDGE",
+    "QUICK_RESOLUTION_MIN_EDGE",
+    "LATENCY_PRICE_LAG_THRESHOLD",
+})
+
 
 @dataclass
 class StrategyMetrics:
@@ -253,3 +274,89 @@ class PortfolioSnapshot:
             "best_strategy": best_strategy,
             "worst_strategy": worst_strategy,
         }
+
+    def propose_changes(
+        self,
+        claude_proposed: dict,
+        claude_reasoning: str = "",
+    ) -> list[str]:
+        """
+        Validate and persist Claude's proposed parameter changes as proposals.
+
+        Rules enforced:
+        - Only parameters in ALLOWED_TUNE_PARAMS are accepted.
+        - A strategy must have >= MIN_TRADES_FOR_TUNING trades in the window;
+          global params (no strategy prefix) bypass this per-strategy check.
+        - Rejected params are logged as warnings; nothing is applied to live config.
+
+        Returns list of param names that were successfully proposed.
+        """
+        from src.utils.logger import logger  # local import avoids circular dep
+
+        proposed_keys: list[str] = []
+
+        for param_name, new_value in claude_proposed.items():
+            key_upper = param_name.upper()
+
+            # Block forbidden parameters
+            if key_upper not in ALLOWED_TUNE_PARAMS:
+                logger.warning(
+                    f"Meta-agent proposed forbidden parameter '{param_name}' "
+                    f"(only edge thresholds are tunable). Ignoring."
+                )
+                continue
+
+            # Derive which strategy this param belongs to (best-effort heuristic)
+            strategy: str | None = None
+            if key_upper.startswith("REBALANCING"):
+                strategy = "rebalancing"
+            elif key_upper.startswith("COMBO"):
+                strategy = "combinatorial"
+            elif key_upper.startswith("CROSS_EXCHANGE"):
+                strategy = "cross_exchange"
+            elif key_upper.startswith("ENSEMBLE"):
+                strategy = "ensemble"
+            elif key_upper.startswith("QUICK_RESOLUTION"):
+                strategy = "resolution"
+            elif key_upper.startswith("LATENCY"):
+                strategy = "latency_arb"
+            # MIN_EDGE_THRESHOLD is global — no strategy filter needed
+
+            # Per-strategy trade count gate
+            if strategy is not None:
+                m = self.strategy_metrics.get(strategy)
+                n = m.total_trades if m is not None else 0
+                if n < MIN_TRADES_FOR_TUNING:
+                    logger.info(
+                        f"Skipping tuning for {strategy}: only {n} trades in window "
+                        f"(need {MIN_TRADES_FOR_TUNING}+)"
+                    )
+                    continue
+
+            # Determine current (old) value from metrics where possible
+            old_value: Any = None
+            # We don't hold config here, so old_value is left None;
+            # the caller (main.py loop) should pass current_env values if needed.
+
+            if _DB_AVAILABLE:
+                propose_parameter_change(
+                    param_name=param_name,
+                    old_value=json.dumps(old_value),
+                    new_value=json.dumps(new_value),
+                    strategy=strategy,
+                    notes=claude_reasoning,
+                )
+            logger.info(
+                f"Parameter change PROPOSED (not applied): {param_name} "
+                f"{old_value} -> {new_value}. Requires 48h shadow validation."
+            )
+            proposed_keys.append(param_name)
+
+        return proposed_keys
+
+    @staticmethod
+    def get_proposed_changes() -> list[dict]:
+        """Return all pending parameter proposals from the database."""
+        if not _DB_AVAILABLE:
+            return []
+        return get_pending_parameter_proposals()
