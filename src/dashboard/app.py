@@ -35,6 +35,9 @@ _config = None
 _risk = None
 _binance_ref = None
 _kalshi_ref = None
+_news_monitor_ref = None
+_hedge_manager_ref = None
+_ensemble_strategy_ref = None
 
 # Ring buffer for cross-exchange signal decisions (last 100)
 _cross_exchange_log: list[dict] = []
@@ -49,14 +52,19 @@ def log_cross_exchange_decision(entry: dict) -> None:
             _cross_exchange_log.pop(0)
 
 
-def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None) -> None:
+def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None,
+             news_monitor=None, hedge_manager=None, ensemble_strategy=None) -> None:
     global _portfolio, _bot_start_time, _config, _risk, _binance_ref, _kalshi_ref
+    global _news_monitor_ref, _hedge_manager_ref, _ensemble_strategy_ref
     _portfolio = portfolio
     _bot_start_time = start_time
     _config = config
     _risk = risk
     _binance_ref = binance
     _kalshi_ref = kalshi
+    _news_monitor_ref = news_monitor
+    _hedge_manager_ref = hedge_manager
+    _ensemble_strategy_ref = ensemble_strategy
 
 
 @app.post("/api/reset")
@@ -1309,6 +1317,60 @@ async def deploy_proposal(proposal_id: str, x_api_key: str = Header(default=""))
 
 
 # ------------------------------------------------------------------ #
+#  AI Intel API endpoints                                              #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/news")
+async def api_news():
+    if _news_monitor_ref is None:
+        return {"headlines": [], "status": "unavailable"}
+    try:
+        items = list(_news_monitor_ref._cache)
+        items.sort(key=lambda h: h.get("_ts", 0), reverse=True)
+        clean = [
+            {k: v for k, v in h.items() if not k.startswith("_")}
+            for h in items[:20]
+        ]
+        return {"headlines": clean, "status": "ok"}
+    except Exception as e:
+        return {"headlines": [], "status": str(e)}
+
+
+@app.get("/api/hedges")
+async def api_hedges():
+    if _hedge_manager_ref is None:
+        return {"hedges": {}, "count": 0, "enabled": False}
+    try:
+        status = _hedge_manager_ref.get_status()
+        return status
+    except Exception as e:
+        return {"hedges": {}, "count": 0, "enabled": False, "error": str(e)}
+
+
+@app.get("/api/ensemble/recent")
+async def api_ensemble_recent():
+    if _ensemble_strategy_ref is None:
+        return {"evaluations": [], "status": "unavailable"}
+    try:
+        cache = getattr(_ensemble_strategy_ref, '_cache', {})
+        items = []
+        import time as _time
+        for cid, (stored_at, claude_prob, openai_prob) in cache.items():
+            age_minutes = (_time.monotonic() - stored_at) / 60
+            items.append({
+                "condition_id": cid[:16],
+                "claude_prob": claude_prob,
+                "openai_prob": openai_prob,
+                "consensus": (claude_prob + openai_prob) / 2 if claude_prob and openai_prob else (claude_prob or openai_prob),
+                "age_minutes": round(age_minutes, 1),
+            })
+        items.sort(key=lambda x: x["age_minutes"])
+        return {"evaluations": items[:20], "status": "ok", "cache_size": len(cache)}
+    except Exception as e:
+        return {"evaluations": [], "status": str(e)}
+
+
+# ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
 
@@ -1544,6 +1606,7 @@ tr:hover td{background:#181818}
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
   <div class="tab" onclick="showTab('codereview')">Code Review</div>
   <div class="tab" onclick="showTab('research')">Research</div>
+  <div class="tab" onclick="showTab('ai-intel')">AI Intel</div>
 </div>
 
 <!-- OVERVIEW TAB -->
@@ -1971,6 +2034,71 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
+<!-- AI INTEL TAB -->
+<div class="page" id="tab-ai-intel">
+
+  <!-- Ensemble LLM Signals -->
+  <div class="section" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>Ensemble LLM Signals</h3>
+      <span id="ensemble-status" style="font-size:.65rem;color:#555">--</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Market</th>
+        <th>Claude</th>
+        <th>OpenAI</th>
+        <th>Consensus</th>
+        <th>Age (min)</th>
+      </tr></thead>
+      <tbody id="ensemble-tbody">
+        <tr><td colspan="5" style="color:#555;text-align:center">No evaluations yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- News Feed -->
+  <div class="section" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>News Feed</h3>
+      <span id="news-status" style="font-size:.65rem;color:#555">--</span>
+    </div>
+    <div id="news-list" style="display:flex;flex-direction:column;gap:6px">
+      <div style="color:#555;font-size:.72rem">No news loaded yet</div>
+    </div>
+  </div>
+
+  <!-- Active Hedges -->
+  <div class="section" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>Active Hedges</h3>
+      <span id="hedge-status-badge" style="font-size:.65rem;color:#555">--</span>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+      <span style="font-size:.72rem"><span style="color:#888">Count:</span> <span id="hedge-count" style="color:#00e5ff">--</span></span>
+      <span style="font-size:.72rem"><span style="color:#888">Enabled:</span> <span id="hedge-enabled" style="color:#ffd740">--</span></span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Token ID</th>
+        <th>Details</th>
+      </tr></thead>
+      <tbody id="hedge-tbody">
+        <tr><td colspan="2" style="color:#555;text-align:center">No active hedges</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- QuickResolution Activity -->
+  <div class="section">
+    <h3>QuickResolution Activity</h3>
+    <div id="qr-status" style="padding:10px;background:#0d0d0d;border-radius:6px;font-size:.75rem;color:#888">
+      QuickResolution: <span id="qr-active-badge" style="font-weight:700;color:#555">UNKNOWN</span>
+    </div>
+  </div>
+
+</div>
+
 <div id="last-update">--</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1987,7 +2115,8 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview','research'];
+const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview','research','ai-intel'];
+let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null;
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -2017,6 +2146,22 @@ function showTab(name){
 
   if(name==='research'){
     fetchResearch();
+  }
+
+  if(name==='ai-intel'){
+    fetchEnsemble();
+    fetchNews();
+    fetchHedges();
+    if(_ensembleInterval)clearInterval(_ensembleInterval);
+    if(_newsInterval)clearInterval(_newsInterval);
+    if(_hedgeInterval)clearInterval(_hedgeInterval);
+    _ensembleInterval=setInterval(fetchEnsemble,60000);
+    _newsInterval=setInterval(fetchNews,120000);
+    _hedgeInterval=setInterval(fetchHedges,30000);
+  } else {
+    if(_ensembleInterval){clearInterval(_ensembleInterval);_ensembleInterval=null;}
+    if(_newsInterval){clearInterval(_newsInterval);_newsInterval=null;}
+    if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
   }
 }
 
@@ -2385,6 +2530,7 @@ function renderKalshiDiag(k){
     ${checkHtml}
     ${runtimeHtml}
     ${decHtml}`;
+  updateQrBadge(decisions);
 }
 
 // ------------------------------------------------------------------ //
@@ -3335,6 +3481,99 @@ async function runCodeReviewNow(){
       }
     }catch(e){console.error('review poll error',e);}
   },3000);
+}
+
+// ------------------------------------------------------------------ //
+//  AI Intel tab                                                        //
+// ------------------------------------------------------------------ //
+
+function fmtProb(v){
+  if(v==null)return '<span style="color:#555">--</span>';
+  const pct=(v*100).toFixed(1);
+  const col=v>=0.6?'#00e676':v<=0.4?'#ff5252':'#ffd740';
+  return `<span style="color:${col}">${pct}%</span>`;
+}
+
+async function fetchEnsemble(){
+  try{
+    const d=await fetch('/api/ensemble/recent').then(r=>r.json());
+    const status=$('ensemble-status');
+    if(d.status!=='ok'){status.textContent=d.status;return;}
+    status.textContent=`${d.cache_size} cached`;
+    const tbody=$('ensemble-tbody');
+    if(!d.evaluations||!d.evaluations.length){
+      tbody.innerHTML='<tr><td colspan="5" style="color:#555;text-align:center">No evaluations yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML=d.evaluations.map(e=>`
+      <tr>
+        <td style="font-family:monospace;color:#90caf9">${e.condition_id}</td>
+        <td>${fmtProb(e.claude_prob)}</td>
+        <td>${fmtProb(e.openai_prob)}</td>
+        <td>${fmtProb(e.consensus)}</td>
+        <td style="color:#555">${e.age_minutes}m</td>
+      </tr>`).join('');
+  }catch(e){console.error('ensemble fetch error',e);}
+}
+
+async function fetchNews(){
+  try{
+    const d=await fetch('/api/news').then(r=>r.json());
+    const statusEl=$('news-status');
+    if(d.status!=='ok'){statusEl.textContent=d.status;return;}
+    statusEl.textContent=`${d.headlines.length} headlines`;
+    const list=$('news-list');
+    if(!d.headlines||!d.headlines.length){
+      list.innerHTML='<div style="color:#555;font-size:.72rem">No news loaded yet</div>';
+      return;
+    }
+    const sentColor={positive:'#00e676',negative:'#ff5252',neutral:'#888'};
+    const now=Date.now()/1000;
+    list.innerHTML=d.headlines.map(h=>{
+      const ageS=now-h._ts;
+      const ageStr=ageS<3600?Math.round(ageS/60)+'m ago':Math.round(ageS/3600)+'h ago';
+      const sent=h.sentiment||'neutral';
+      const sentCol=sentColor[sent]||'#888';
+      return `<div style="display:flex;gap:10px;align-items:flex-start;padding:6px 8px;background:#111;border-radius:4px">
+        <span style="font-size:.65rem;padding:2px 6px;border-radius:3px;background:#1a1a1a;color:${sentCol};font-weight:700;min-width:48px;text-align:center;margin-top:1px">${sent}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.75rem;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${h.title||''}</div>
+          <div style="font-size:.65rem;color:#555;margin-top:2px">${h.source||''} &middot; ${ageStr}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){console.error('news fetch error',e);}
+}
+
+async function fetchHedges(){
+  try{
+    const d=await fetch('/api/hedges').then(r=>r.json());
+    $('hedge-count').textContent=d.count||0;
+    $('hedge-enabled').textContent=d.enabled?'YES':'NO';
+    $('hedge-enabled').style.color=d.enabled?'#00e676':'#ff5252';
+    $('hedge-status-badge').textContent=d.error?'error':'ok';
+    const hedges=d.hedges||{};
+    const tbody=$('hedge-tbody');
+    const keys=Object.keys(hedges);
+    if(!keys.length){
+      tbody.innerHTML='<tr><td colspan="2" style="color:#555;text-align:center">No active hedges</td></tr>';
+      return;
+    }
+    tbody.innerHTML=keys.map(k=>`
+      <tr>
+        <td style="font-family:monospace;color:#90caf9">${k.length>24?k.slice(0,24)+'…':k}</td>
+        <td style="font-size:.68rem;color:#888">${JSON.stringify(hedges[k])}</td>
+      </tr>`).join('');
+  }catch(e){console.error('hedges fetch error',e);}
+}
+
+function updateQrBadge(logData){
+  const badge=$('qr-active-badge');
+  if(!badge)return;
+  // Look for QuickResolution in cross-exchange log entries
+  const hasQR=(logData||[]).some(e=>(e.strategy||'').toLowerCase().includes('quick'));
+  badge.textContent=hasQR?'ACTIVE':'INACTIVE';
+  badge.style.color=hasQR?'#00e676':'#555';
 }
 
 fetchAll();
