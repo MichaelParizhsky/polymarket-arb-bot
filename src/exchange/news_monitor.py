@@ -1,0 +1,446 @@
+"""
+NewsMonitor — background news polling for the event-driven strategy.
+
+Polls free news sources every 5 minutes (configurable):
+  - Google News RSS (free, no API key required)
+  - CryptoPanic free endpoint (attempted without auth; skipped on failure)
+
+Maintains a rolling 6-hour headline cache and provides keyword-scored
+retrieval via get_relevant_news().
+
+Usage:
+    monitor = NewsMonitor(poll_interval=300)
+    await monitor.start()
+    ...
+    news = monitor.get_relevant_news("Will Bitcoin exceed $100k in 2026?")
+    await monitor.stop()
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+
+from src.utils.logger import logger
+
+try:
+    import feedparser
+    _FEEDPARSER_AVAILABLE = True
+except ImportError:
+    _FEEDPARSER_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_GOOGLE_NEWS_RSS = (
+    "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+)
+_CRYPTOPANIC_URL = (
+    "https://cryptopanic.com/api/free/v1/posts/?auth_token=&public=true&filter=important"
+)
+_CACHE_MAX_AGE_SECONDS = 6 * 3600   # 6 hours
+_REQUEST_TIMEOUT = 15.0              # seconds per HTTP request
+
+# Stopwords to strip before keyword scoring
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+    "will", "would", "could", "should", "may", "might", "do", "does", "did",
+    "have", "has", "had", "not", "no", "it", "its", "this", "that", "these",
+    "those", "if", "as", "up", "out", "over", "into", "than", "then", "so",
+    "can", "about", "after", "before", "during", "through", "between", "what",
+    "which", "who", "whom", "when", "where", "why", "how", "all", "any",
+    "each", "every", "both", "either", "more", "most", "other", "such",
+    "while", "because", "since", "until", "against", "under", "above", "per",
+})
+
+# Sentiment word lists
+_BULLISH_WORDS = frozenset({
+    "surge", "surges", "surging", "rally", "rallies", "rallying", "rise",
+    "rises", "rising", "gain", "gains", "jump", "jumps", "soar", "soars",
+    "soaring", "breakout", "breakthrough", "record", "high", "bull",
+    "bullish", "approve", "approves", "approval", "win", "wins", "winning",
+    "beat", "beats", "exceeds", "positive", "growth", "grows", "expand",
+    "strong", "stronger", "strengthen", "boom", "booming", "upgrade",
+    "outperform", "beat expectations", "higher", "up", "above",
+})
+_BEARISH_WORDS = frozenset({
+    "drop", "drops", "dropping", "fall", "falls", "falling", "decline",
+    "declines", "declining", "crash", "crashes", "crashing", "plunge",
+    "plunges", "plunging", "sink", "sinks", "sinking", "slump", "slumps",
+    "bear", "bearish", "reject", "rejects", "rejection", "ban", "bans",
+    "banned", "fail", "fails", "failing", "failure", "miss", "misses",
+    "below", "worse", "worsen", "weaken", "weak", "contract", "contraction",
+    "recession", "concern", "warning", "risk", "loss", "losses", "down",
+    "downgrade", "underperform", "disappoints", "disappointing", "negative",
+    "lower", "cut", "cuts",
+})
+
+# Crypto-specific search terms to use for the crypto news RSS query
+_CRYPTO_RSS_QUERY = "bitcoin OR ethereum OR crypto OR cryptocurrency OR BTC OR ETH"
+
+
+# ---------------------------------------------------------------------------
+# NewsMonitor
+# ---------------------------------------------------------------------------
+
+class NewsMonitor:
+    """
+    Background news monitor.  Call start() to begin polling, stop() to end.
+    Thread-safe for reading; the internal cache is replaced atomically.
+    """
+
+    def __init__(self, poll_interval: int = 300) -> None:
+        self._poll_interval = poll_interval
+        self._cache: list[dict] = []          # list of headline dicts
+        self._task: asyncio.Task | None = None
+        self._running = False
+        self._client: httpx.AsyncClient | None = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Start background polling loop."""
+        if self._running:
+            return
+        self._running = True
+        self._client = httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT,
+            headers={"User-Agent": "polymarket-arb-bot/1.0 (news-monitor)"},
+            follow_redirects=True,
+        )
+        # Do an immediate fetch before scheduling the loop
+        await self._fetch_all()
+        self._task = asyncio.create_task(self._poll_loop(), name="news_monitor")
+        logger.info(
+            f"[NewsMonitor] Started — poll_interval={self._poll_interval}s, "
+            f"feedparser={'available' if _FEEDPARSER_AVAILABLE else 'fallback XML'}"
+        )
+
+    async def stop(self) -> None:
+        """Stop background polling loop and close HTTP client."""
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+        logger.info("[NewsMonitor] Stopped.")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_relevant_news(self, question: str, max_results: int = 5) -> list[dict]:
+        """
+        Return up to max_results headlines from the last 6 hours that are
+        most relevant to the given market question.
+
+        Each item: {"title", "published", "source", "url", "sentiment"}
+        """
+        now = time.time()
+        cutoff = now - _CACHE_MAX_AGE_SECONDS
+        recent = [h for h in self._cache if h.get("_ts", 0) >= cutoff]
+
+        if not recent or not question:
+            return []
+
+        keywords = self._extract_keywords(question)
+        if not keywords:
+            return recent[:max_results]
+
+        scored = [
+            (self._keyword_score(h["title"], keywords), h)
+            for h in recent
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Only return headlines with at least one keyword hit
+        return [h for score, h in scored if score > 0][:max_results]
+
+    # ------------------------------------------------------------------
+    # Internal polling
+    # ------------------------------------------------------------------
+
+    async def _poll_loop(self) -> None:
+        """Runs indefinitely, fetching news every poll_interval seconds."""
+        while self._running:
+            try:
+                await asyncio.sleep(self._poll_interval)
+                if self._running:
+                    await self._fetch_all()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(f"[NewsMonitor] Poll loop error: {exc}")
+
+    async def _fetch_all(self) -> None:
+        """Fetch news from all sources and merge into the cache."""
+        results: list[dict] = []
+
+        # Run both fetches concurrently; failures are caught inside each method
+        general_task = asyncio.create_task(
+            self._fetch_general_news(_CRYPTO_RSS_QUERY)
+        )
+        crypto_task = asyncio.create_task(self._fetch_crypto_news())
+
+        general, crypto = await asyncio.gather(
+            general_task, crypto_task, return_exceptions=True
+        )
+
+        if isinstance(general, list):
+            results.extend(general)
+        if isinstance(crypto, list):
+            results.extend(crypto)
+
+        if results:
+            # Merge with existing cache, de-duplicate by URL
+            now = time.time()
+            existing_urls = {h["url"] for h in self._cache}
+            new_items = [r for r in results if r["url"] not in existing_urls]
+            combined = self._cache + new_items
+
+            # Evict entries older than 6 hours
+            cutoff = now - _CACHE_MAX_AGE_SECONDS
+            self._cache = [h for h in combined if h.get("_ts", 0) >= cutoff]
+
+            logger.debug(
+                f"[NewsMonitor] Cache updated: {len(self._cache)} headlines "
+                f"({len(new_items)} new)"
+            )
+
+    # ------------------------------------------------------------------
+    # Source fetchers
+    # ------------------------------------------------------------------
+
+    async def _fetch_general_news(self, query: str) -> list[dict]:
+        """
+        Fetch from Google News RSS.  Uses feedparser if available,
+        falls back to stdlib xml.etree.ElementTree.
+        """
+        if not self._client:
+            return []
+        try:
+            encoded = urllib.parse.quote(query)
+            url = _GOOGLE_NEWS_RSS.format(query=encoded)
+            response = await self._client.get(url)
+            response.raise_for_status()
+            content = response.text
+
+            if _FEEDPARSER_AVAILABLE:
+                return self._parse_rss_feedparser(content, source="Google News")
+            else:
+                return self._parse_rss_xml(content, source="Google News")
+
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] Google News RSS fetch failed: {exc}")
+            return []
+
+    async def _fetch_crypto_news(self) -> list[dict]:
+        """
+        Attempt to fetch from CryptoPanic free endpoint.
+        Skips gracefully on any failure (auth required, rate limit, etc.).
+        Falls back to a second Google News RSS query for crypto topics.
+        """
+        if not self._client:
+            return []
+
+        # Try CryptoPanic first
+        try:
+            response = await self._client.get(_CRYPTOPANIC_URL)
+            if response.status_code == 200:
+                data = response.json()
+                return self._parse_cryptopanic(data)
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] CryptoPanic fetch skipped: {exc}")
+
+        # Fallback: second Google News RSS query focused on crypto prices
+        try:
+            fallback_query = "bitcoin price ethereum crypto market"
+            return await self._fetch_general_news(fallback_query)
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] Crypto news fallback failed: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Parsers
+    # ------------------------------------------------------------------
+
+    def _parse_rss_feedparser(self, content: str, source: str) -> list[dict]:
+        """Parse RSS XML using feedparser."""
+        results: list[dict] = []
+        try:
+            feed = feedparser.parse(content)
+            for entry in feed.entries:
+                title = getattr(entry, "title", "").strip()
+                url = getattr(entry, "link", "").strip()
+                published = getattr(entry, "published", "").strip()
+                source_name = source
+                if hasattr(entry, "source") and hasattr(entry.source, "title"):
+                    source_name = entry.source.title
+
+                if not title or not url:
+                    continue
+
+                results.append(self._build_headline(
+                    title=title,
+                    url=url,
+                    published=published,
+                    source=source_name,
+                ))
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] feedparser parse error: {exc}")
+        return results
+
+    def _parse_rss_xml(self, content: str, source: str) -> list[dict]:
+        """Parse RSS XML using stdlib ElementTree (feedparser fallback)."""
+        results: list[dict] = []
+        try:
+            root = ET.fromstring(content)
+            channel = root.find("channel")
+            if channel is None:
+                return results
+
+            for item in channel.findall("item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                pub_el = item.find("pubDate")
+                source_el = item.find("source")
+
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                url = link_el.text.strip() if link_el is not None and link_el.text else ""
+                published = pub_el.text.strip() if pub_el is not None and pub_el.text else ""
+                source_name = (
+                    source_el.text.strip()
+                    if source_el is not None and source_el.text
+                    else source
+                )
+
+                if not title or not url:
+                    continue
+
+                results.append(self._build_headline(
+                    title=title,
+                    url=url,
+                    published=published,
+                    source=source_name,
+                ))
+        except ET.ParseError as exc:
+            logger.debug(f"[NewsMonitor] XML parse error: {exc}")
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] RSS XML parse error: {exc}")
+        return results
+
+    def _parse_cryptopanic(self, data: dict) -> list[dict]:
+        """Parse CryptoPanic JSON response."""
+        results: list[dict] = []
+        try:
+            posts = data.get("results", [])
+            for post in posts:
+                title = post.get("title", "").strip()
+                url = post.get("url", "").strip()
+                published = post.get("published_at", "").strip()
+                source_info = post.get("source", {})
+                source_name = source_info.get("title", "CryptoPanic") if source_info else "CryptoPanic"
+
+                if not title or not url:
+                    continue
+
+                results.append(self._build_headline(
+                    title=title,
+                    url=url,
+                    published=published,
+                    source=source_name,
+                ))
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] CryptoPanic parse error: {exc}")
+        return results
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    def _build_headline(
+        self, title: str, url: str, published: str, source: str
+    ) -> dict:
+        """Construct a normalized headline dict with sentiment and timestamp."""
+        return {
+            "title": title,
+            "published": published,
+            "source": source,
+            "url": url,
+            "sentiment": self._classify_sentiment(title),
+            "_ts": self._parse_published_ts(published),
+        }
+
+    def _parse_published_ts(self, published: str) -> float:
+        """
+        Try to parse a published date string into a unix timestamp.
+        Returns current time on failure (safe default — headline is treated as fresh).
+        """
+        if not published:
+            return time.time()
+        # Common RSS formats
+        formats = [
+            "%a, %d %b %Y %H:%M:%S %z",   # RFC 2822: "Mon, 01 Jan 2026 12:00:00 +0000"
+            "%a, %d %b %Y %H:%M:%S GMT",   # RFC 2822 GMT variant
+            "%Y-%m-%dT%H:%M:%S%z",         # ISO 8601
+            "%Y-%m-%dT%H:%M:%SZ",          # ISO 8601 UTC
+            "%Y-%m-%d %H:%M:%S",           # Simple datetime
+        ]
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(published, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+            except ValueError:
+                continue
+        # Last resort: return now so the headline isn't evicted
+        return time.time()
+
+    def _classify_sentiment(self, headline: str) -> str:
+        """
+        Simple word-list sentiment classifier.
+        Returns "positive", "negative", or "neutral".
+        """
+        words = set(headline.lower().split())
+        bullish_hits = len(words & _BULLISH_WORDS)
+        bearish_hits = len(words & _BEARISH_WORDS)
+        if bullish_hits > bearish_hits:
+            return "positive"
+        if bearish_hits > bullish_hits:
+            return "negative"
+        return "neutral"
+
+    def _extract_keywords(self, question: str) -> set[str]:
+        """
+        Extract meaningful keywords from a market question by stripping
+        punctuation and removing stopwords.
+        """
+        import re
+        tokens = re.sub(r"[^\w\s]", " ", question.lower()).split()
+        return {t for t in tokens if t not in _STOPWORDS and len(t) > 2}
+
+    def _keyword_score(self, headline: str, keywords: set[str]) -> float:
+        """
+        Score a headline by keyword overlap with the market question.
+        Returns a float 0.0–1.0 (fraction of keywords that appear in headline).
+        """
+        if not keywords:
+            return 0.0
+        headline_lower = headline.lower()
+        hits = sum(1 for kw in keywords if kw in headline_lower)
+        return hits / len(keywords)

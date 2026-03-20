@@ -27,6 +27,13 @@ from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
 from src.utils.logger import logger
 
+# Optional news monitor — imported lazily to avoid circular deps and
+# to keep the import safe if news_monitor.py is not present.
+try:
+    from src.exchange.news_monitor import NewsMonitor as _NewsMonitor
+except Exception:
+    _NewsMonitor = None  # type: ignore[assignment,misc]
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -415,8 +422,10 @@ class EventDrivenStrategy(BaseStrategy):
     _US_MARKET_CLOSE_UTC_HOUR = 21
     _US_MARKET_CLOSE_UTC_MINUTE = 0
 
-    def __init__(self, config, portfolio, risk_manager) -> None:
+    def __init__(self, config, portfolio, risk_manager, news_monitor=None) -> None:
         super().__init__(config, portfolio, risk_manager)
+        # Optional NewsMonitor — additive context only, never required
+        self._news_monitor = news_monitor
         self._calendar: list[CalendarEvent] = (
             get_default_calendar() + _load_custom_events()
         )
@@ -530,6 +539,51 @@ class EventDrivenStrategy(BaseStrategy):
                 f"{len(signals)} signal(s) from {len(active_events)} active event(s): "
                 f"{event_names}"
             )
+
+        # ------------------------------------------------------------------
+        # News boost: if a NewsMonitor is attached, check recent headlines
+        # for each matched market.  Recent news (last 2 hours) raises the
+        # size_multiplier by 0.2 on the next signal generation pass.
+        # This is logged only — signals already emitted above are not
+        # retroactively modified (news is additive context, not a re-trade).
+        # ------------------------------------------------------------------
+        if self._news_monitor and active_events:
+            _two_hours = 2 * 3600
+            _now = time.time()
+            try:
+                for market in markets:
+                    if not market.active or market.closed:
+                        continue
+                    matched = self._match_market_to_events(market, keyword_to_events)
+                    if not matched:
+                        continue
+                    news = self._news_monitor.get_relevant_news(
+                        market.question, max_results=3
+                    )
+                    # Filter to last 2 hours
+                    recent_news = [
+                        n for n in news
+                        if _now - n.get("_ts", 0) <= _two_hours
+                    ]
+                    if recent_news:
+                        top = recent_news[0]
+                        sentiment = top.get("sentiment", "neutral")
+                        self.log(
+                            f"[NEWS] '{market.question[:50]}' | "
+                            f"{top['title'][:80]} "
+                            f"[{sentiment}] (+0.2x size boost eligible)"
+                        )
+                        # Apply size boost to any signals for this market's tokens
+                        market_token_ids = {t.token_id for t in market.tokens}
+                        for sig in signals:
+                            if sig.token_id in market_token_ids:
+                                sig.metadata["news_boost"] = True
+                                sig.metadata["news_headline"] = top["title"][:120]
+                                sig.metadata["news_sentiment"] = sentiment
+                                # Boost size_usdc by 20% for news-confirmed signals
+                                sig.size_usdc = round(sig.size_usdc * 1.2, 4)
+            except Exception as exc:
+                logger.debug(f"[EventDriven] News boost step failed (non-fatal): {exc}")
 
         # LLM ensemble: run Claude probability estimates on top event-related markets
         llm_signals = await self._llm_scan(markets, orderbooks, active_events)

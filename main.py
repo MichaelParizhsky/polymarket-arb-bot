@@ -39,6 +39,8 @@ from src.strategies.event_driven import EventDrivenStrategy
 from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
 from src.strategies.quick_resolution import QuickResolutionStrategy
+from src.strategies.ensemble import EnsembleStrategy
+from src.utils.hedge_manager import HedgeManager
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
 from src.meta_agent.analyzer import PortfolioSnapshot
@@ -65,6 +67,8 @@ class ArbBot:
         self._ws_feed: PolymarketWSFeed | None = None
         self._kalshi: KalshiClient | None = None
         self._futures_hedge: FuturesHedge | None = None
+        self._hedge_manager: HedgeManager | None = None
+        self._news_monitor = None  # set in run() if NewsMonitor available
 
         # Strategies
         self._strategies = []
@@ -110,6 +114,10 @@ class ArbBot:
             self._strategies.append(
                 QuickResolutionStrategy(self.config, self.portfolio, self.risk)
             )
+        if cfg.ensemble_enabled:
+            self._strategies.append(
+                EnsembleStrategy(self.config, self.portfolio, self.risk)
+            )
         strategy_names = [s.name for s in self._strategies]
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture
@@ -122,6 +130,7 @@ class ArbBot:
             "EventDrivenStrategy": cfg.event_driven_enabled,
             "CrossExchangeStrategy": cfg.cross_exchange_enabled,
             "QuickResolutionStrategy": cfg.quick_resolution_enabled,
+            "EnsembleStrategy": cfg.ensemble_enabled,
         }
         disabled = [k for k, v in all_flags.items() if not v]
         if disabled:
@@ -157,6 +166,23 @@ class ArbBot:
         if self.config.binance.futures_enabled:
             self._futures_hedge = FuturesHedge(self.config, paper_trading=self.paper)
             logger.info("Binance futures hedging enabled")
+
+        if self._futures_hedge is not None:
+            self._hedge_manager = HedgeManager(
+                futures_hedge=self._futures_hedge,
+                portfolio=self.portfolio,
+                config=self.config,
+            )
+            logger.info("HedgeManager initialised")
+
+        # Start news monitor if available
+        try:
+            from src.exchange.news_monitor import NewsMonitor
+            self._news_monitor = NewsMonitor()
+            await self._news_monitor.start()
+            logger.info("News monitor started")
+        except Exception as exc:
+            logger.info(f"News monitor not available: {exc}")
 
         self._build_strategies()
         self._running = True
@@ -446,6 +472,17 @@ class ArbBot:
                 arb_executed.labels(strategy=sig.strategy).inc()
                 self._last_trade_time = time.time()
                 self._token_last_traded[sig.token_id] = time.time()
+                # Auto-hedge crypto BUY positions via Binance perpetual futures
+                if sig.side == "BUY" and self._hedge_manager is not None:
+                    market_question, _ = self._find_market_info(sig.token_id, context)
+                    market_tags = self._find_market_tags(sig.token_id, context)
+                    await self._hedge_manager.maybe_open_hedge(
+                        token_id=sig.token_id,
+                        market_question=market_question,
+                        market_tags=market_tags,
+                        side=sig.side,
+                        size_usdc=sig.size_usdc,
+                    )
 
     def _find_market_info(
         self, token_id: str, context: dict[str, Any]
@@ -455,6 +492,15 @@ class ArbBot:
                 if t.token_id == token_id:
                     return m.question, t.outcome
         return "", ""
+
+    def _find_market_tags(
+        self, token_id: str, context: dict[str, Any]
+    ) -> list[str]:
+        for m in context.get("markets", []):
+            for t in m.tokens:
+                if t.token_id == token_id:
+                    return list(getattr(m, "tags", []))
+        return []
 
     def _build_price_map(self, context: dict[str, Any]) -> dict[str, float]:
         price_map: dict[str, float] = {}
@@ -505,6 +551,8 @@ class ArbBot:
                                 f"[AUTO-CLOSE] Closed resolved winner {token_id[:16]}... "
                                 f"@ {book.best_bid:.4f} | {pos.contracts:.2f} contracts"
                             )
+                            if self._hedge_manager is not None:
+                                await self._hedge_manager.maybe_close_hedge(token_id)
                     # Losing resolution: ask <= 0.005 — position is worthless, sell at market
                     elif book.best_ask is not None and book.best_ask <= 0.005:
                         trade = self.portfolio.sell(
@@ -519,6 +567,8 @@ class ArbBot:
                                 f"[AUTO-CLOSE] Closed resolved loser {token_id[:16]}... "
                                 f"@ {book.best_ask:.4f} | loss={pos.cost_basis:.2f} USDC"
                             )
+                            if self._hedge_manager is not None:
+                                await self._hedge_manager.maybe_close_hedge(token_id)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -743,6 +793,7 @@ class ArbBot:
         "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),
         "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),
         "STRATEGY_QUICK_RESOLUTION": ("strategies", "quick_resolution_enabled", bool),
+        "STRATEGY_ENSEMBLE":         ("strategies", "ensemble_enabled",          bool),
     }
 
     def _apply_config_overrides(self, overrides: dict) -> list[str]:
@@ -954,6 +1005,11 @@ class ArbBot:
         await self.binance.stop()
         if self._ws_feed:
             await self._ws_feed.stop()
+        if self._news_monitor:
+            try:
+                await self._news_monitor.stop()
+            except Exception:
+                pass
         uptime = time.time() - self._start_time
         logger.info(f"Uptime: {uptime:.0f}s | Cycles: {self._cycle_count}")
         console.print(self.portfolio.summary())
