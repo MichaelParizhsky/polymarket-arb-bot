@@ -1422,44 +1422,81 @@ async def api_ensemble_recent():
 async def api_compare():
     import httpx, time
 
-    # Bot A data (local — same as /api/status)
-    bot_a = {"available": True, "name": "Bot A (All Strategies)"}
+    # Bot A data (local — mirrors /api/status fields exactly)
+    bot_a = {"available": True, "name": _bot_name or "Bot A"}
     try:
+        uptime = int(time.time() - _bot_start_time)
         with _portfolio_lock:
-            bal = _portfolio.get_balance() if _portfolio else 0
-            pnl = getattr(_portfolio, 'total_pnl', 0) if _portfolio else 0
-            pos = len(getattr(_portfolio, 'positions', {})) if _portfolio else 0
-            strat_pnl = dict(getattr(_portfolio, 'strategy_pnl', {}) if _portfolio else {})
-            trades = len(getattr(_portfolio, 'trades', [])) if _portfolio else 0
+            p = _portfolio
+            bal            = round(p.usdc_balance, 2) if p else 0
+            total_pnl      = round(p.total_pnl(), 2) if p else 0
+            starting_bal   = round(p.starting_balance, 2) if p else 0
+            pnl_pct        = round((total_pnl / starting_bal) * 100, 3) if starting_bal else 0
+            pos            = len(p.positions) if p else 0
+            closed_pos     = len(p.closed_positions) if p else 0
+            n_trades       = len(p.trades) if p else 0
+            exposure       = round(p.exposure(), 2) if p else 0
+            fees_paid      = round(p.total_fees_paid(), 2) if p else 0
+            win_rate       = p.win_rate() if p else 0
+            strat_pnl      = {k: round(float(v), 2) for k, v in p.strategy_pnl().items()} if p else {}
+            strat_trades   = {}
+            if p:
+                for t in p.trades:
+                    strat_trades[t.strategy] = strat_trades.get(t.strategy, 0) + 1
+        trades_per_hour = round(n_trades / max(uptime / 3600, 0.01), 1)
         bot_a.update({
-            "balance": round(float(bal), 2),
-            "total_pnl": round(float(pnl), 2),
-            "open_positions": int(pos),
-            "strategy_pnl": {k: round(float(v), 4) for k, v in strat_pnl.items()},
-            "total_trades": int(trades),
+            "balance":          bal,
+            "starting_balance": starting_bal,
+            "total_pnl":        total_pnl,
+            "pnl_pct":          pnl_pct,
+            "open_positions":   pos,
+            "closed_positions": closed_pos,
+            "total_trades":     n_trades,
+            "exposure":         exposure,
+            "fees_paid":        fees_paid,
+            "win_rate":         win_rate,
+            "trades_per_hour":  trades_per_hour,
+            "strategy_pnl":     strat_pnl,
+            "strategy_trades":  strat_trades,
         })
     except Exception as e:
         bot_a["error"] = str(e)
 
     # Bot B data (remote)
-    bot_b = {"available": False, "name": "Bot B (Quick/MM)"}
+    bot_b = {"available": False, "name": "Bot B"}
     peer_url = _peer_bot_url
     if peer_url:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                r_status = await client.get(f"{peer_url}/api/status")
-                r_pnl = await client.get(f"{peer_url}/api/strategy_pnl")
-            if r_status.status_code == 200:
+                r_status, r_pnl, r_strat_trades = await asyncio.gather(
+                    client.get(f"{peer_url}/api/status"),
+                    client.get(f"{peer_url}/api/strategy_pnl"),
+                    client.get(f"{peer_url}/api/strategy_trades"),
+                    return_exceptions=True,
+                )
+            if not isinstance(r_status, Exception) and r_status.status_code == 200:
                 s = r_status.json()
                 bot_b.update({
-                    "available": True,
-                    "balance": s.get("balance_usdc", 0),
-                    "total_pnl": s.get("total_pnl", 0),
-                    "open_positions": s.get("open_positions", 0),
-                    "total_trades": s.get("total_trades", 0),
+                    "available":        True,
+                    # Use correct field names matching /api/status response
+                    "balance":          s.get("balance", 0),
+                    "starting_balance": s.get("starting_balance", 0),
+                    "total_pnl":        s.get("pnl", 0),
+                    "pnl_pct":          s.get("pnl_pct", 0),
+                    "open_positions":   s.get("open_positions", 0),
+                    "closed_positions": s.get("closed_positions", 0),
+                    "total_trades":     s.get("total_trades", 0),
+                    "exposure":         s.get("exposure", 0),
+                    "fees_paid":        s.get("fees_paid", 0),
+                    "win_rate":         s.get("win_rate", 0),
+                    "trades_per_hour":  s.get("trades_per_hour", 0),
                 })
-            if r_pnl.status_code == 200:
+                # Grab bot name from peer if available
+                bot_b["name"] = s.get("bot_name", "Bot B")
+            if not isinstance(r_pnl, Exception) and r_pnl.status_code == 200:
                 bot_b["strategy_pnl"] = r_pnl.json()
+            if not isinstance(r_strat_trades, Exception) and r_strat_trades.status_code == 200:
+                bot_b["strategy_trades"] = r_strat_trades.json()
         except Exception as e:
             bot_b["error"] = str(e)
     else:
@@ -2234,12 +2271,32 @@ tr:hover td{background:#181818}
             <span id="compare-a-pnl">--</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">ROI</span>
+            <span id="compare-a-roi" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Win Rate</span>
+            <span id="compare-a-wr" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Fees Paid</span>
+            <span id="compare-a-fees" style="color:#ff7043">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Exposure</span>
+            <span id="compare-a-exp" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">Open Positions</span>
             <span id="compare-a-pos" style="color:#e0e0e0">--</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">Total Trades</span>
             <span id="compare-a-trades" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Trades/hr</span>
+            <span id="compare-a-tph" style="color:#e0e0e0">--</span>
           </div>
         </div>
       </div>
@@ -2256,6 +2313,22 @@ tr:hover td{background:#181818}
             <span id="compare-b-pnl">--</span>
           </div>
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">ROI</span>
+            <span id="compare-b-roi" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Win Rate</span>
+            <span id="compare-b-wr" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Fees Paid</span>
+            <span id="compare-b-fees" style="color:#ff7043">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Exposure</span>
+            <span id="compare-b-exp" style="color:#e0e0e0">--</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">Open Positions</span>
             <span id="compare-b-pos" style="color:#e0e0e0">--</span>
           </div>
@@ -2263,20 +2336,26 @@ tr:hover td{background:#181818}
             <span style="color:#666">Total Trades</span>
             <span id="compare-b-trades" style="color:#e0e0e0">--</span>
           </div>
+          <div style="display:flex;justify-content:space-between;font-size:.78rem">
+            <span style="color:#666">Trades/hr</span>
+            <span id="compare-b-tph" style="color:#e0e0e0">--</span>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Strategy PnL comparison table -->
-    <h3 style="margin-bottom:10px">Strategy PnL Comparison</h3>
+    <!-- Strategy comparison table -->
+    <h3 style="margin-bottom:10px">Strategy Breakdown</h3>
     <table>
       <thead><tr>
         <th>Strategy</th>
-        <th>Bot A PnL</th>
-        <th>Bot B PnL</th>
+        <th style="text-align:right">A PnL</th>
+        <th style="text-align:right">A Trades</th>
+        <th style="text-align:right">B PnL</th>
+        <th style="text-align:right">B Trades</th>
       </tr></thead>
       <tbody id="compare-strat-tbody">
-        <tr><td colspan="3" style="color:#555;text-align:center">No data yet</td></tr>
+        <tr><td colspan="5" style="color:#555;text-align:center">No data yet</td></tr>
       </tbody>
     </table>
 
@@ -3777,63 +3856,74 @@ function updateQrBadge(logData){
 //  Compare tab                                                         //
 // ------------------------------------------------------------------ //
 
+function _fillCompareCard(prefix, bot){
+  $(`compare-${prefix}-name`).textContent=bot.name||(prefix==='a'?'Bot A':'Bot B');
+  $(`compare-${prefix}-bal`).textContent=bot.balance!=null?fmt(bot.balance):'--';
+  const pnlEl=$(`compare-${prefix}-pnl`);
+  const pnl=bot.total_pnl;
+  pnlEl.textContent=pnl!=null?fmtPnl(pnl):'--';
+  pnlEl.style.color=pnl!=null?(pnl>=0?'#00e676':'#ff5252'):'#888';
+  const roi=bot.pnl_pct;
+  const roiEl=$(`compare-${prefix}-roi`);
+  if(roi!=null){
+    roiEl.textContent=(roi>=0?'+':'')+roi.toFixed(2)+'%';
+    roiEl.style.color=roi>=0?'#00e676':'#ff5252';
+  } else roiEl.textContent='--';
+  const wr=bot.win_rate;
+  $(`compare-${prefix}-wr`).textContent=wr!=null?(wr*100).toFixed(1)+'%':'--';
+  $(`compare-${prefix}-fees`).textContent=bot.fees_paid!=null?fmt(bot.fees_paid):'--';
+  $(`compare-${prefix}-exp`).textContent=bot.exposure!=null?fmt(bot.exposure):'--';
+  $(`compare-${prefix}-pos`).textContent=bot.open_positions!=null?bot.open_positions:'--';
+  $(`compare-${prefix}-trades`).textContent=bot.total_trades!=null?bot.total_trades:'--';
+  $(`compare-${prefix}-tph`).textContent=bot.trades_per_hour!=null?bot.trades_per_hour:'--';
+}
+
 async function fetchCompare(){
   try{
     const d=await fetch('/api/compare').then(r=>r.json());
     const a=d.bot_a||{};
     const b=d.bot_b||{};
 
-    // Timestamp
     $('compare-ts').textContent=d.ts?'Updated '+new Date(d.ts*1000).toLocaleTimeString():'--';
 
     // Bot A card
-    $('compare-a-name').textContent=a.name||'Bot A';
-    $('compare-a-bal').textContent=a.balance!=null?fmt(a.balance):'--';
-    const aPnl=$('compare-a-pnl');
-    aPnl.textContent=a.total_pnl!=null?fmtPnl(a.total_pnl):'--';
-    aPnl.style.color=a.total_pnl!=null?(a.total_pnl>=0?'#00e676':'#ff5252'):'#888';
-    $('compare-a-pos').textContent=a.open_positions!=null?a.open_positions:'--';
-    $('compare-a-trades').textContent=a.total_trades!=null?a.total_trades:'--';
+    _fillCompareCard('a', a);
 
     // Bot B card + warning
-    $('compare-b-name').textContent=b.name||'Bot B';
     const warn=$('compare-b-warning');
     const setup=$('compare-setup');
     if(!b.available){
       warn.style.display='block';
       warn.textContent='Bot B unavailable: '+(b.error||'unknown error');
-      if((b.error||'').includes('PEER_BOT_URL not set')){
-        setup.style.display='block';
-      }
-      $('compare-b-bal').textContent='--';
-      $('compare-b-pnl').textContent='--';
-      $('compare-b-pos').textContent='--';
-      $('compare-b-trades').textContent='--';
+      setup.style.display=(b.error||'').includes('PEER_BOT_URL not set')?'block':'none';
+      ['bal','pnl','roi','wr','fees','exp','pos','trades','tph'].forEach(f=>{
+        const el=$(`compare-b-${f}`);
+        if(el) el.textContent='--';
+      });
     } else {
       warn.style.display='none';
       setup.style.display='none';
-      $('compare-b-bal').textContent=b.balance!=null?fmt(b.balance):'--';
-      const bPnl=$('compare-b-pnl');
-      bPnl.textContent=b.total_pnl!=null?fmtPnl(b.total_pnl):'--';
-      bPnl.style.color=b.total_pnl!=null?(b.total_pnl>=0?'#00e676':'#ff5252'):'#888';
-      $('compare-b-pos').textContent=b.open_positions!=null?b.open_positions:'--';
-      $('compare-b-trades').textContent=b.total_trades!=null?b.total_trades:'--';
+      _fillCompareCard('b', b);
     }
 
-    // Strategy PnL table
+    // Strategy breakdown table (PnL + trade counts)
     const sa=a.strategy_pnl||{};
     const sb=b.strategy_pnl||{};
+    const ta=a.strategy_trades||{};
+    const tb=b.strategy_trades||{};
     const strats=[...new Set([...Object.keys(sa),...Object.keys(sb)])].sort();
     const tbody=$('compare-strat-tbody');
     if(!strats.length){
-      tbody.innerHTML='<tr><td colspan="3" style="color:#555;text-align:center">No strategy PnL data</td></tr>';
+      tbody.innerHTML='<tr><td colspan="5" style="color:#555;text-align:center">No strategy data yet</td></tr>';
     } else {
       tbody.innerHTML=strats.map(s=>{
-        const av=sa[s];
-        const bv=sb[s];
-        const aCell=av!=null?`<span style="color:${av>=0?'#00e676':'#ff5252'}">${fmtPnl(av)}</span>`:'<span style="color:#555">--</span>';
-        const bCell=bv!=null?`<span style="color:${bv>=0?'#00e676':'#ff5252'}">${fmtPnl(bv)}</span>`:'<span style="color:#555">--</span>';
-        return `<tr><td style="color:#ccc">${s}</td><td>${aCell}</td><td>${bCell}</td></tr>`;
+        const ap=sa[s]; const bp=sb[s];
+        const at=ta[s]; const bt=tb[s];
+        const aP=ap!=null?`<span style="color:${ap>=0?'#00e676':'#ff5252'}">${fmtPnl(ap)}</span>`:'<span style="color:#444">--</span>';
+        const bP=bp!=null?`<span style="color:${bp>=0?'#00e676':'#ff5252'}">${fmtPnl(bp)}</span>`:'<span style="color:#444">--</span>';
+        const aT=at!=null?`<span style="color:#aaa">${at}</span>`:'<span style="color:#444">--</span>';
+        const bT=bt!=null?`<span style="color:#aaa">${bt}</span>`:'<span style="color:#444">--</span>';
+        return `<tr><td style="color:#ccc">${s}</td><td style="text-align:right">${aP}</td><td style="text-align:right">${aT}</td><td style="text-align:right">${bP}</td><td style="text-align:right">${bT}</td></tr>`;
       }).join('');
     }
   }catch(e){
