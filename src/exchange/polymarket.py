@@ -209,14 +209,12 @@ class PolymarketClient:
         Supplements get_markets() so near-expiry markets are never missed due to pagination.
         """
         import datetime as _dt
-        now = _dt.datetime.utcnow()
+        now = _dt.datetime.now(_dt.timezone.utc)
 
         params = {
             "active": "true",
             "closed": "false",
-            "limit": 200,
-            "order": "end_date_min",
-            "ascending": "true",
+            "limit": 500,
         }
 
         try:
@@ -255,13 +253,16 @@ class PolymarketClient:
                     continue
 
                 try:
-                    end_dt = _dt.datetime.fromisoformat(
-                        end_date_iso.replace("Z", "")
+                    s = end_date_iso.strip().rstrip("Z")
+                    if "T" not in s:
+                        s += "T00:00:00"
+                    end_dt = _dt.datetime.fromisoformat(s).replace(
+                        tzinfo=_dt.timezone.utc
                     )
                     hours_left = (end_dt - now).total_seconds() / 3600
                     if not (0 < hours_left <= max_hours):
                         continue
-                except ValueError:
+                except (ValueError, TypeError):
                     continue
 
                 cat = raw.get("category") or ""

@@ -65,10 +65,16 @@ def _fair_value_above_target(
 
 
 def _days_to_expiry(end_date_iso: str) -> float:
-    """Parse ISO date and return days until expiry."""
+    """Parse ISO date (date-only or full datetime) and return days until expiry."""
     try:
         from datetime import datetime, timezone
-        end = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+        s = end_date_iso.strip()
+        # Normalise: strip trailing Z, then ensure timezone-aware
+        s = s.rstrip("Z")
+        if "T" not in s:
+            # Date-only string like "2026-03-31" — treat as UTC midnight
+            s += "T00:00:00"
+        end = datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         delta = (end - now).total_seconds() / 86400
         return max(delta, 0.001)
