@@ -110,8 +110,22 @@ class ArbBot:
             self._strategies.append(
                 QuickResolutionStrategy(self.config, self.portfolio, self.risk)
             )
-        logger.info(f"Loaded {len(self._strategies)} strategies: "
-                    f"{[s.name for s in self._strategies]}")
+        strategy_names = [s.name for s in self._strategies]
+        logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
+        # Log which strategies are disabled so Railway logs show full picture
+        all_flags = {
+            "RebalancingStrategy": cfg.rebalancing_enabled,
+            "CombinatorialStrategy": cfg.combinatorial_enabled,
+            "LatencyArbStrategy": cfg.latency_arb_enabled,
+            "MarketMakingStrategy": cfg.market_making_enabled,
+            "ResolutionStrategy": cfg.resolution_enabled,
+            "EventDrivenStrategy": cfg.event_driven_enabled,
+            "CrossExchangeStrategy": cfg.cross_exchange_enabled,
+            "QuickResolutionStrategy": cfg.quick_resolution_enabled,
+        }
+        disabled = [k for k, v in all_flags.items() if not v]
+        if disabled:
+            logger.info(f"Disabled strategies: {disabled}")
         # Re-add any runtime-deployed strategies
         self._strategies.extend(self._dynamic_strategies)
 
@@ -218,7 +232,7 @@ class ArbBot:
         """Core scanning loop."""
         logger.info("Bot running. Press Ctrl+C to stop.")
         last_summary_at = time.time()
-        summary_interval = 300   # print summary every 5 minutes
+        summary_interval = 60   # save state every 60s (was 300s — reduces data loss on Railway redeploy)
 
         while self._running:
             # Check for dashboard-deployed strategies every 10 cycles
@@ -522,7 +536,7 @@ class ArbBot:
             return
 
         interval = int(os.getenv("META_AGENT_INTERVAL_MINUTES", "30")) * 60
-        min_trades = 20   # need meaningful sample before analyzing
+        min_trades = 5   # lowered from 20 — Railway redeploys wipe state so 20 is rarely reached
 
         logger.info(f"Meta-agent started — first analysis in {interval//60} minutes")
 
@@ -540,8 +554,19 @@ class ArbBot:
                     continue
 
                 snapshot = PortfolioSnapshot.from_json(state_path)
+                # Always write a heartbeat so we can tell the meta-agent loop is alive
+                heartbeat = {
+                    "alive": True,
+                    "timestamp": time.time(),
+                    "trades": len(snapshot.trades),
+                    "min_trades_needed": min_trades,
+                    "cycle_count": self._cycle_count,
+                }
+                with open("logs/meta_agent_heartbeat.json", "w") as _hf:
+                    json.dump(heartbeat, _hf)
+
                 if len(snapshot.trades) < min_trades:
-                    logger.info(f"Meta-agent: only {len(snapshot.trades)} trades so far (need {min_trades}), skipping")
+                    logger.info(f"Meta-agent: only {len(snapshot.trades)} trades so far (need {min_trades}), skipping analysis")
                     continue
 
                 analysis_data = snapshot.to_analysis_dict()
