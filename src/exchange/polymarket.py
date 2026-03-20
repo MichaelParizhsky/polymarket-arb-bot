@@ -94,10 +94,18 @@ class PolymarketClient:
     GAMMA_BASE = "https://gamma-api.polymarket.com"
 
     SPORTS_SERIES_IDS = {
-        "nfl": 10187,
-        "cfb": 10210,
-        "nba": 10345,
-        "cbb": 10470,
+        # North American leagues
+        "nfl":  10187,
+        "cfb":  10210,
+        "nba":  10345,
+        "cbb":  10470,
+        "nhl":  10346,
+        "mls":  10189,
+        # Soccer / football
+        "bundesliga":         10194,
+        "norway_eliteserien": 10362,
+        "brazil_serie_a":     10359,
+        "japan_j_league":     10360,
     }
 
     def __init__(self, config, paper_trading: bool = True) -> None:
