@@ -135,6 +135,11 @@ class StrategyConfig:
     quick_resolution_min_volume: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_VOLUME", 100.0))
     quick_resolution_max_spend: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MAX_SPEND", 150.0))
 
+    # Crypto 5m/15m short market strategy
+    crypto_5m_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_CRYPTO_5M", True))
+    crypto_5m_max_spend: float = field(default_factory=lambda: float(os.getenv("CRYPTO_5M_MAX_SPEND", "100.0")))
+    crypto_5m_coins: list = field(default_factory=lambda: ["btc", "eth", "sol"])
+
     # Markets coverage
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))
     max_days_to_resolution: int = field(default_factory=lambda: _int("MAX_DAYS_TO_RESOLUTION", 30))

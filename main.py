@@ -39,6 +39,7 @@ from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
 from src.strategies.quick_resolution import QuickResolutionStrategy
 from src.strategies.ensemble import EnsembleStrategy
+from src.strategies.crypto_5m import CryptoShortStrategy
 from src.utils.hedge_manager import HedgeManager
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
@@ -123,6 +124,11 @@ class ArbBot:
             self._strategies.append(
                 QuickResolutionStrategy(self.config, self.portfolio, self.risk)
             )
+        if getattr(cfg, 'crypto_5m_enabled', False):
+            self._strategies.append(
+                CryptoShortStrategy(self.config, self.portfolio, self.risk)
+            )
+            logger.info("CryptoShortStrategy (5m/15m dual-arb + snipe) ENABLED")
         # EnsembleStrategy disabled: LLMs lack calibration for real-time probability
         # estimation. Replace with a properly trained ML model before re-enabling.
         # ensemble = EnsembleStrategy(...)
@@ -378,11 +384,23 @@ class ArbBot:
         remaining_slots = max(0, max_markets - len(expiring_in_list))
         markets_sorted = expiring_in_list + general_sorted[:remaining_slots]
 
-        # Collect all token IDs
+        # Fetch crypto short (5m/15m) markets if strategy is enabled
+        crypto_short_markets = []
+        if getattr(self.config.strategies, 'crypto_5m_enabled', False):
+            try:
+                crypto_short_markets = await self.poly.get_crypto_short_markets()
+            except Exception as exc:
+                logger.debug(f"get_crypto_short_markets failed: {exc}")
+
+        # Collect all token IDs (main markets + crypto short markets)
         token_ids = []
         for m in markets_sorted:
             for t in m.tokens:
                 token_ids.append(t.token_id)
+        for m in crypto_short_markets:
+            for t in m.tokens:
+                if t.token_id not in token_ids:
+                    token_ids.append(t.token_id)
 
         # Keep WS feed subscribed to current token set
         if self._ws_feed:
@@ -423,6 +441,7 @@ class ArbBot:
             "orderbooks": orderbooks,
             "binance_feed": self.binance,
             "kalshi_markets": kalshi_markets,
+            "crypto_short_markets": crypto_short_markets,
             "timestamp": time.time(),
         }
 

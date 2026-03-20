@@ -111,7 +111,7 @@ class QuickResolutionStrategy(BaseStrategy):
         min_edge = cfg.quick_resolution_min_edge
         max_spend = cfg.quick_resolution_max_spend
 
-        QR_MIN_VOLUME = 100.0  # Quick resolution uses lower volume floor — sports markets are lower volume
+        QR_MIN_VOLUME = 10.0  # Quick resolution uses lower volume floor — sports markets are lower volume
 
         skipped_no_time = 0
         skipped_no_conviction = 0
