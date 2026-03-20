@@ -35,6 +35,7 @@ class Market:
     tags: list[str] = field(default_factory=list)
     volume: float = 0.0
     liquidity: float = 0.0
+    category: str = ""  # e.g. "sports", "crypto", "politics"
 
 
 @dataclass
@@ -100,6 +101,8 @@ class PolymarketClient:
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 30.0  # seconds
         self._clob_client = None  # initialised once in __aenter__ for live mode
+        self._expiring_cache: list = []
+        self._expiring_cache_ts: float = 0.0
 
     async def __aenter__(self) -> "PolymarketClient":
         self._http = httpx.AsyncClient(
@@ -173,6 +176,7 @@ class PolymarketClient:
                     continue
 
                 condition_id = raw.get("conditionId") or raw.get("id") or ""
+                cat = raw.get("category") or ""
                 markets.append(Market(
                     condition_id=str(condition_id),
                     question=raw.get("question", ""),
@@ -180,9 +184,10 @@ class PolymarketClient:
                     active=raw.get("active", False),
                     closed=raw.get("closed", True),
                     end_date_iso=raw.get("endDateIso") or raw.get("endDate", ""),
-                    tags=[raw.get("category", "")] if raw.get("category") else [],
+                    tags=[cat] if cat else [],
                     volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
                     liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
+                    category=cat.lower(),
                 ))
             except (KeyError, TypeError, ValueError) as exc:
                 logger.debug(f"Skipping malformed market: {exc}")
@@ -259,6 +264,7 @@ class PolymarketClient:
                 except ValueError:
                     continue
 
+                cat = raw.get("category") or ""
                 markets.append(Market(
                     condition_id=str(condition_id),
                     question=raw.get("question", ""),
@@ -266,18 +272,16 @@ class PolymarketClient:
                     active=raw.get("active", False),
                     closed=raw.get("closed", True),
                     end_date_iso=end_date_iso,
-                    tags=[raw.get("category", "")] if raw.get("category") else [],
+                    tags=[cat] if cat else [],
                     volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
                     liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
+                    category=cat.lower(),
                 ))
             except (KeyError, TypeError, ValueError) as exc:
                 logger.debug(f"get_expiring_markets: skipping malformed market: {exc}")
 
         logger.info(f"get_expiring_markets: found {len(markets)} markets expiring within {max_hours}h")
         return markets
-
-    _expiring_cache: list = []
-    _expiring_cache_ts: float = 0.0
 
     async def get_expiring_markets_cached(self, max_hours: float = 48.0) -> list[Market]:
         """Cached version of get_expiring_markets with 60s TTL."""

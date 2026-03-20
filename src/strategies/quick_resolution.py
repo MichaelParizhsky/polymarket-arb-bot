@@ -139,7 +139,7 @@ class QuickResolutionStrategy(BaseStrategy):
                 continue
 
             # Volume filter (lower floor for quick resolution)
-            volume = getattr(market, 'volume_24h', 0.0) or 0.0
+            volume = market.volume or 0.0
             if volume < QR_MIN_VOLUME:
                 logger.debug(
                     f"QuickRes: skip {market.question[:50]} — volume ${volume:.0f} < ${QR_MIN_VOLUME:.0f}"

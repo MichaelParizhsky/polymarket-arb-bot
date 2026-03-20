@@ -368,9 +368,15 @@ class ArbBot:
             markets = filtered
             logger.debug(f"Date filter ({max_days}d): {len(markets)} markets within window")
 
-        # Limit to top N markets by volume
+        # Limit to top N markets by volume, but always keep expiring markets at the front.
+        # Expiring markets have low lifetime volume and would otherwise be sorted out.
         max_markets = self.config.strategies.max_markets
-        markets_sorted = sorted(markets, key=lambda m: m.volume, reverse=True)[:max_markets]
+        expiring_ids = {m.condition_id for m in expiring}
+        expiring_in_list = [m for m in markets if m.condition_id in expiring_ids]
+        general_markets = [m for m in markets if m.condition_id not in expiring_ids]
+        general_sorted = sorted(general_markets, key=lambda m: m.volume, reverse=True)
+        remaining_slots = max(0, max_markets - len(expiring_in_list))
+        markets_sorted = expiring_in_list + general_sorted[:remaining_slots]
 
         # Collect all token IDs
         token_ids = []

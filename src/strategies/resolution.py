@@ -125,7 +125,7 @@ class ResolutionStrategy(BaseStrategy):
                 continue
 
             # Skip illiquid markets
-            volume = getattr(market, 'volume_24h', 0.0) or 0.0
+            volume = market.volume or 0.0
             if volume < MIN_VOLUME_24H:
                 self.log(
                     f"Resolution: skipping {market.question[:50]} — volume ${volume:.0f} < ${MIN_VOLUME_24H:.0f}",
