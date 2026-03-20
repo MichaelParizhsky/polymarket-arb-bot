@@ -30,6 +30,7 @@ def _check_api_key(x_api_key: str = Header(default="")) -> bool:
 
 import os as _os
 _peer_bot_url: str = _os.getenv("PEER_BOT_URL", "").rstrip("/")
+_bot_name: str = _os.getenv("BOT_NAME", "Bot A")
 
 _portfolio = None
 _bot_start_time = time.time()
@@ -93,6 +94,11 @@ def reset_portfolio(x_api_key: str = Header(default="")):
 # ------------------------------------------------------------------ #
 #  Bot API endpoints                                                   #
 # ------------------------------------------------------------------ #
+
+@app.get("/api/bot_info")
+def bot_info():
+    return {"name": _bot_name, "peer_url": _peer_bot_url}
+
 
 @app.get("/api/status")
 def status():
@@ -1451,6 +1457,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Polymarket Arb Bot</title>
+<script>
+fetch('/api/bot_info').then(r=>r.json()).then(d=>{
+  document.title=d.name+' — Polymarket Arb Bot';
+  const el=document.getElementById('bot-title');
+  if(!el)return;
+  const isB=(d.name||'').toLowerCase().includes('b');
+  const badge=isB
+    ? '<span style="font-size:0.6em;background:#6366f1;color:#fff;padding:2px 10px;border-radius:9999px;vertical-align:middle;margin-left:8px">'+d.name+'</span>'
+    : '<span style="font-size:0.6em;background:#22c55e;color:#000;padding:2px 10px;border-radius:9999px;vertical-align:middle;margin-left:8px">'+d.name+'</span>';
+  el.innerHTML='Polymarket Arb Bot'+badge;
+});
+</script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1645,7 +1663,7 @@ tr:hover td{background:#181818}
 <body>
 
 <header>
-  <h1>Polymarket Arb Bot</h1>
+  <h1 id="bot-title">Polymarket Arb Bot</h1>
   <span id="mode-badge">PAPER</span>
   <span id="uptime-info">loading...</span>
   <button id="reset-btn" onclick="resetPortfolio()">Reset to $10,000</button>
