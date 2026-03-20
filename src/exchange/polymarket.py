@@ -93,6 +93,13 @@ class PolymarketClient:
     CLOB_BASE = "https://clob.polymarket.com"
     GAMMA_BASE = "https://gamma-api.polymarket.com"
 
+    SPORTS_SERIES_IDS = {
+        "nfl": 10187,
+        "cfb": 10210,
+        "nba": 10345,
+        "cbb": 10470,
+    }
+
     def __init__(self, config, paper_trading: bool = True) -> None:
         self.config = config
         self.paper_trading = paper_trading
@@ -140,6 +147,43 @@ class PolymarketClient:
     #  Market data                                                          #
     # ------------------------------------------------------------------ #
 
+    def _parse_market(self, raw: dict) -> Market | None:
+        """
+        Convert a raw Gamma API market dict into a Market dataclass.
+        Returns None if the market is malformed or has fewer than 2 tokens.
+        """
+        try:
+            token_ids = raw.get("clobTokenIds") or []
+            if isinstance(token_ids, str):
+                token_ids = json.loads(token_ids)
+            outcomes = raw.get("outcomes") or ["Yes", "No"]
+            if isinstance(outcomes, str):
+                outcomes = json.loads(outcomes)
+
+            tokens = [
+                Token(token_id=str(tid), outcome=str(out))
+                for tid, out in zip(token_ids, outcomes)
+            ]
+            if len(tokens) < 2:
+                return None
+
+            condition_id = raw.get("conditionId") or raw.get("id") or ""
+            cat = raw.get("category") or ""
+            return Market(
+                condition_id=str(condition_id),
+                question=raw.get("question", ""),
+                tokens=tokens,
+                active=raw.get("active", False),
+                closed=raw.get("closed", True),
+                end_date_iso=raw.get("endDateIso") or raw.get("endDate", ""),
+                tags=[cat] if cat else [],
+                volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
+                liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
+                category=cat.lower(),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
     async def get_markets(self, limit: int = 100, offset: int = 0) -> list[Market]:
         """Fetch active markets from Gamma API."""
@@ -159,38 +203,11 @@ class PolymarketClient:
 
         markets = []
         for raw in resp.json():
-            try:
-                # API uses clobTokenIds + outcomes arrays
-                token_ids = raw.get("clobTokenIds") or []
-                if isinstance(token_ids, str):
-                    token_ids = json.loads(token_ids)
-                outcomes = raw.get("outcomes") or ["Yes", "No"]
-                if isinstance(outcomes, str):
-                    outcomes = json.loads(outcomes)
-
-                tokens = [
-                    Token(token_id=str(tid), outcome=str(out))
-                    for tid, out in zip(token_ids, outcomes)
-                ]
-                if len(tokens) < 2:
-                    continue
-
-                condition_id = raw.get("conditionId") or raw.get("id") or ""
-                cat = raw.get("category") or ""
-                markets.append(Market(
-                    condition_id=str(condition_id),
-                    question=raw.get("question", ""),
-                    tokens=tokens,
-                    active=raw.get("active", False),
-                    closed=raw.get("closed", True),
-                    end_date_iso=raw.get("endDateIso") or raw.get("endDate", ""),
-                    tags=[cat] if cat else [],
-                    volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
-                    liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
-                    category=cat.lower(),
-                ))
-            except (KeyError, TypeError, ValueError) as exc:
-                logger.debug(f"Skipping malformed market: {exc}")
+            market = self._parse_market(raw)
+            if market:
+                markets.append(market)
+            else:
+                logger.debug(f"Skipping malformed market: {raw.get('id') or raw.get('conditionId')}")
         return markets
 
     async def get_markets_cached(self) -> list[Market]:
@@ -207,14 +224,19 @@ class PolymarketClient:
         """
         Fetch markets expiring within the next `max_hours` hours, sorted by end_date ascending.
         Supplements get_markets() so near-expiry markets are never missed due to pagination.
+        Uses API-side date filtering to reduce payload size; client-side filter is kept as a
+        safety fallback.
         """
         import datetime as _dt
         now = _dt.datetime.now(_dt.timezone.utc)
+        end_max = now + _dt.timedelta(hours=max_hours)
 
         params = {
             "active": "true",
             "closed": "false",
             "limit": 500,
+            "end_date_min": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end_date_max": end_max.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         try:
@@ -232,26 +254,15 @@ class PolymarketClient:
         markets = []
         for raw in markets_raw:
             try:
-                token_ids = raw.get("clobTokenIds") or []
-                if isinstance(token_ids, str):
-                    token_ids = json.loads(token_ids)
-                outcomes = raw.get("outcomes") or ["Yes", "No"]
-                if isinstance(outcomes, str):
-                    outcomes = json.loads(outcomes)
-
-                tokens = [
-                    Token(token_id=str(tid), outcome=str(out))
-                    for tid, out in zip(token_ids, outcomes)
-                ]
-                if len(tokens) < 2:
+                market = self._parse_market(raw)
+                if not market:
                     continue
 
-                condition_id = raw.get("conditionId") or raw.get("id") or ""
-                end_date_iso = raw.get("endDateIso") or raw.get("endDate", "")
-
+                end_date_iso = market.end_date_iso
                 if not end_date_iso:
                     continue
 
+                # Client-side safety filter
                 try:
                     s = end_date_iso.strip().rstrip("Z")
                     if "T" not in s:
@@ -265,19 +276,7 @@ class PolymarketClient:
                 except (ValueError, TypeError):
                     continue
 
-                cat = raw.get("category") or ""
-                markets.append(Market(
-                    condition_id=str(condition_id),
-                    question=raw.get("question", ""),
-                    tokens=tokens,
-                    active=raw.get("active", False),
-                    closed=raw.get("closed", True),
-                    end_date_iso=end_date_iso,
-                    tags=[cat] if cat else [],
-                    volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
-                    liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),
-                    category=cat.lower(),
-                ))
+                markets.append(market)
             except (KeyError, TypeError, ValueError) as exc:
                 logger.debug(f"get_expiring_markets: skipping malformed market: {exc}")
 
@@ -291,6 +290,117 @@ class PolymarketClient:
         markets = await self.get_expiring_markets(max_hours=max_hours)
         self._expiring_cache = markets
         self._expiring_cache_ts = time.time()
+        return markets
+
+    async def get_crypto_short_markets(
+        self,
+        coins: list[str] | None = None,
+        include_next_window: bool = True,
+    ) -> list[Market]:
+        """
+        Discover current 5-minute and 15-minute crypto up/down markets using
+        deterministic slug calculation. These markets rotate on a fixed schedule
+        (5m = every 300s, 15m = every 900s) so we compute the slug from the clock
+        instead of searching the API.
+
+        Working slug format:
+            {coin}-updown-{duration}-{window_start_unix}
+        Examples:
+            btc-updown-5m-1768502700
+            eth-updown-15m-1768824000
+        """
+        if coins is None:
+            coins = ["btc", "eth", "sol", "xrp"]
+
+        now = int(time.time())
+        slugs: list[str] = []
+        for coin in coins:
+            for duration, window in [("5m", 300), ("15m", 900)]:
+                ts = (now // window) * window
+                slugs.append(f"{coin}-updown-{duration}-{ts}")
+                if include_next_window:
+                    slugs.append(f"{coin}-updown-{duration}-{ts + window}")
+
+        markets: list[Market] = []
+        async with httpx.AsyncClient(timeout=10) as session:
+            for slug in slugs:
+                try:
+                    resp = await session.get(
+                        f"{self.GAMMA_BASE}/markets/slug/{slug}"
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    # May return a list or a single object
+                    items = data if isinstance(data, list) else [data]
+                    for raw in items:
+                        try:
+                            market = self._parse_market(raw)
+                            if market:
+                                markets.append(market)
+                        except Exception as exc:
+                            logger.debug(f"crypto_short: parse error {slug}: {exc}")
+                except Exception as exc:
+                    logger.debug(f"crypto_short: fetch error {slug}: {exc}")
+
+        logger.info(f"crypto_short_markets: found {len(markets)} active crypto short markets")
+        return markets
+
+    async def get_sports_markets(
+        self,
+        max_hours: float = 48.0,
+    ) -> list[Market]:
+        """
+        Fetch active sports markets using Polymarket's series_id parameter.
+        This is the only reliable way to find sports markets — keyword matching
+        on question text misses many markets.
+        """
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        markets: list[Market] = []
+        seen: set[str] = set()
+
+        for sport, series_id in self.SPORTS_SERIES_IDS.items():
+            try:
+                resp = await self._http.get(
+                    f"{self.GAMMA_BASE}/events",
+                    params={
+                        "series_id": series_id,
+                        "active": "true",
+                        "closed": "false",
+                        "limit": 200,
+                    },
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                events = data if isinstance(data, list) else data.get("data", [])
+                for event in events:
+                    # Events contain child markets
+                    raw_markets = event.get("markets", [event]) if "markets" in event else [event]
+                    for raw in raw_markets:
+                        try:
+                            market = self._parse_market(raw)
+                            if market and market.condition_id not in seen:
+                                # Filter by time window
+                                s = market.end_date_iso.strip().rstrip("Z")
+                                if "T" not in s:
+                                    s += "T00:00:00"
+                                end_dt = _dt.datetime.fromisoformat(s).replace(
+                                    tzinfo=_dt.timezone.utc
+                                )
+                                hours_left = (end_dt - now).total_seconds() / 3600
+                                if 0 < hours_left <= max_hours:
+                                    market.category = sport
+                                    markets.append(market)
+                                    seen.add(market.condition_id)
+                        except Exception as exc:
+                            logger.debug(f"sports_markets: parse error {sport}: {exc}")
+            except Exception as exc:
+                logger.warning(f"sports_markets: fetch error {sport}: {exc}")
+
+        logger.info(f"sports_markets: found {len(markets)} active sports markets within {max_hours}h")
         return markets
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=0.5, max=3))
