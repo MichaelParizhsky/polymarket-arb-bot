@@ -12,9 +12,6 @@ COPY . .
 # Create logs directory
 RUN mkdir -p logs
 
-# Mark /app/logs as a volume for Railway persistent storage
-VOLUME ["/app/logs"]
-
 # Expose dashboard + metrics ports
 EXPOSE 5000 8000
 
