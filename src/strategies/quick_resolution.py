@@ -126,6 +126,7 @@ class QuickResolutionStrategy(BaseStrategy):
         skipped_no_conviction = 0
         skipped_no_edge = 0
         skipped_no_volume = 0
+        skipped_no_book = 0
 
         # Prune stale entries. Default 12h window; lower via QUICK_RESOLUTION_ENTERED_HOURS
         # for paper mode to allow re-entry (e.g. 0.5 = 30 min cooldown per market).
@@ -174,10 +175,21 @@ class QuickResolutionStrategy(BaseStrategy):
                 continue
 
             yes_book = orderbooks.get(yes_token.token_id)
-            if not yes_book or yes_book.mid is None:
+            if not yes_book:
+                skipped_no_book += 1
                 continue
 
+            # Use mid as conviction proxy; fall back to ask/bid when only one side exists
+            # (sports markets often have asks but no bids pre-game)
             yes_mid = yes_book.mid
+            if yes_mid is None:
+                if yes_book.best_ask is not None:
+                    yes_mid = yes_book.best_ask
+                elif yes_book.best_bid is not None:
+                    yes_mid = yes_book.best_bid
+                else:
+                    skipped_no_book += 1
+                    continue  # truly empty book
             market_type = _detect_market_type(market.question)
 
             conviction_threshold, effective_min_edge = _tiered_conviction(
@@ -207,11 +219,11 @@ class QuickResolutionStrategy(BaseStrategy):
                 else:
                     skipped_no_conviction += 1
 
-        if skipped_no_time + skipped_no_conviction + skipped_no_edge + skipped_no_volume > 0:
+        if skipped_no_time + skipped_no_conviction + skipped_no_edge + skipped_no_volume + skipped_no_book > 0 or len(signals) > 0:
             logger.info(
                 f"QuickRes scan: {len(signals)} signals | skipped: "
                 f"{skipped_no_time} time, {skipped_no_conviction} conviction, "
-                f"{skipped_no_edge} edge, {skipped_no_volume} volume"
+                f"{skipped_no_edge} edge, {skipped_no_volume} volume, {skipped_no_book} no-book"
             )
 
         return signals
