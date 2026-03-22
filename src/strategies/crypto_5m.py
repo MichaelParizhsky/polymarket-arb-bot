@@ -33,10 +33,10 @@ from src.utils.metrics import arb_opportunities, edge_detected
 DUAL_ARB_THRESHOLD = 0.995
 
 # End-of-window snipe: fire when this many seconds remain in the window
-SNIPE_WINDOW_SECONDS = 60.0
+SNIPE_WINDOW_SECONDS = 120.0
 
 # Minimum conviction for end-of-window snipe
-SNIPE_MIN_CONVICTION = 0.80
+SNIPE_MIN_CONVICTION = 0.65
 
 # Minimum net edge required for any entry
 MIN_NET_EDGE = 0.005  # 0.5%
