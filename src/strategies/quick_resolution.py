@@ -122,6 +122,7 @@ class QuickResolutionStrategy(BaseStrategy):
 
         QR_MIN_VOLUME = 10.0  # Quick resolution uses lower volume floor — sports markets are lower volume
 
+        skipped_inactive = 0
         skipped_no_time = 0
         skipped_no_conviction = 0
         skipped_no_edge = 0
@@ -141,6 +142,7 @@ class QuickResolutionStrategy(BaseStrategy):
 
         for market in markets:
             if not market.active or market.closed:
+                skipped_inactive += 1
                 continue
 
             # Only consider markets within the max_hours window
@@ -219,12 +221,11 @@ class QuickResolutionStrategy(BaseStrategy):
                 else:
                     skipped_no_conviction += 1
 
-        if skipped_no_time + skipped_no_conviction + skipped_no_edge + skipped_no_volume + skipped_no_book > 0 or len(signals) > 0:
-            logger.info(
-                f"QuickRes scan: {len(signals)} signals | skipped: "
-                f"{skipped_no_time} time, {skipped_no_conviction} conviction, "
-                f"{skipped_no_edge} edge, {skipped_no_volume} volume, {skipped_no_book} no-book"
-            )
+        logger.info(
+            f"QuickRes scan: {len(markets)} total, {len(signals)} signals | skipped: "
+            f"{skipped_inactive} inactive, {skipped_no_time} time, {skipped_no_conviction} conviction, "
+            f"{skipped_no_edge} edge, {skipped_no_volume} volume, {skipped_no_book} no-book"
+        )
 
         return signals
 
