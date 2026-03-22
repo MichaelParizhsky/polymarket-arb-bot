@@ -25,7 +25,6 @@ Market type detection:
 """
 from __future__ import annotations
 
-import logging
 import re
 import time
 from typing import Any
@@ -34,9 +33,8 @@ from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
 from src.strategies.latency_arb import _days_to_expiry
 from src.utils.constants import calc_taker_fee, MIN_TRADE_USDC
+from src.utils.logger import logger
 from src.utils.metrics import arb_opportunities, edge_detected
-
-logger = logging.getLogger(__name__)
 
 # Regex to detect short-duration crypto market questions
 _CRYPTO_SHORT_RE = re.compile(
