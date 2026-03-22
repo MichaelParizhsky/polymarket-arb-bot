@@ -372,17 +372,23 @@ class ArbBot:
                         continue
                     all_signals.extend(result or [])
 
-                # Filter signals from strategies that have exceeded their loss budget
+                # Filter signals from strategies that have exceeded their loss budget.
+                # In paper trading, set PAPER_SKIP_BUDGETS=true to disable this check
+                # so all strategies run uninterrupted for faster data collection.
                 disabled_by_budget = set()
-                strategy_pnl_map = self.portfolio.strategy_pnl()
-                for strat_name, budget in self.config.risk.strategy_loss_budget.items():
-                    strategy_pnl = strategy_pnl_map.get(strat_name, 0.0)
-                    if strategy_pnl < -budget:
-                        disabled_by_budget.add(strat_name)
-                        logger.warning(
-                            f"Strategy {strat_name} disabled: loss budget ${budget:.0f} exceeded "
-                            f"(current: ${strategy_pnl:.2f})"
-                        )
+                _skip_budgets = self.config.paper_trading and os.getenv(
+                    "PAPER_SKIP_BUDGETS", "false"
+                ).lower() in ("true", "1", "yes")
+                if not _skip_budgets:
+                    strategy_pnl_map = self.portfolio.strategy_pnl()
+                    for strat_name, budget in self.config.risk.strategy_loss_budget.items():
+                        strategy_pnl = strategy_pnl_map.get(strat_name, 0.0)
+                        if strategy_pnl < -budget:
+                            disabled_by_budget.add(strat_name)
+                            logger.warning(
+                                f"Strategy {strat_name} disabled: loss budget ${budget:.0f} exceeded "
+                                f"(current: ${strategy_pnl:.2f})"
+                            )
 
                 if disabled_by_budget:
                     all_signals = [s for s in all_signals if s.strategy not in disabled_by_budget]

@@ -59,22 +59,30 @@ _SPORTS_RE = re.compile(
 )
 
 
-def _tiered_conviction(hours_left: float, base_conviction: float) -> tuple[float, float]:
+def _tiered_conviction(
+    hours_left: float,
+    base_conviction: float,
+    floor: float = 0.68,
+    min_edge_floor: float = 0.001,
+) -> tuple[float, float]:
     """
     Returns (conviction_threshold, min_edge) tiered by time remaining.
     Closer to expiry → lower conviction needed (outcome more certain)
     AND lower required edge (less time for adverse moves).
+
+    floor: minimum conviction allowed (lower in paper mode via QUICK_RESOLUTION_CONVICTION_FLOOR)
+    min_edge_floor: minimum edge required (lower in paper mode via QUICK_RESOLUTION_MIN_EDGE)
     """
     if hours_left <= 0.5:          # <30 min
-        return (base_conviction, 0.006)
+        return (max(base_conviction, floor), min_edge_floor)
     elif hours_left <= 2.0:        # <2 hours
-        return (max(base_conviction - 0.06, 0.75), 0.010)
+        return (max(base_conviction - 0.06, floor), min_edge_floor)
     elif hours_left <= 6.0:        # <6 hours
-        return (max(base_conviction - 0.10, 0.72), 0.015)
+        return (max(base_conviction - 0.10, floor), min_edge_floor)
     elif hours_left <= 12.0:       # <12 hours
-        return (max(base_conviction - 0.14, 0.70), 0.020)
+        return (max(base_conviction - 0.14, floor), min_edge_floor)
     else:                          # 12-24 hours
-        return (max(base_conviction - 0.18, 0.68), 0.025)
+        return (max(base_conviction - 0.18, floor), min_edge_floor)
 
 
 def _detect_market_type(question: str) -> str:
@@ -108,6 +116,7 @@ class QuickResolutionStrategy(BaseStrategy):
         cfg = self.config.strategies
         max_hours = getattr(cfg, 'quick_resolution_max_hours', 24.0)
         min_conviction = cfg.quick_resolution_min_conviction
+        conviction_floor = getattr(cfg, 'quick_resolution_conviction_floor', 0.68)
         min_edge = cfg.quick_resolution_min_edge
         max_spend = cfg.quick_resolution_max_spend
 
@@ -170,7 +179,7 @@ class QuickResolutionStrategy(BaseStrategy):
             market_type = _detect_market_type(market.question)
 
             conviction_threshold, effective_min_edge = _tiered_conviction(
-                hours_left, min_conviction
+                hours_left, min_conviction, floor=conviction_floor, min_edge_floor=min_edge
             )
 
             sig = self._evaluate(

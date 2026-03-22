@@ -133,6 +133,8 @@ class StrategyConfig:
     quick_resolution_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_QUICK_RESOLUTION", True))
     quick_resolution_max_hours: float = field(default_factory=lambda: float(os.getenv("QUICK_RESOLUTION_MAX_HOURS", "24")))
     quick_resolution_min_conviction: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_CONVICTION", 0.78))
+    # Floor applied to tiered conviction reductions (set low in paper mode for more trades)
+    quick_resolution_conviction_floor: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_CONVICTION_FLOOR", 0.68))
     quick_resolution_min_edge: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_EDGE", 0.010))
     quick_resolution_min_volume: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_VOLUME", 100.0))
     quick_resolution_max_spend: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MAX_SPEND", 150.0))
