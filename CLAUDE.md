@@ -119,6 +119,15 @@ When adding new strategies or changing logic, always:
 3. Check `logs/portfolio_state.json` for per-strategy PnL
 4. Let the meta-agent run at least one analysis cycle before tuning further
 
+## System Architecture Notes (from production research)
+- **Gas costs are zero** — Polymarket's relayer pays all Polygon gas. Bot only needs USDC. POL balance irrelevant.
+- **Regime detection signal** — maker/taker flow inversion, not price patterns. Pre-2024 election: takers won (-2.9pp avg). Post-election: makers won (+2.5pp). Who is losing indicates regime.
+- **Rolling Kelly requires N≥200** for stable variance estimation. Window of 20–50 causes whipsaw on normal variance. Regime reduction (WR<45%) only fires at N≥30 minimum.
+- **`asyncio.gather()` creates zombie tasks** — exceptions don't cancel siblings; they run indefinitely holding connections/locks. Use `TaskGroup` for coordinated task groups; use `gather(return_exceptions=True)` only when per-task introspection is needed (strategy scans).
+- **Context engineering > prompting** — model behavior is primarily a function of context state, not instruction text. What's in the window and in what order matters more than wording.
+- **Meta-agent state safety** — server-side compaction is lossy. Never rely on compaction to preserve numerical state (positions, cost basis, fees). All critical state must be in `logs/portfolio_state.json` and explicitly injected into each new context.
+- **`dataclass(slots=True)` gotchas** — breaks if combined with `frozen=True` (kills custom `__getstate__`), closure methods, or `__init_subclass__` keyword params. Our usage (no frozen, no closures) is safe.
+
 ## Context on Strategy Logic
 
 | Strategy | Edge Source | Key Param |

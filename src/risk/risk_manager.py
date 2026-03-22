@@ -24,7 +24,7 @@ class RiskManager:
         self._category_exposure: dict[str, float] = {}
         # Rolling trade results for Kelly fraction adjustment (50-trade window)
         # 1 = win (pnl > 0), 0 = loss. Regime changes are reflected within 50 trades.
-        self._rolling_results: deque[int] = deque(maxlen=50)
+        self._rolling_results: deque[int] = deque(maxlen=200)  # 200-trade window (research: <100 causes whipsaw)
 
     def check_trade(
         self,
@@ -125,8 +125,8 @@ class RiskManager:
         # Rolling Kelly fraction: win_rate drives how aggressively we size
         # At 50% WR → 10% of base; at 75% WR → ~18%; at 100% WR → 25%
         win_rate = self.rolling_win_rate()
-        if win_rate < 0.45 and len(self._rolling_results) >= 10:
-            # Losing regime detected — size down to near-zero until conditions improve
+        if win_rate < 0.45 and len(self._rolling_results) >= 30:
+            # Losing regime detected (N>=30 required — smaller windows cause whipsaw on normal variance)
             kelly_fraction = 0.05
         else:
             # Quarter-Kelly: scale from 0.10 (neutral) to 0.25 (strong WR)
