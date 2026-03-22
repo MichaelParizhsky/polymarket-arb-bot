@@ -81,6 +81,27 @@ class CryptoShortStrategy(BaseStrategy):
         if not markets:
             return []
 
+        # Require live Binance data for snipe mode — without it we have no directional edge.
+        # Binance.com returns HTTP 451 from US-hosted servers; if feed is stale, halt snipes.
+        binance_feed = context.get("binance_feed")
+        _binance_live = False
+        if binance_feed is not None:
+            # Check if any price has been updated in the last 30 seconds
+            prices = getattr(binance_feed, "_prices", {})
+            now = time.time()
+            _binance_live = any(
+                now - getattr(p, "timestamp", 0) < 30
+                for p in prices.values()
+            )
+        if not _binance_live:
+            self.log(
+                "Binance feed stale or unavailable — snipe mode disabled (no directional edge without price reference)",
+                "warning",
+            )
+            # Dual-side arb is market-neutral and doesn't need Binance — allow it to proceed
+            # but set a flag to skip snipe entries
+        _snipe_allowed = _binance_live
+
         signals: list[Signal] = []
         cfg = self.config.strategies
         max_spend = getattr(cfg, "crypto_5m_max_spend", 100.0)
@@ -179,6 +200,8 @@ class CryptoShortStrategy(BaseStrategy):
                     continue  # don't also try snipe mode
 
             # ── Mode 2: End-of-window momentum snipe ─────────────────────
+            if not _snipe_allowed:
+                continue  # no Binance data = no directional edge = skip snipe
             if seconds_left <= SNIPE_WINDOW_SECONDS and yes_mid is not None:
                 if yes_mid >= SNIPE_MIN_CONVICTION:
                     net_edge = (1.0 - yes_ask) - TAKER_FEE

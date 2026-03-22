@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -52,7 +53,9 @@ class BinanceFeed:
     Subscribes to bookTicker streams for low-latency bid/ask updates.
     """
 
-    WS_BASE = "wss://stream.binance.com:9443/stream"
+    # Binance.com is geo-blocked (HTTP 451) from US-hosted servers (Railway).
+    # Default to Binance.US; override with BINANCE_WS_URL env var.
+    WS_BASE = os.getenv("BINANCE_WS_URL", "wss://stream.binance.us:9443/stream")
 
     def __init__(self, symbols: list[str] | None = None, reconnect_delay: int = 5) -> None:
         self._symbols = [s.lower() for s in (symbols or list(set(SYMBOL_MAP.values())))]
@@ -157,8 +160,9 @@ class BinanceFeed:
         symbols_upper = [s.upper() for s in self._symbols]
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
+                rest_base = os.getenv("BINANCE_REST_URL", "https://api.binance.us")
                 resp = await client.get(
-                    "https://api.binance.com/api/v3/ticker/bookTicker",
+                    f"{rest_base}/api/v3/ticker/bookTicker",
                 )
                 resp.raise_for_status()
                 for item in resp.json():

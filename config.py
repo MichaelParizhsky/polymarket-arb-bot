@@ -77,6 +77,8 @@ class RiskConfig:
         "cross_exchange": 500.0,
         "quick_resolution": 400.0,
         "futures_hedge": 200.0,
+        "crypto_5m": 150.0,  # tight budget — snipe mode fires blind without Binance data
+        "auto_close": 9999.0,  # auto-close is resolution, not a strategy — no budget cap
     })
 
 
