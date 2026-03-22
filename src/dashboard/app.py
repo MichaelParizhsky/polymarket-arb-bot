@@ -94,7 +94,8 @@ def reset_portfolio(x_api_key: str = Header(default="")):
     _portfolio._trade_counter = 0
     _portfolio.pnl_history = [{"t": time.time(), "value": starting, "pnl": 0.0}]
     _bot_start_time = time.time()
-    _portfolio.save_to_json()
+    _state_path = _os.getenv("STATE_FILE_PATH", "logs/portfolio_state.json")
+    _portfolio.save_to_json(_state_path)
     return {"ok": True, "starting_balance": starting}
 
 

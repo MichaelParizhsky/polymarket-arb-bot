@@ -222,7 +222,8 @@ class ArbBot:
                            binance=self.binance, kalshi=self._kalshi,
                            news_monitor=self._news_monitor,
                            hedge_manager=self._hedge_manager,
-                           ensemble_strategy=self._ensemble_strategy)
+                           ensemble_strategy=self._ensemble_strategy,
+                           state_loaded_from_file=state_loaded)
 
         # Start dashboard server in a dedicated thread with its own event loop.
         # This isolates the dashboard from the trading bot's asyncio loop so that
@@ -346,6 +347,8 @@ class ArbBot:
                     console.print(self.portfolio.summary(price_map))
                     self.portfolio.save_to_json(STATE_PATH)
                     last_summary_at = now
+                    # Keep pnl_history ticking even with no trades so the chart moves
+                    self.portfolio._update_metrics()
 
             except asyncio.CancelledError:
                 break
