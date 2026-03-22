@@ -12,3 +12,7 @@ name = "arb-bot"
 
 [services.variables]
 PORT = "5000"
+
+[[volumes]]
+mountPath = "/app/logs"
+name = "polybot-logs"

@@ -50,6 +50,8 @@ console = Console()
 # Ensure logs directory exists
 os.makedirs("logs", exist_ok=True)
 
+STATE_PATH = os.getenv("STATE_FILE_PATH", "logs/portfolio_state.json")
+
 
 class ArbBot:
     def __init__(self) -> None:
@@ -65,7 +67,17 @@ class ArbBot:
 
         # Core components
         self.portfolio = PaperPortfolio(starting_balance=self.config.starting_balance)
-        self.portfolio.load_from_json()  # restore state from previous run if available
+        # Restore state from previous run
+        state_loaded = self.portfolio.load_from_json(STATE_PATH)
+        if state_loaded:
+            bal = self.portfolio.usdc_balance
+            n_trades = len(self.portfolio.trades)
+            logger.info(f"State restored: balance=${bal:,.2f}, {n_trades} trades in history")
+        else:
+            logger.warning(
+                "No portfolio_state.json found — starting fresh. "
+                "If running on Railway, attach a Volume at /app/logs to persist state across deploys."
+            )
         self.risk = RiskManager(config=self.config, portfolio=self.portfolio)
         self.binance = BinanceFeed(reconnect_delay=self.config.binance_ws_reconnect_delay)
 
@@ -332,7 +344,7 @@ class ArbBot:
                 if now - last_summary_at > summary_interval:
                     price_map = self._build_price_map(context)
                     console.print(self.portfolio.summary(price_map))
-                    self.portfolio.save_to_json()
+                    self.portfolio.save_to_json(STATE_PATH)
                     last_summary_at = now
 
             except asyncio.CancelledError:
@@ -563,7 +575,7 @@ class ArbBot:
                         arb_executed.labels(strategy=sig.strategy).inc()
                         self._last_trade_time = time.time()
                         self._token_last_traded[sig.token_id] = time.time()
-                        self.portfolio.save_to_json()
+                        self.portfolio.save_to_json(STATE_PATH)
             elif sig.side == "BUY":
                 # Paper: simulate directly
                 market_question, outcome = self._find_market_info(sig.token_id, context)
@@ -592,7 +604,7 @@ class ArbBot:
                 arb_executed.labels(strategy=sig.strategy).inc()
                 self._last_trade_time = time.time()
                 self._token_last_traded[sig.token_id] = time.time()
-                self.portfolio.save_to_json()
+                self.portfolio.save_to_json(STATE_PATH)
 
             if trade and sig.side == "BUY" and self._hedge_manager is not None:
                 # Auto-hedge crypto BUY positions via Binance perpetual futures
@@ -719,7 +731,7 @@ class ArbBot:
 
             try:
                 # Use live portfolio data directly (no file dependency)
-                self.portfolio.save_to_json()
+                self.portfolio.save_to_json(STATE_PATH)
                 state_path = "logs/portfolio_state.json"
                 if not os.path.exists(state_path):
                     logger.info("Meta-agent: no portfolio state yet, skipping this cycle")

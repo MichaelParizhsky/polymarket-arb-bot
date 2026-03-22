@@ -43,6 +43,7 @@ _kalshi_ref = None
 _news_monitor_ref = None
 _hedge_manager_ref = None
 _ensemble_strategy_ref = None
+_state_loaded_from_file: bool = False
 
 # Lock protecting reads of the portfolio object from the dashboard thread
 _portfolio_lock = _threading.RLock()
@@ -61,9 +62,10 @@ def log_cross_exchange_decision(entry: dict) -> None:
 
 
 def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None,
-             news_monitor=None, hedge_manager=None, ensemble_strategy=None) -> None:
+             news_monitor=None, hedge_manager=None, ensemble_strategy=None,
+             state_loaded_from_file: bool = False) -> None:
     global _portfolio, _bot_start_time, _config, _risk, _binance_ref, _kalshi_ref
-    global _news_monitor_ref, _hedge_manager_ref, _ensemble_strategy_ref
+    global _news_monitor_ref, _hedge_manager_ref, _ensemble_strategy_ref, _state_loaded_from_file
     _portfolio = portfolio
     _bot_start_time = start_time
     _config = config
@@ -73,6 +75,7 @@ def register(portfolio, start_time: float, config=None, risk=None, binance=None,
     _news_monitor_ref = news_monitor
     _hedge_manager_ref = hedge_manager
     _ensemble_strategy_ref = ensemble_strategy
+    _state_loaded_from_file = state_loaded_from_file
 
 
 @app.post("/api/reset")
@@ -123,6 +126,7 @@ def status():
         fees_paid = round(p.total_fees_paid(), 2)
         win_rate = p.win_rate()
     trades_per_hour = round(n_trades / max(uptime / 3600, 0.01), 1)
+    fresh_start = (n_trades == 0 and uptime < 300)
     return {
         "status": "running",
         "paper_trading": _config.paper_trading if _config else True,
@@ -144,6 +148,8 @@ def status():
         "fees_paid": fees_paid,
         "win_rate": win_rate,
         "trades_per_hour": trades_per_hour,
+        "fresh_start": fresh_start,
+        "state_loaded_from_file": _state_loaded_from_file,
     }
 
 
@@ -1446,6 +1452,7 @@ async def api_compare():
                     strat_trades[t.strategy] = strat_trades.get(t.strategy, 0) + 1
         trades_per_hour = round(n_trades / max(uptime / 3600, 0.01), 1)
         bot_a.update({
+            "configured":       True,
             "balance":          bal,
             "starting_balance": starting_bal,
             "total_pnl":        total_pnl,
@@ -1460,14 +1467,18 @@ async def api_compare():
             "trades_per_hour":  trades_per_hour,
             "strategy_pnl":     strat_pnl,
             "strategy_trades":  strat_trades,
+            "fresh_start":      (n_trades == 0 and uptime < 300),
+            "uptime_seconds":   uptime,
+            "state_loaded_from_file": _state_loaded_from_file,
         })
     except Exception as e:
         bot_a["error"] = str(e)
 
     # Bot B data (remote)
-    bot_b = {"available": False, "name": "Bot B"}
+    bot_b = {"available": False, "configured": False, "name": "Bot B"}
     peer_url = _peer_bot_url
     if peer_url:
+        bot_b["configured"] = True
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r_status, r_pnl, r_strat_trades = await asyncio.gather(
@@ -1478,21 +1489,26 @@ async def api_compare():
                 )
             if not isinstance(r_status, Exception) and r_status.status_code == 200:
                 s = r_status.json()
+                b_uptime = s.get("uptime_seconds", 0)
+                b_trades = s.get("total_trades", 0)
                 bot_b.update({
-                    "available":        True,
+                    "available":             True,
                     # Use correct field names matching /api/status response
-                    "balance":          s.get("balance", 0),
-                    "starting_balance": s.get("starting_balance", 0),
-                    "total_pnl":        s.get("pnl", 0),
-                    "pnl_pct":          s.get("pnl_pct", 0),
-                    "open_positions":   s.get("open_positions", 0),
-                    "closed_positions": s.get("closed_positions", 0),
-                    "total_trades":     s.get("total_trades", 0),
-                    "exposure":         s.get("exposure", 0),
-                    "fees_paid":        s.get("fees_paid", 0),
-                    "win_rate":         s.get("win_rate", 0),
-                    "realized_pnl":     s.get("realized_pnl", 0),
-                    "trades_per_hour":  s.get("trades_per_hour", 0),
+                    "balance":               s.get("balance", 0),
+                    "starting_balance":      s.get("starting_balance", 0),
+                    "total_pnl":             s.get("pnl", 0),
+                    "pnl_pct":               s.get("pnl_pct", 0),
+                    "open_positions":        s.get("open_positions", 0),
+                    "closed_positions":      s.get("closed_positions", 0),
+                    "total_trades":          b_trades,
+                    "exposure":              s.get("exposure", 0),
+                    "fees_paid":             s.get("fees_paid", 0),
+                    "win_rate":              s.get("win_rate", 0),
+                    "realized_pnl":          s.get("realized_pnl", 0),
+                    "trades_per_hour":       s.get("trades_per_hour", 0),
+                    "uptime_seconds":        b_uptime,
+                    "fresh_start":           s.get("fresh_start", b_trades == 0 and b_uptime < 300),
+                    "state_loaded_from_file": s.get("state_loaded_from_file", False),
                 })
                 # Grab bot name from peer if available
                 bot_b["name"] = s.get("bot_name", "Bot B")
@@ -1503,6 +1519,7 @@ async def api_compare():
         except Exception as e:
             bot_b["error"] = str(e)
     else:
+        bot_b["configured"] = False
         bot_b["error"] = "PEER_BOT_URL not set"
 
     return {"bot_a": bot_a, "bot_b": bot_b, "ts": time.time()}
@@ -2309,7 +2326,11 @@ tr:hover td{background:#181818}
       </div>
       <!-- Bot B card -->
       <div style="background:#111;border:1px solid #1a1a2e;border-top:3px solid #7986cb;border-radius:8px;padding:16px">
-        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:#7986cb;margin-bottom:12px" id="compare-b-name">Bot B</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:#7986cb" id="compare-b-name">Bot B</div>
+          <span id="compare-b-fresh-badge" style="display:none;font-size:.65rem;background:#1a1a00;color:#ffd600;border:1px solid #ffd600;border-radius:4px;padding:1px 6px">Just started</span>
+          <span id="compare-b-noconfig-badge" style="display:none;font-size:.65rem;background:#1a0000;color:#ff5252;border:1px solid #ff5252;border-radius:4px;padding:1px 6px">Not configured</span>
+        </div>
         <div style="display:flex;flex-direction:column;gap:8px">
           <div style="display:flex;justify-content:space-between;font-size:.78rem">
             <span style="color:#666">Balance</span>
@@ -3907,10 +3928,26 @@ async function fetchCompare(){
     // Bot B card + warning
     const warn=$('compare-b-warning');
     const setup=$('compare-setup');
-    if(!b.available){
+    const freshBadge=$('compare-b-fresh-badge');
+    const noconfigBadge=$('compare-b-noconfig-badge');
+    if(!b.configured){
+      // PEER_BOT_URL not set — show not-configured state
+      noconfigBadge.style.display='inline';
+      freshBadge.style.display='none';
       warn.style.display='block';
-      warn.textContent='Bot B unavailable: '+(b.error||'unknown error');
-      setup.style.display=(b.error||'').includes('PEER_BOT_URL not set')?'block':'none';
+      warn.textContent='Bot B not configured — set PEER_BOT_URL env var and restart';
+      setup.style.display='block';
+      ['bal','pnl','realized','roi','wr','fees','exp','pos','trades','tph'].forEach(f=>{
+        const el=$(`compare-b-${f}`);
+        if(el) el.textContent='--';
+      });
+    } else if(!b.available){
+      // Configured but unreachable
+      noconfigBadge.style.display='none';
+      freshBadge.style.display='none';
+      warn.style.display='block';
+      warn.textContent='Bot B unreachable: '+(b.error||'connection failed');
+      setup.style.display='none';
       ['bal','pnl','realized','roi','wr','fees','exp','pos','trades','tph'].forEach(f=>{
         const el=$(`compare-b-${f}`);
         if(el) el.textContent='--';
@@ -3918,6 +3955,8 @@ async function fetchCompare(){
     } else {
       warn.style.display='none';
       setup.style.display='none';
+      noconfigBadge.style.display='none';
+      freshBadge.style.display=b.fresh_start?'inline':'none';
       _fillCompareCard('b', b);
     }
 
