@@ -127,8 +127,10 @@ class QuickResolutionStrategy(BaseStrategy):
         skipped_no_edge = 0
         skipped_no_volume = 0
 
-        # Prune stale entries (markets long resolved — keep 12h window)
-        cutoff = time.time() - 12 * 3600
+        # Prune stale entries. Default 12h window; lower via QUICK_RESOLUTION_ENTERED_HOURS
+        # for paper mode to allow re-entry (e.g. 0.5 = 30 min cooldown per market).
+        entered_hours = getattr(cfg, 'quick_resolution_entered_hours', 12.0)
+        cutoff = time.time() - entered_hours * 3600
         expired = [
             cid for cid, (_, entered_at) in self._entered.items()
             if entered_at < cutoff

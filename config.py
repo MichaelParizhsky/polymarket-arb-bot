@@ -138,6 +138,8 @@ class StrategyConfig:
     quick_resolution_min_edge: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_EDGE", 0.010))
     quick_resolution_min_volume: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MIN_VOLUME", 100.0))
     quick_resolution_max_spend: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_MAX_SPEND", 150.0))
+    # Re-entry cooldown per market (hours). Default 12h; set to 0.5 in paper mode for frequent re-entry.
+    quick_resolution_entered_hours: float = field(default_factory=lambda: _float("QUICK_RESOLUTION_ENTERED_HOURS", 12.0))
 
     # Crypto 5m/15m short market strategy
     crypto_5m_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_CRYPTO_5M", True))
