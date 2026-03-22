@@ -68,8 +68,8 @@ class ArbBot:
         # Core components
         self.portfolio = PaperPortfolio(starting_balance=self.config.starting_balance)
         # Restore state from previous run
-        state_loaded = self.portfolio.load_from_json(STATE_PATH)
-        if state_loaded:
+        self._state_loaded = self.portfolio.load_from_json(STATE_PATH)
+        if self._state_loaded:
             bal = self.portfolio.usdc_balance
             n_trades = len(self.portfolio.trades)
             logger.info(f"State restored: balance=${bal:,.2f}, {n_trades} trades in history")
@@ -223,7 +223,7 @@ class ArbBot:
                            news_monitor=self._news_monitor,
                            hedge_manager=self._hedge_manager,
                            ensemble_strategy=self._ensemble_strategy,
-                           state_loaded_from_file=state_loaded)
+                           state_loaded_from_file=self._state_loaded)
 
         # Start dashboard server in a dedicated thread with its own event loop.
         # This isolates the dashboard from the trading bot's asyncio loop so that
