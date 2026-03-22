@@ -244,6 +244,14 @@ class QuickResolutionStrategy(BaseStrategy):
         # --- YES side ---
         if yes_mid >= min_conviction:
             best_ask = yes_book.best_ask
+            if best_ask is None:
+                logger.debug(f"[QR debug] YES conv {yes_mid:.3f} but ask=None: {market.question[:50]}")
+            elif best_ask >= 1.0:
+                logger.debug(f"[QR debug] YES conv {yes_mid:.3f} but ask={best_ask:.4f}>=1.0: {market.question[:50]}")
+            else:
+                fee = calc_taker_fee(best_ask, market_type)
+                net_edge = (1.0 - best_ask) - fee
+                logger.debug(f"[QR debug] YES conv {yes_mid:.3f} ask={best_ask:.4f} edge={net_edge:.4f} min={min_edge:.4f}: {market.question[:50]}")
             if best_ask is not None and best_ask < 1.0:
                 fee = calc_taker_fee(best_ask, market_type)
                 net_edge = (1.0 - best_ask) - fee
