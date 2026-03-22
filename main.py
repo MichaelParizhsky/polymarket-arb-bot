@@ -548,7 +548,10 @@ class ArbBot:
                 continue
 
             # Execute via portfolio (paper) or live order (live)
-            contracts = sig.size_usdc / max(sig.price, 0.001)
+            # Polymarket CLOB minimum order = 5 shares; round price to 2dp tick
+            _price = round(sig.price, 2)
+            contracts = sig.size_usdc / max(_price, 0.001)
+            contracts = max(contracts, 5.0)  # enforce CLOB minimum of 5 shares
             trade = None
 
             if not self.paper and sig.side == "BUY":
@@ -556,7 +559,7 @@ class ArbBot:
                 result = await self.poly.place_limit_order(
                     token_id=sig.token_id,
                     side=sig.side,
-                    price=sig.price,
+                    price=_price,
                     size=contracts,
                 )
                 if result and result.status == "FILLED":
@@ -592,7 +595,7 @@ class ArbBot:
                 trade = self.portfolio.buy(
                     token_id=sig.token_id,
                     contracts=contracts,
-                    price=sig.price,
+                    price=_price,
                     strategy=sig.strategy,
                     market_question=market_question,
                     outcome=outcome,
@@ -602,7 +605,7 @@ class ArbBot:
                 trade = self.portfolio.sell(
                     token_id=sig.token_id,
                     contracts=contracts,
-                    price=sig.price,
+                    price=_price,
                     strategy=sig.strategy,
                     notes=sig.notes,
                 )

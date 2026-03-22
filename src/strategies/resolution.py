@@ -49,7 +49,7 @@ HOURS_THRESHOLD_INNER = 12.0   # Tier 2 only within 12h
 HOURS_THRESHOLD_ENDGAME = 4.0  # Tier 1 only within 4h (alias for ENDGAME_HOURS)
 
 # Market quality filters — only trade resolution strategy on liquid markets
-MIN_VOLUME_24H = 500.0  # Lowered from 1000 — sports markets have $200-800 daily volume
+MIN_VOLUME_24H = 50.0  # Lowered to 50 — sports markets often have $50-500 daily volume
 MIN_LIQUIDITY_DEPTH = 100.0  # USDC at best ask required
 
 # Category-specific edge requirements (higher for noisy categories)
