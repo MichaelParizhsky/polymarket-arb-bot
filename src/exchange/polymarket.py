@@ -368,6 +368,9 @@ class PolymarketClient:
         markets: list[Market] = []
         seen: set[str] = set()
 
+        end_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_max = (now + _dt.timedelta(hours=max_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         for sport, series_id in self.SPORTS_SERIES_IDS.items():
             try:
                 resp = await self._http.get(
@@ -377,6 +380,8 @@ class PolymarketClient:
                         "active": "true",
                         "closed": "false",
                         "limit": 200,
+                        "end_date_min": end_min,
+                        "end_date_max": end_max,
                     },
                     timeout=10,
                 )

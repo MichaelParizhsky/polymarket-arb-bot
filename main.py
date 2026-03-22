@@ -396,6 +396,16 @@ class ArbBot:
         remaining_slots = max(0, max_markets - len(expiring_in_list))
         markets_sorted = expiring_in_list + general_sorted[:remaining_slots]
 
+        # Merge sports markets (via series_id events API) — not in /markets endpoint
+        try:
+            sports_markets = await self.poly.get_sports_markets(max_hours=48.0)
+            existing_ids = {m.condition_id for m in markets_sorted}
+            new_sports = [m for m in sports_markets if m.condition_id not in existing_ids]
+            markets_sorted = new_sports + markets_sorted
+            logger.info(f"Added {len(new_sports)} sports markets to context")
+        except Exception as exc:
+            logger.warning(f"get_sports_markets failed: {exc}")
+
         # Fetch crypto short (5m/15m) markets if strategy is enabled
         crypto_short_markets = []
         if getattr(self.config.strategies, 'crypto_5m_enabled', False):

@@ -105,25 +105,69 @@ def _calc_fee(price: float, market_type: str = "standard") -> float:
     return 0.002
 
 
-async def fetch_markets(client: httpx.AsyncClient, hours: float) -> list[dict]:
-    """Fetch markets sorted by soonest expiry."""
-    params = {"active": "true", "closed": "false", "limit": "500"}
-    resp = await client.get(f"{GAMMA_BASE}/markets", params=params, timeout=15)
-    resp.raise_for_status()
-    raw = resp.json()
-    markets = raw if isinstance(raw, list) else raw.get("data", [])
+SPORTS_SERIES_IDS = {
+    "nba": 10345, "nhl": 10346, "mls": 10189, "nfl": 10187,
+    "bundesliga": 10194, "cfb": 10210, "cbb": 10470,
+    "norway": 10362, "brazil": 10359, "japan": 10360,
+}
 
+
+async def fetch_markets(client: httpx.AsyncClient, hours: float) -> list[dict]:
+    """Fetch markets sorted by soonest expiry — includes sports via events API."""
     now = datetime.datetime.now(datetime.timezone.utc)
-    out = []
-    for m in markets:
-        end_iso = m.get("endDateIso") or m.get("endDate", "")
+    end_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_max = (now + datetime.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(m: dict, category: str = "") -> None:
+        cid = m.get("conditionId") or m.get("condition_id") or m.get("id", "")
+        if cid in seen:
+            return
+        end_iso = m.get("endDate") or m.get("endDateIso", "")
         hl = _hours_left(end_iso)
         if hl is None or hl <= 0 or hl > hours:
-            continue
+            return
         m["_hours_left"] = hl
         m["_volume"] = float(m.get("volumeNum") or m.get("volume") or 0)
-        m["_category"] = (m.get("category") or "").lower()
+        m["_category"] = category or (m.get("category") or "").lower()
         out.append(m)
+        seen.add(cid)
+
+    # 1. Standard /markets with date filter
+    try:
+        resp = await client.get(
+            f"{GAMMA_BASE}/markets",
+            params={"active": "true", "closed": "false", "limit": "500",
+                    "end_date_min": end_min, "end_date_max": end_max},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        for m in (raw if isinstance(raw, list) else raw.get("data", [])):
+            _add(m)
+    except Exception as e:
+        print(f"{RED}  /markets fetch error: {e}{RESET}")
+
+    # 2. Sports markets via events API
+    for sport, sid in SPORTS_SERIES_IDS.items():
+        try:
+            resp = await client.get(
+                f"{GAMMA_BASE}/events",
+                params={"series_id": str(sid), "active": "true", "limit": "200",
+                        "end_date_min": end_min, "end_date_max": end_max},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            events = data if isinstance(data, list) else data.get("data", [])
+            for event in events:
+                for m in event.get("markets", []):
+                    _add(m, category=sport)
+        except Exception:
+            pass
 
     out.sort(key=lambda m: m["_hours_left"])
     return out
@@ -206,12 +250,13 @@ async def diagnose(hours: float = 24.0, top: int = 40, verbose: bool = False):
                 try: outcomes = json.loads(outcomes)
                 except: outcomes = ["Yes", "No"]
 
+            # Use first token as the "YES" side (works for binary and sports markets)
             yes_tid = next(
                 (str(tid) for tid, out in zip(tokens_raw, outcomes) if str(out).lower() == "yes"),
-                None
+                str(tokens_raw[0]) if tokens_raw else None
             )
 
-            # Fetch orderbook for YES token
+            # Fetch orderbook for YES/first token
             yes_ob = None
             mid_val = None
             best_ask_val = None

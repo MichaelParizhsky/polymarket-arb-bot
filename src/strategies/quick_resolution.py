@@ -152,10 +152,12 @@ class QuickResolutionStrategy(BaseStrategy):
                 continue
 
             yes_token = next(
-                (t for t in market.tokens if t.outcome.lower() == "yes"), None
+                (t for t in market.tokens if t.outcome.lower() == "yes"),
+                market.tokens[0] if market.tokens else None,
             )
             no_token = next(
-                (t for t in market.tokens if t.outcome.lower() == "no"), None
+                (t for t in market.tokens if t.outcome.lower() == "no"),
+                market.tokens[1] if len(market.tokens) > 1 else None,
             )
             if not yes_token or not no_token:
                 continue
