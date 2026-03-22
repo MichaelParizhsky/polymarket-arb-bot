@@ -497,9 +497,9 @@ class ArbBot:
         if self.config.strategies.use_ws_orderbook and self._ws_feed:
             for tid in token_ids:
                 ob = self._ws_feed.get_orderbook(tid)
-                if ob and not self._ws_feed.is_stale(tid, max_age=10.0):
+                if ob and not self._ws_feed.is_stale(tid, max_age=float("inf")):
                     orderbooks[tid] = ob
-            # REST fill for any missing or stale
+            # REST fill only for tokens never bootstrapped by WS (last_update==0)
             missing = [tid for tid in token_ids if tid not in orderbooks]
         else:
             missing = token_ids
