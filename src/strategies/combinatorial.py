@@ -137,8 +137,14 @@ class CombinatorialStrategy(BaseStrategy):
         # Build a list of (market, yes_token_id, no_token_id, yes_mid, no_mid, price_level)
         market_info = []
         for m in markets:
-            yes_tok = next((t for t in m.tokens if t.outcome.lower() == "yes"), None)
-            no_tok = next((t for t in m.tokens if t.outcome.lower() == "no"), None)
+            yes_tok = next(
+                (t for t in m.tokens if t.outcome.lower() == "yes"),
+                m.tokens[0] if m.tokens else None,
+            )
+            no_tok = next(
+                (t for t in m.tokens if t.outcome.lower() == "no"),
+                m.tokens[1] if len(m.tokens) > 1 else None,
+            )
             if not yes_tok or not no_tok:
                 continue
             yes_book = orderbooks.get(yes_tok.token_id)

@@ -47,10 +47,12 @@ class MarketMakingStrategy(BaseStrategy):
         # Select eligible markets
         eligible = self._select_markets(markets, orderbooks)
         eligible_ids = {
-            t.token_id
+            next(
+                (t.token_id for t in m.tokens if t.outcome.lower() == "yes"),
+                m.tokens[0].token_id if m.tokens else None,
+            )
             for m in eligible
-            for t in m.tokens if t.outcome.lower() == "yes"
-        }
+        } - {None}
 
         # Prune stale entries for markets no longer being made
         stale = [tid for tid in self._last_refresh if tid not in eligible_ids]
@@ -59,7 +61,10 @@ class MarketMakingStrategy(BaseStrategy):
             self._quotes.pop(tid, None)
 
         for market in eligible:
-            yes_tok = next((t for t in market.tokens if t.outcome.lower() == "yes"), None)
+            yes_tok = next(
+                (t for t in market.tokens if t.outcome.lower() == "yes"),
+                market.tokens[0] if market.tokens else None,
+            )
             if not yes_tok:
                 continue
 
@@ -197,7 +202,10 @@ class MarketMakingStrategy(BaseStrategy):
                 continue
             if m.volume < MIN_VOLUME_FOR_MM:
                 continue
-            yes_tok = next((t for t in m.tokens if t.outcome.lower() == "yes"), None)
+            yes_tok = next(
+                (t for t in m.tokens if t.outcome.lower() == "yes"),
+                m.tokens[0] if m.tokens else None,
+            )
             if not yes_tok:
                 continue
             book = orderbooks.get(yes_tok.token_id)

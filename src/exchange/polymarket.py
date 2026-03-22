@@ -183,7 +183,7 @@ class PolymarketClient:
                 tokens=tokens,
                 active=raw.get("active", False),
                 closed=raw.get("closed", True),
-                end_date_iso=raw.get("endDateIso") or raw.get("endDate", ""),
+                end_date_iso=raw.get("endDate") or raw.get("endDateIso", ""),
                 tags=[cat] if cat else [],
                 volume=float(raw.get("volumeNum") or raw.get("volume") or 0),
                 liquidity=float(raw.get("liquidityNum") or raw.get("liquidity") or 0),

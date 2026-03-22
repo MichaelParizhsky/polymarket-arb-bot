@@ -43,11 +43,15 @@ class RebalancingStrategy(BaseStrategy):
         if len(market.tokens) < 2:
             return []
 
-        # Find YES and NO tokens
-        yes_token = next((t for t in market.tokens if t.outcome.lower() == "yes"), None)
-        no_token = next((t for t in market.tokens if t.outcome.lower() == "no"), None)
-        if not yes_token or not no_token:
-            return []
+        # Find YES and NO tokens (fall back to first/second for sports markets with team name outcomes)
+        yes_token = next(
+            (t for t in market.tokens if t.outcome.lower() == "yes"),
+            market.tokens[0],
+        )
+        no_token = next(
+            (t for t in market.tokens if t.outcome.lower() == "no"),
+            market.tokens[1],
+        )
 
         # Get orderbooks
         orderbooks: dict[str, Orderbook] = context.get("orderbooks", {})
