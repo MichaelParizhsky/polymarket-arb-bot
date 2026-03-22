@@ -488,14 +488,18 @@ class ArbBot:
         if self._ws_feed:
             self._ws_feed.subscribe(token_ids)
 
-        # Use WebSocket cache if available, fall back to REST
+        # Use WebSocket cache if available, fall back to REST.
+        # Only use WS data that has actually been populated (not stale/empty).
+        # subscribe() pre-creates empty _MutableOrderbook entries — these must
+        # NOT be treated as valid; otherwise REST fills are skipped and strategies
+        # see all-None orderbooks.
         orderbooks: dict[str, Any] = {}
         if self.config.strategies.use_ws_orderbook and self._ws_feed:
             for tid in token_ids:
                 ob = self._ws_feed.get_orderbook(tid)
-                if ob:
+                if ob and not self._ws_feed.is_stale(tid, max_age=10.0):
                     orderbooks[tid] = ob
-            # REST fill for any missing
+            # REST fill for any missing or stale
             missing = [tid for tid in token_ids if tid not in orderbooks]
         else:
             missing = token_ids

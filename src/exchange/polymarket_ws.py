@@ -155,6 +155,10 @@ class PolymarketWSFeed:
         self._ws_task: asyncio.Task | None = None
         # Lock protects _books during concurrent read/write
         self._lock = asyncio.Lock()
+        # Live reference to active WS connection for dynamic re-subscription
+        self._active_ws: Any | None = None
+        # Queue of token_id batches to subscribe to on the active connection
+        self._pending_sub: asyncio.Queue = asyncio.Queue()
 
     # ---------------------------------------------------------------- #
     #  Public API                                                        #
@@ -163,17 +167,16 @@ class PolymarketWSFeed:
     def subscribe(self, token_ids: list[str]) -> None:
         """
         Register token IDs to subscribe to on (re-)connect.
-        Can be called before or after start(); changes take effect on the
-        next connection attempt.
+        Can be called before or after start(); if a connection is active,
+        the new tokens are also sent immediately on the live socket.
         """
         new = [tid for tid in token_ids if tid not in self._token_ids]
         self._token_ids.extend(new)
-        # Pre-create empty mutable books so callers don't get None until
-        # the first snapshot arrives.
-        for tid in new:
-            if tid not in self._books:
-                self._books[tid] = _MutableOrderbook(tid)
+        # Do NOT pre-create empty books — empty books are indistinguishable
+        # from real data and will cause REST fallback to be skipped.
         if new:
+            # Push to live connection if active; consumed by _drain_pending_subs
+            self._pending_sub.put_nowait(new)
             logger.debug(
                 f"[PolymarketWS] Queued {len(new)} new token subscriptions "
                 f"(total={len(self._token_ids)})"
@@ -279,18 +282,53 @@ class PolymarketWSFeed:
             ping_timeout=PING_TIMEOUT,
             open_timeout=15,
         ) as ws:
+            self._active_ws = ws
             logger.info(
                 f"[PolymarketWS] Connected. Subscribing to "
                 f"{len(self._token_ids)} token(s)."
             )
             await self._send_subscription(ws)
-            async for raw in ws:
-                if not self._running:
-                    break
-                try:
-                    await self._handle_raw(raw)
-                except Exception as exc:
-                    logger.debug(f"[PolymarketWS] Message handling error: {exc}")
+            # Concurrently: drain pending subscriptions + receive messages
+            await asyncio.gather(
+                self._drain_pending_subs(ws),
+                self._receive_loop(ws),
+                return_exceptions=True,
+            )
+            self._active_ws = None
+
+    async def _receive_loop(self, ws: Any) -> None:
+        """Read and dispatch messages from the active connection."""
+        async for raw in ws:
+            if not self._running:
+                break
+            try:
+                await self._handle_raw(raw)
+            except Exception as exc:
+                logger.debug(f"[PolymarketWS] Message handling error: {exc}")
+
+    async def _drain_pending_subs(self, ws: Any) -> None:
+        """
+        Send subscription messages for any token_ids queued after connect.
+        Runs concurrently with _receive_loop; exits when WS closes.
+        """
+        while self._running:
+            try:
+                new_tokens = await asyncio.wait_for(
+                    self._pending_sub.get(), timeout=1.0
+                )
+                msg = json.dumps({
+                    "auth": {},
+                    "type": "market",
+                    "assets_ids": new_tokens,
+                })
+                await ws.send(msg)
+                logger.debug(
+                    f"[PolymarketWS] Live-subscribed {len(new_tokens)} new tokens"
+                )
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
 
     async def _send_subscription(self, ws: Any) -> None:
         """Send the Polymarket market subscription message."""
