@@ -22,7 +22,9 @@ from src.utils.metrics import mm_quotes_placed, mm_inventory
 
 
 # Minimum volume (USDC) for market making eligibility
-MIN_VOLUME_FOR_MM = 50_000
+# Configurable via env var MM_MIN_VOLUME (default 50k for live, lower in paper mode)
+import os as _os
+MIN_VOLUME_FOR_MM = float(_os.getenv("MM_MIN_VOLUME", "50000"))
 
 
 class MarketMakingStrategy(BaseStrategy):
