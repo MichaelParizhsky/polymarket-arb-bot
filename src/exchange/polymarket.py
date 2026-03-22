@@ -18,7 +18,7 @@ from src.utils.logger import logger
 from src.utils.metrics import api_latency
 
 
-@dataclass
+@dataclass(slots=True)
 class Token:
     token_id: str
     outcome: str  # "Yes" or "No"
@@ -38,7 +38,7 @@ class Market:
     category: str = ""  # e.g. "sports", "crypto", "politics"
 
 
-@dataclass
+@dataclass(slots=True)
 class OrderbookLevel:
     price: float
     size: float
@@ -120,9 +120,16 @@ class PolymarketClient:
         self._expiring_cache_ts: float = 0.0
 
     async def __aenter__(self) -> "PolymarketClient":
+        # Connection pooling: reuse connections (avoids TLS handshake on every request)
+        # limits.max_connections=100 allows burst; keepalive_expiry=30s recycles idle connections
         self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0),
+            timeout=httpx.Timeout(10.0, connect=3.0),
             headers={"User-Agent": "polymarket-arb-bot/1.0"},
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=30,
+            ),
         )
         # Pre-build the ClobClient once for the session to avoid per-order overhead
         if not self.paper_trading and self.config.private_key:

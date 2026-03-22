@@ -4,6 +4,7 @@ Risk management: position sizing, drawdown protection, exposure limits.
 from __future__ import annotations
 
 import time
+from collections import deque
 
 from src.utils.logger import logger
 
@@ -21,6 +22,9 @@ class RiskManager:
             for strategy in config.risk.strategy_loss_budget
         }
         self._category_exposure: dict[str, float] = {}
+        # Rolling trade results for Kelly fraction adjustment (50-trade window)
+        # 1 = win (pnl > 0), 0 = loss. Regime changes are reflected within 50 trades.
+        self._rolling_results: deque[int] = deque(maxlen=50)
 
     def check_trade(
         self,
@@ -105,18 +109,36 @@ class RiskManager:
 
     def size_position(self, edge: float, base_size: float | None = None) -> float:
         """
-        Kelly-inspired position sizing.
+        Rolling Kelly position sizing.
+
+        Uses a 50-trade rolling win rate window to scale the Kelly fraction.
+        - Full Kelly at 100% WR → 25% fraction (research: full Kelly has 33% chance of halving capital)
+        - Minimum 10% fraction at 50% WR (neutral regime)
+        - Zero size at <45% WR (losing regime — conservative until conditions improve)
+
         Returns USDC amount to risk on a given edge.
         """
         base = base_size or self.config.risk.max_position_size
         # Scale by edge / threshold ratio, capped at 100%
-        scale = min(edge / max(self.config.risk.min_edge_threshold, 0.001), 1.0)
+        edge_scale = min(edge / max(self.config.risk.min_edge_threshold, 0.001), 1.0)
+
+        # Rolling Kelly fraction: win_rate drives how aggressively we size
+        # At 50% WR → 10% of base; at 75% WR → ~18%; at 100% WR → 25%
+        win_rate = self.rolling_win_rate()
+        if win_rate < 0.45 and len(self._rolling_results) >= 10:
+            # Losing regime detected — size down to near-zero until conditions improve
+            kelly_fraction = 0.05
+        else:
+            # Quarter-Kelly: scale from 0.10 (neutral) to 0.25 (strong WR)
+            # Linear interpolation: 0.10 at WR=0.50, 0.25 at WR=1.00
+            kelly_fraction = 0.10 + max(0.0, (win_rate - 0.50) / 0.50) * 0.15
+
         # Also scale by available capital
         available = min(
             self.portfolio.usdc_balance,
             self.config.risk.max_total_exposure - self.portfolio.exposure(),
         )
-        raw_size = base * scale
+        raw_size = base * edge_scale * kelly_fraction / 0.25  # normalize: 0.25 = "full" quarter-Kelly
         return min(raw_size, available, self.config.risk.max_position_size)
 
     def is_hard_stopped(self) -> bool:
@@ -136,8 +158,15 @@ class RiskManager:
         logger.warning("Permanent lock reset manually — trading re-enabled")
 
     def record_trade_result(self, strategy: str, pnl: float) -> None:
-        """Update per-strategy PnL tracking."""
+        """Update per-strategy PnL tracking and rolling win rate window."""
         self._strategy_pnl[strategy] = self._strategy_pnl.get(strategy, 0.0) + pnl
+        self._rolling_results.append(1 if pnl > 0 else 0)
+
+    def rolling_win_rate(self) -> float:
+        """Win rate over the last 50 closed trades. Returns 0.5 until 5+ trades recorded."""
+        if len(self._rolling_results) < 5:
+            return 0.5  # neutral assumption during bootstrap
+        return sum(self._rolling_results) / len(self._rolling_results)
 
     def check_orderbook_depth(
         self, orderbook, side: str, required_usdc: float

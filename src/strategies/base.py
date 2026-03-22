@@ -8,7 +8,7 @@ from typing import Any
 from src.utils.logger import logger
 
 
-@dataclass
+@dataclass(slots=True)
 class Signal:
     strategy: str
     token_id: str

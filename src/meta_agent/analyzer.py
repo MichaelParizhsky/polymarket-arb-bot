@@ -49,10 +49,21 @@ class StrategyMetrics:
     last_trade_ts: float = 0.0
 
     def to_dict(self) -> dict:
+        # Statistical significance tier: informs the meta-agent how much to trust the metrics.
+        # <10 trades = noise; 10-29 = tentative; 30+ = statistically meaningful.
+        if self.total_trades >= 30:
+            sig = "significant"
+        elif self.total_trades >= 10:
+            sig = "tentative"
+        else:
+            sig = "insufficient"
+        roi_pct = (self.total_pnl / self.total_volume * 100) if self.total_volume > 0 else 0.0
         return {
             "name": self.name,
             "total_trades": self.total_trades,
+            "statistical_significance": sig,
             "total_pnl_usdc": round(self.total_pnl, 4),
+            "roi_pct": round(roi_pct, 3),
             "total_volume_usdc": round(self.total_volume, 2),
             "total_fees_usdc": round(self.total_fees, 4),
             "avg_trade_size_usdc": round(self.avg_trade_size, 2),
