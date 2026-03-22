@@ -78,6 +78,39 @@ class ArbBot:
                 "No portfolio_state.json found — starting fresh. "
                 "If running on Railway, attach a Volume at /app/logs to persist state across deploys."
             )
+
+        # One-shot strategy reset: strip trades/positions for listed strategies on startup.
+        # Set env var RESET_STRATEGIES=crypto_5m (comma-separated) then redeploy.
+        # Remove the env var after the reset fires to avoid wiping state on subsequent restarts.
+        _reset_strategies = [
+            s.strip() for s in os.getenv("RESET_STRATEGIES", "").split(",") if s.strip()
+        ]
+        if _reset_strategies and self._state_loaded:
+            for _strat in _reset_strategies:
+                before = len(self.portfolio.trades)
+                self.portfolio.trades = [
+                    t for t in self.portfolio.trades if t.strategy != _strat
+                ]
+                self.portfolio.closed_positions = [
+                    p for p in self.portfolio.closed_positions
+                    if p.get("strategy") != _strat
+                ]
+                removed_positions = {
+                    k for k, v in self.portfolio.positions.items()
+                    if v.strategy == _strat
+                }
+                for k in removed_positions:
+                    del self.portfolio.positions[k]
+                after = len(self.portfolio.trades)
+                logger.warning(
+                    f"RESET_STRATEGIES: cleared {before - after} trades and "
+                    f"{len(removed_positions)} positions for '{_strat}'"
+                )
+            self.portfolio.save_to_json(STATE_PATH)
+            logger.warning(
+                f"RESET_STRATEGIES complete. Remove the RESET_STRATEGIES env var to prevent "
+                f"re-firing on next restart."
+            )
         self.risk = RiskManager(config=self.config, portfolio=self.portfolio)
         self.binance = BinanceFeed(reconnect_delay=self.config.binance_ws_reconnect_delay)
 
