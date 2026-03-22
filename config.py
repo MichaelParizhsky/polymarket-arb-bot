@@ -62,8 +62,8 @@ class RiskConfig:
     max_total_exposure: float = field(default_factory=lambda: _float("MAX_TOTAL_EXPOSURE", 5000.0))
     min_edge_threshold: float = field(default_factory=lambda: _float("MIN_EDGE_THRESHOLD", 0.02))
     max_slippage: float = field(default_factory=lambda: _float("MAX_SLIPPAGE", 0.005))
-    max_drawdown_pct: float = 0.15  # Stop trading at 15% drawdown
-    max_open_orders: int = 20
+    max_drawdown_pct: float = field(default_factory=lambda: _float("MAX_DRAWDOWN_PCT", 0.15))
+    max_open_orders: int = field(default_factory=lambda: _int("MAX_OPEN_ORDERS", 20))
     min_trade_interval: int = field(default_factory=lambda: _int("MIN_TRADE_INTERVAL", 15))   # seconds between any two trades (Polymarket allows 3500 orders/10s)
     token_cooldown: int = field(default_factory=lambda: _int("TOKEN_COOLDOWN", 120))           # seconds before re-trading same token
     hard_stop_max_count: int = 3

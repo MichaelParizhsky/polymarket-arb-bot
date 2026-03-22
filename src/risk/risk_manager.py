@@ -3,6 +3,7 @@ Risk management: position sizing, drawdown protection, exposure limits.
 """
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 
@@ -77,13 +78,19 @@ class RiskManager:
             return True, "OK"
 
         # Strategy loss budget check (BUY only)
-        strategy_loss = abs(min(0.0, self._strategy_pnl.get(strategy, 0.0)))
-        budget = self.config.risk.strategy_loss_budget.get(strategy, float("inf"))
-        if strategy_loss >= budget:
-            logger.warning(
-                f"Strategy loss budget exhausted: {strategy} — loss ${strategy_loss:.2f} >= budget ${budget:.2f}"
-            )
-            return False, f"Strategy loss budget exhausted: {strategy}"
+        # Skip in paper mode when PAPER_SKIP_BUDGETS=true — allows unrestricted
+        # data collection across all strategies without resetting trade history.
+        _skip_budgets = self.config.paper_trading and os.getenv(
+            "PAPER_SKIP_BUDGETS", "false"
+        ).lower() in ("true", "1", "yes")
+        if not _skip_budgets:
+            strategy_loss = abs(min(0.0, self._strategy_pnl.get(strategy, 0.0)))
+            budget = self.config.risk.strategy_loss_budget.get(strategy, float("inf"))
+            if strategy_loss >= budget:
+                logger.warning(
+                    f"Strategy loss budget exhausted: {strategy} — loss ${strategy_loss:.2f} >= budget ${budget:.2f}"
+                )
+                return False, f"Strategy loss budget exhausted: {strategy}"
 
         # Balance check (BUY only)
         if usdc_amount > self.portfolio.usdc_balance:
