@@ -124,8 +124,6 @@ class QuickResolutionStrategy(BaseStrategy):
         skipped_no_time = 0
         skipped_no_conviction = 0
         skipped_no_edge = 0
-        skipped_no_edge_no_ask = 0   # has conviction but best_ask is None
-        skipped_no_edge_tiny = 0     # has conviction + ask but edge too small
         skipped_no_volume = 0
         skipped_no_book = 0
 
@@ -214,27 +212,16 @@ class QuickResolutionStrategy(BaseStrategy):
             if sig is not None:
                 signals.append(sig)
             else:
-                # Attribute the skip reason based on conviction vs edge
                 yes_mid_val = yes_mid
                 if yes_mid_val >= conviction_threshold or yes_mid_val <= (1.0 - conviction_threshold):
                     skipped_no_edge += 1
-                    # Sub-classify: no ask vs tiny edge
-                    if yes_mid_val >= conviction_threshold:
-                        ya = yes_book.best_ask
-                        if ya is None or ya >= 1.0:
-                            skipped_no_edge_no_ask += 1
-                        else:
-                            fee = calc_taker_fee(ya, _detect_market_type(market.question))
-                            if (1.0 - ya) - fee < effective_min_edge:
-                                skipped_no_edge_tiny += 1
                 else:
                     skipped_no_conviction += 1
 
         logger.info(
             f"QuickRes scan: {len(markets)} total, {len(signals)} signals | skipped: "
             f"{skipped_inactive} inactive, {skipped_no_time} time, {skipped_no_conviction} conviction, "
-            f"{skipped_no_edge} edge ({skipped_no_edge_no_ask} no-ask, {skipped_no_edge_tiny} tiny-edge), "
-            f"{skipped_no_volume} volume, {skipped_no_book} no-book"
+            f"{skipped_no_edge} edge, {skipped_no_volume} volume, {skipped_no_book} no-book"
         )
 
         return signals

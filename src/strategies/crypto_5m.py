@@ -20,16 +20,14 @@ Why this works:
 """
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
 from src.utils.constants import MIN_TRADE_USDC
+from src.utils.logger import logger
 from src.utils.metrics import arb_opportunities, edge_detected
-
-logger = logging.getLogger(__name__)
 
 # Combined YES+NO ask must be below this for dual-side arb
 DUAL_ARB_THRESHOLD = 0.995
