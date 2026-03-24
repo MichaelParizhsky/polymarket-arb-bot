@@ -119,6 +119,9 @@ class KalshiClient:
 
         self._http: httpx.AsyncClient | None = None
         self._no_creds_warned: bool = False
+        self._login_ts: float = 0.0          # when we last did email/password login
+        _LOGIN_TTL = 3 * 3600                 # re-login every 3 h (tokens expire in ~6 h)
+        self._LOGIN_TTL = _LOGIN_TTL
 
         # Market cache
         self._market_cache: list[KalshiMarket] = []
@@ -138,15 +141,17 @@ class KalshiClient:
             self._http = None
 
     async def _ensure_http(self) -> None:
-        """Lazily create the HTTP client and authenticate. Safe to call multiple times."""
+        """Lazily create the HTTP client and authenticate. Safe to call multiple times.
+        Re-logins via email/password when the session token is near expiry."""
         if self._http is None:
             self._http = httpx.AsyncClient(
                 base_url=self.API_BASE,
                 timeout=httpx.Timeout(10.0),
                 headers={"User-Agent": "polymarket-arb-bot/1.0"},
             )
-            # Try to acquire a token if we only have email+password.
-            if not self._token and self._email and self._password:
+        # Refresh email/password session token if it's stale (or was never acquired)
+        if not self._key_id and self._email and self._password:
+            if time.time() - self._login_ts > self._LOGIN_TTL:
                 await self._login()
 
     # ------------------------------------------------------------------ #
@@ -163,6 +168,7 @@ class KalshiClient:
             resp.raise_for_status()
             self._token = resp.json().get("token")
             if self._token:
+                self._login_ts = time.time()
                 logger.info("KalshiClient: authenticated via email/password login")
             else:
                 logger.warning("KalshiClient: /login succeeded but no token in response")
@@ -229,10 +235,26 @@ class KalshiClient:
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (401, 403):
+            if exc.response.status_code == 401 and self._email and self._password:
+                # Token expired — force re-login and retry once
+                logger.warning("KalshiClient: 401 on markets, re-logging in...")
+                self._login_ts = 0.0
+                await self._ensure_http()
+                try:
+                    resp = await self._http.get(
+                        "/markets",
+                        params={"limit": limit, "status": status},
+                        headers=self._auth_headers("GET", "/trade-api/v2/markets"),
+                    )
+                    resp.raise_for_status()
+                except Exception:
+                    logger.warning("KalshiClient: re-login retry also failed; returning []")
+                    return []
+            elif exc.response.status_code in (401, 403):
                 logger.warning(f"KalshiClient: auth error fetching markets ({exc}); returning []")
                 return []
-            raise
+            else:
+                raise
         finally:
             elapsed = time.perf_counter() - start
             api_latency.labels(endpoint="kalshi_get_markets").observe(elapsed)

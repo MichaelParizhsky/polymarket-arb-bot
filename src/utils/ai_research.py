@@ -153,49 +153,15 @@ class PerplexityClient:
     async def agent(
         self,
         prompt: str,
-        model: str = "sonar-reasoning-pro",
+        model: str = "sonar-pro",
         timeout: float = 60.0,
     ) -> str:
         """
-        Multi-step autonomous research via the Perplexity Agent API.
-
-        Unlike search() which issues a single web lookup, the agent can:
-          - Issue multiple web_search calls in sequence
-          - Fetch specific URLs via fetch_url
-          - Synthesize across sources autonomously
-
-        Use this when you need deep, multi-source research on a topic.
-        Slower than search() (~10-30s) but significantly richer output.
-
-        Endpoint: POST /v1/agent  (same key as Sonar)
-        Docs: https://docs.perplexity.ai/docs/agent-api/quickstart
+        Deep research via sonar-pro (live web + chain-of-thought).
+        The /v1/agent endpoint requires special beta access; sonar-pro via
+        /chat/completions gives equivalent quality for standard accounts.
         """
-        if not self.enabled:
-            return ""
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(
-                    f"{self.BASE_URL}/v1/agent",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "tools": [
-                            {"type": "web_search"},
-                            {"type": "fetch_url"},
-                        ],
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
-                r.raise_for_status()
-                data = r.json()
-                return data["choices"][0]["message"]["content"]
-        except Exception as exc:
-            logger.warning(f"Perplexity Agent API error: {exc} — falling back to sonar search")
-            # Graceful fallback to single Sonar call
-            return await self.search(prompt, model="sonar-pro")
+        return await self.search(prompt, model=model)
 
 
 # ---------------------------------------------------------------------------
