@@ -92,6 +92,14 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy);
             CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
             CREATE INDEX IF NOT EXISTS idx_parameters_status ON parameters(status);
+
+            CREATE TABLE IF NOT EXISTS portfolio_resets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                trade_count INTEGER,
+                final_pnl REAL,
+                notes TEXT
+            );
         """)
     logger.info(f"Database initialized at {DB_PATH}")
 

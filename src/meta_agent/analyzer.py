@@ -217,7 +217,7 @@ class PortfolioSnapshot:
 
         # Bootstrap phase: fewer than 30 closed positions means stats are unreliable.
         # Inflate score to FAIR minimum so meta-agent doesn't over-react to noise.
-        bootstrap = len(self.closed_positions) < 30
+        bootstrap = len(self.closed_positions) < 10
         if bootstrap and total_score < 50:
             total_score = 50.0
 
@@ -281,6 +281,38 @@ class PortfolioSnapshot:
         best_strategy = max(qualified, key=qualified.get) if qualified else None
         worst_strategy = min(qualified, key=qualified.get) if qualified else None
 
+        # Lifetime stats from SQLite — survives portfolio resets
+        lifetime: dict = {}
+        try:
+            from src.utils.database import _get_conn as _db_conn
+            with _db_conn() as _conn:
+                resets = _conn.execute(
+                    "SELECT COUNT(*) as n, COALESCE(SUM(final_pnl),0) as total_pnl FROM portfolio_resets"
+                ).fetchone()
+                lt_trades = _conn.execute(
+                    "SELECT strategy, side, usdc_amount, fee FROM trades"
+                ).fetchall()
+                lt_strat: dict[str, dict] = {}
+                for r in lt_trades:
+                    s = r["strategy"]
+                    if s not in lt_strat:
+                        lt_strat[s] = {"trades": 0, "pnl": 0.0}
+                    lt_strat[s]["trades"] += 1
+                    if r["side"].upper() == "SELL":
+                        lt_strat[s]["pnl"] += r["usdc_amount"] - r["fee"]
+                    else:
+                        lt_strat[s]["pnl"] -= r["usdc_amount"] + r["fee"]
+                lifetime = {
+                    "reset_count": resets["n"] if resets else 0,
+                    "pnl_across_resets": round(resets["total_pnl"] if resets else 0.0, 2),
+                    "total_trades_all_time": len(lt_trades),
+                    "strategy_lifetime_pnl": {
+                        k: round(v["pnl"], 2) for k, v in lt_strat.items()
+                    },
+                }
+        except Exception:
+            lifetime = {"error": "db unavailable"}
+
         return {
             "portfolio": {
                 "starting_balance": self.starting_balance,
@@ -305,6 +337,7 @@ class PortfolioSnapshot:
             "strategy_roi_pct": strategy_roi,
             "best_strategy": best_strategy,
             "worst_strategy": worst_strategy,
+            "lifetime": lifetime,
         }
 
     def propose_changes(

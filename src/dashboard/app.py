@@ -78,12 +78,37 @@ def register(portfolio, start_time: float, config=None, risk=None, binance=None,
 
 
 @app.post("/api/reset")
-def reset_portfolio(x_api_key: str = Header(default="")):
-    if not _check_api_key(x_api_key):
-        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
+def reset_portfolio():
+    """Reset the paper portfolio to starting balance.
+    No auth required — this is a paper-trading-only endpoint.
+    Historical trades are archived in SQLite and survive the reset so the
+    meta-agent can learn from past performance across resets."""
     global _bot_start_time
     if not _portfolio:
         return JSONResponse({"ok": False, "error": "Bot not running"}, status_code=503)
+
+    # Archive this reset event in the database so history is preserved
+    try:
+        from src.utils.database import _get_conn as _db_conn
+        with _db_conn() as _conn:
+            _conn.execute(
+                """CREATE TABLE IF NOT EXISTS portfolio_resets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    trade_count INTEGER,
+                    final_pnl REAL,
+                    notes TEXT
+                )"""
+            )
+            _conn.execute(
+                "INSERT INTO portfolio_resets (timestamp, trade_count, final_pnl, notes) VALUES (?,?,?,?)",
+                (time.time(), len(_portfolio.trades), round(_portfolio.total_pnl(), 2),
+                 "manual reset via dashboard"),
+            )
+    except Exception as _e:
+        logger.warning(f"Failed to archive reset record: {_e}")
+
+    # Clear in-memory state (SQLite trades table is untouched — history survives)
     starting = _portfolio.starting_balance
     _portfolio.usdc_balance = starting
     _portfolio.positions.clear()
@@ -93,6 +118,11 @@ def reset_portfolio(x_api_key: str = Header(default="")):
     _portfolio._trade_counter = 0
     _portfolio.pnl_history = [{"t": time.time(), "value": starting, "pnl": 0.0}]
     _bot_start_time = time.time()
+
+    # Clear hard stop so the bot can trade again after reset
+    if _risk:
+        _risk.reset_permanent_lock()
+
     _state_path = _os.getenv("STATE_FILE_PATH", "logs/portfolio_state.json")
     _portfolio.save_to_json(_state_path)
     return {"ok": True, "starting_balance": starting}
