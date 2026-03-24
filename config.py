@@ -155,6 +155,12 @@ class StrategyConfig:
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))
     max_days_to_resolution: int = field(default_factory=lambda: _int("MAX_DAYS_TO_RESOLUTION", 30))
 
+    # Daily close only — only trade markets resolving today; auto-close all positions at EOD.
+    # Set DAILY_CLOSE_ONLY=false to trade multi-day markets.
+    daily_close_only: bool = field(default_factory=lambda: _bool("DAILY_CLOSE_ONLY", True))
+    # Minutes before midnight to start EOD position dump (default: 30 min before midnight UTC)
+    eod_close_minutes_before_midnight: int = field(default_factory=lambda: _int("EOD_CLOSE_MINUTES_BEFORE_MIDNIGHT", 30))
+
     # WebSocket orderbook feed
     use_ws_orderbook: bool = field(default_factory=lambda: _bool("USE_WS_ORDERBOOK", True))
 

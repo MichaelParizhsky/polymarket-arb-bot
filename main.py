@@ -358,10 +358,13 @@ class ArbBot:
             self._background_tasks: set = set()
             _t1 = asyncio.create_task(self._meta_agent_loop())
             _t2 = asyncio.create_task(self._auto_close_resolved_loop())
+            _t3 = asyncio.create_task(self._eod_close_loop())
             self._background_tasks.add(_t1)
             self._background_tasks.add(_t2)
+            self._background_tasks.add(_t3)
             _t1.add_done_callback(self._background_tasks.discard)
             _t2.add_done_callback(self._background_tasks.discard)
+            _t3.add_done_callback(self._background_tasks.discard)
 
             try:
                 await self._main_loop()
@@ -458,25 +461,46 @@ class ArbBot:
         seen_ids = {m.condition_id for m in expiring}
         markets = list(expiring) + [m for m in markets if m.condition_id not in seen_ids]
 
-        # Filter to markets resolving within MAX_DAYS_TO_RESOLUTION
-        max_days = self.config.strategies.max_days_to_resolution
-        if max_days > 0:
-            from datetime import datetime, timezone
-            cutoff = datetime.now(timezone.utc).timestamp() + max_days * 86400
+        from datetime import datetime, timezone, timedelta
+
+        # Daily-close-only mode: only trade markets that resolve today (UTC)
+        if self.config.strategies.daily_close_only:
+            now_utc = datetime.now(timezone.utc)
+            # Window: now → end of today UTC (23:59:59)
+            today_end = now_utc.replace(hour=23, minute=59, second=59, microsecond=0)
             filtered = []
             for m in markets:
                 if not m.end_date_iso:
-                    continue  # skip markets with no resolution date
+                    continue
                 try:
                     end_ts = datetime.fromisoformat(
                         m.end_date_iso.replace("Z", "+00:00")
-                    ).timestamp()
-                    if end_ts <= cutoff:
+                    )
+                    if now_utc <= end_ts <= today_end:
                         filtered.append(m)
                 except ValueError:
                     continue
             markets = filtered
-            logger.debug(f"Date filter ({max_days}d): {len(markets)} markets within window")
+            logger.debug(f"Daily-close filter: {len(markets)} markets resolving today (UTC)")
+        else:
+            # Filter to markets resolving within MAX_DAYS_TO_RESOLUTION
+            max_days = self.config.strategies.max_days_to_resolution
+            if max_days > 0:
+                cutoff = datetime.now(timezone.utc).timestamp() + max_days * 86400
+                filtered = []
+                for m in markets:
+                    if not m.end_date_iso:
+                        continue  # skip markets with no resolution date
+                    try:
+                        end_ts = datetime.fromisoformat(
+                            m.end_date_iso.replace("Z", "+00:00")
+                        ).timestamp()
+                        if end_ts <= cutoff:
+                            filtered.append(m)
+                    except ValueError:
+                        continue
+                markets = filtered
+                logger.debug(f"Date filter ({max_days}d): {len(markets)} markets within window")
 
         # Limit to top N markets by volume, but always keep expiring markets at the front.
         # Expiring markets have low lifetime volume and would otherwise be sorted out.
@@ -816,6 +840,104 @@ class ArbBot:
                 break
             except Exception as exc:
                 logger.debug(f"Auto-close loop error: {exc}")
+
+    async def _eod_close_loop(self) -> None:
+        """
+        End-of-day position dump (daily_close_only mode).
+
+        Wakes every 60 s and checks if we are within EOD_CLOSE_MINUTES_BEFORE_MIDNIGHT
+        minutes of midnight UTC.  When triggered it sells every open position at the
+        current best-bid (or mid if bid is unavailable) so the bot carries zero
+        overnight exposure.  Fires at most once per calendar day.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        last_close_date: str | None = None  # "YYYY-MM-DD" of the last time we dumped
+
+        while self._running:
+            await asyncio.sleep(60)
+            if not self._running:
+                break
+
+            # Only active in daily-close-only mode
+            if not self.config.strategies.daily_close_only:
+                continue
+
+            now_utc = datetime.now(timezone.utc)
+            today_str = now_utc.strftime("%Y-%m-%d")
+
+            # Already ran today
+            if last_close_date == today_str:
+                continue
+
+            # How many minutes until midnight UTC?
+            midnight = (now_utc + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            minutes_to_midnight = (midnight - now_utc).total_seconds() / 60.0
+
+            threshold = self.config.strategies.eod_close_minutes_before_midnight
+            if minutes_to_midnight > threshold:
+                continue  # not yet time
+
+            # Trigger EOD dump
+            last_close_date = today_str
+            logger.info(
+                f"[EOD-CLOSE] {minutes_to_midnight:.1f} min to midnight — "
+                f"closing all open positions"
+            )
+
+            try:
+                open_positions = {
+                    tid: pos for tid, pos in self.portfolio.positions.items()
+                    if pos.contracts > 0
+                }
+                if not open_positions:
+                    logger.info("[EOD-CLOSE] No open positions to close")
+                    continue
+
+                closed = 0
+                for token_id, pos in list(open_positions.items()):
+                    if not self.poly:
+                        break
+                    try:
+                        book = await self.poly.get_orderbook(token_id)
+                    except Exception as exc:
+                        logger.warning(f"[EOD-CLOSE] orderbook fetch failed for {token_id[:16]}: {exc}")
+                        continue
+
+                    # Use best bid; fall back to mid; fall back to cost basis
+                    if book.best_bid is not None and book.best_bid > 0:
+                        exit_price = book.best_bid
+                    elif book.best_bid is not None and book.best_ask is not None:
+                        exit_price = (book.best_bid + book.best_ask) / 2
+                    else:
+                        exit_price = pos.avg_price  # last resort: cost basis (no gain/loss)
+
+                    trade = self.portfolio.sell(
+                        token_id=token_id,
+                        contracts=pos.contracts,
+                        price=exit_price,
+                        strategy="auto_close",
+                        notes=f"[EOD-CLOSE] daily dump @ {exit_price:.4f}",
+                    )
+                    if trade:
+                        pnl = trade.pnl if hasattr(trade, "pnl") else 0.0
+                        logger.info(
+                            f"[EOD-CLOSE] Sold {pos.contracts:.2f} contracts of "
+                            f"{token_id[:16]}... @ {exit_price:.4f} | PnL={pnl:+.2f}"
+                        )
+                        closed += 1
+                        if self._hedge_manager is not None:
+                            await self._hedge_manager.maybe_close_hedge(token_id)
+
+                logger.info(f"[EOD-CLOSE] Done — closed {closed}/{len(open_positions)} positions")
+                self.portfolio.save_to_json(STATE_PATH)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"[EOD-CLOSE] loop error: {exc}", exc_info=True)
 
     async def _meta_agent_loop(self) -> None:
         """Run Claude meta-agent analysis every 30 minutes."""
