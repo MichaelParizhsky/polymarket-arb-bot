@@ -88,6 +88,7 @@ class RiskConfig:
         "crypto_5m": 150.0,  # tight budget — snipe mode fires blind without Binance data
         "swarm_prediction": 300.0,  # crowd simulation strategy budget
         "auto_close": 9999.0,  # auto-close is resolution, not a strategy — no budget cap
+        "weather": 150.0,      # Kalshi weather markets — tight budget while calibrating NOAA model
     })
 
 
@@ -169,6 +170,16 @@ class StrategyConfig:
     swarm_min_volume: float = field(default_factory=lambda: _float("SWARM_MIN_VOLUME", 5000.0))
     swarm_agent_count: int = field(default_factory=lambda: _int("SWARM_AGENT_COUNT", 12))
     swarm_cooldown_hours: float = field(default_factory=lambda: _float("SWARM_COOLDOWN_HOURS", 4.0))
+
+    # Kalshi weather markets — trades temperature and precipitation markets using NOAA forecasts.
+    # Requires KALSHI_ENABLED=true and valid Kalshi credentials.
+    # Disabled by default. Start with small WEATHER_MAX_SPEND in paper mode to calibrate.
+    weather_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_WEATHER", False))
+    weather_min_edge: float = field(default_factory=lambda: _float("WEATHER_MIN_EDGE", 0.05))
+    weather_max_spend: float = field(default_factory=lambda: _float("WEATHER_MAX_SPEND", 75.0))
+    weather_min_volume: float = field(default_factory=lambda: _float("WEATHER_MIN_VOLUME", 200.0))
+    weather_max_lead_days: int = field(default_factory=lambda: _int("WEATHER_MAX_LEAD_DAYS", 3))
+    weather_cooldown_hours: float = field(default_factory=lambda: _float("WEATHER_COOLDOWN_HOURS", 6.0))
 
 
 @dataclass

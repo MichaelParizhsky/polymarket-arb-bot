@@ -44,6 +44,11 @@ try:
     _SWARM_AVAILABLE = True
 except ImportError:
     _SWARM_AVAILABLE = False
+try:
+    from src.strategies.weather import WeatherStrategy
+    _WEATHER_AVAILABLE = True
+except ImportError:
+    _WEATHER_AVAILABLE = False
 from src.utils.hedge_manager import HedgeManager
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
@@ -192,6 +197,16 @@ class ArbBot:
                 logger.info("SwarmPredictionStrategy (crowd simulation mispricing) ENABLED")
             else:
                 logger.warning("SwarmPredictionStrategy not available — check src/strategies/swarm_prediction.py")
+        if getattr(cfg, 'weather_enabled', False):
+            if _WEATHER_AVAILABLE and self._kalshi:
+                self._strategies.append(
+                    WeatherStrategy(self.config, self.portfolio, self.risk, self._kalshi)
+                )
+                logger.info("WeatherStrategy (Kalshi weather markets via NOAA forecasts) ENABLED")
+            elif not self._kalshi:
+                logger.warning("WeatherStrategy requires Kalshi credentials (KALSHI_ENABLED=true)")
+            else:
+                logger.warning("WeatherStrategy not available — check src/strategies/weather.py")
         strategy_names = [s.name for s in self._strategies]
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture
