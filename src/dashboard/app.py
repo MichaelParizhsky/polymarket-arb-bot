@@ -182,6 +182,45 @@ def positions():
     ]
 
 
+@app.post("/api/positions/close")
+def close_position(body: dict, x_api_key: str = Header(default="")):
+    """Force-close an open position at current bid or zero (paper mode only)."""
+    if not _check_api_key(x_api_key):
+        return JSONResponse({"error": "Unauthorized"}, status_code=403)
+    if not _portfolio:
+        return JSONResponse({"error": "Portfolio not initialized"}, status_code=503)
+
+    token_id_prefix = body.get("token_id", "")
+    if not token_id_prefix:
+        return JSONResponse({"error": "token_id required"}, status_code=400)
+
+    with _portfolio_lock:
+        # Match by prefix (dashboard truncates token_id with "...")
+        matched_id = next(
+            (tid for tid in _portfolio.positions if tid.startswith(token_id_prefix.rstrip("."))),
+            None,
+        )
+        if not matched_id:
+            return JSONResponse({"error": f"Position not found: {token_id_prefix}"}, status_code=404)
+
+        pos = _portfolio.positions[matched_id]
+        contracts = pos.contracts
+        # Use provided price, else 0.001 (near-zero for worthless positions)
+        price = float(body.get("price", 0.001))
+        trade = _portfolio.sell(
+            token_id=matched_id,
+            contracts=contracts,
+            price=price,
+            strategy=pos.strategy,
+            notes="Manual close via dashboard",
+        )
+
+    if trade:
+        _portfolio.save_state()
+        return {"ok": True, "token_id": matched_id[:16], "contracts": contracts, "price": price}
+    return JSONResponse({"error": "Sell failed — check logs"}, status_code=500)
+
+
 @app.get("/api/closed_positions")
 def closed_positions(limit: int = 100):
     if not _portfolio:
@@ -2585,13 +2624,30 @@ function updateStratPnl(data){
   }).join('');
 }
 
+async function closePosition(tokenId){
+  if(!confirm(`Force-close position ${tokenId}?\n\nThis sells at near-zero price. Use only for stuck/worthless positions.`)) return;
+  const priceStr = prompt('Exit price (0.001 for worthless, or enter current bid):', '0.001');
+  if(priceStr===null) return;
+  const price = parseFloat(priceStr);
+  if(isNaN(price)||price<0||price>1){alert('Invalid price. Must be between 0 and 1.');return;}
+  try{
+    const r=await fetch('/api/positions/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token_id:tokenId,price})});
+    const d=await r.json();
+    if(d.ok){
+      alert(`Closed ${d.contracts} contracts @ ${d.price}. Position removed.`);
+    }else{
+      alert('Error: '+(d.error||'Unknown error'));
+    }
+  }catch(e){alert('Request failed: '+e);}
+}
+
 function updatePositions(open,closed){
   $('open-pos-count').textContent=open.length;
   if(!open.length){
     $('positions-table').innerHTML='<div class="no-data">No open positions</div>';
   }else{
     $('positions-table').innerHTML=`<table>
-      <tr><th>Market</th><th>Outcome</th><th>Contracts</th><th>Avg Cost</th><th>Cost Basis</th><th>Strategy</th><th>Opened</th></tr>
+      <tr><th>Market</th><th>Outcome</th><th>Contracts</th><th>Avg Cost</th><th>Cost Basis</th><th>Strategy</th><th>Opened</th><th></th></tr>
       ${open.map(p=>`<tr>
         <td title="${p.question}">${p.question}</td>
         <td>${p.outcome}</td>
@@ -2600,6 +2656,7 @@ function updatePositions(open,closed){
         <td>${fmt(p.cost_basis)}</td>
         <td>${badge(p.strategy)}</td>
         <td class="ts-small">${ts(p.opened_at)}</td>
+        <td><button onclick="closePosition('${p.token_id}')" style="font-size:.7rem;padding:3px 8px;background:#2a0a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer">Close</button></td>
       </tr>`).join('')}
     </table>`;
   }
