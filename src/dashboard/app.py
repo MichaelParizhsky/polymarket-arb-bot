@@ -170,6 +170,7 @@ def positions():
     return [
         {
             "token_id": tid[:16] + "...",
+            "token_id_full": tid,
             "question": pos.market_question[:70],
             "outcome": pos.outcome,
             "contracts": round(pos.contracts, 4),
@@ -195,11 +196,15 @@ def close_position(body: dict, x_api_key: str = Header(default="")):
         return JSONResponse({"error": "token_id required"}, status_code=400)
 
     with _portfolio_lock:
-        # Match by prefix (dashboard truncates token_id with "...")
-        matched_id = next(
-            (tid for tid in _portfolio.positions if tid.startswith(token_id_prefix.rstrip("."))),
-            None,
-        )
+        # Try exact match first, then prefix match as fallback
+        token_id_prefix = token_id_prefix.rstrip(".")
+        if token_id_prefix in _portfolio.positions:
+            matched_id = token_id_prefix
+        else:
+            matched_id = next(
+                (tid for tid in _portfolio.positions if tid.startswith(token_id_prefix)),
+                None,
+            )
         if not matched_id:
             return JSONResponse({"error": f"Position not found: {token_id_prefix}"}, status_code=404)
 
@@ -2656,7 +2661,7 @@ function updatePositions(open,closed){
         <td>${fmt(p.cost_basis)}</td>
         <td>${badge(p.strategy)}</td>
         <td class="ts-small">${ts(p.opened_at)}</td>
-        <td><button onclick="closePosition('${p.token_id}')" style="font-size:.7rem;padding:3px 8px;background:#2a0a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer">Close</button></td>
+        <td><button onclick="closePosition('${p.token_id_full}')" style="font-size:.7rem;padding:3px 8px;background:#2a0a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer">Close</button></td>
       </tr>`).join('')}
     </table>`;
   }
