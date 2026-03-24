@@ -9,3 +9,4 @@ logs/
 .venv/
 venv/
 *.log
+set_railway_vars.sh

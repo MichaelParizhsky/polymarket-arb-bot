@@ -5,6 +5,7 @@ Visit http://localhost:5000
 from __future__ import annotations
 
 import asyncio
+import collections
 import glob
 import json
 import os
@@ -17,16 +18,16 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
 
 # Optional API key for destructive endpoints (set DASHBOARD_API_KEY env var to enable)
 _DASHBOARD_API_KEY: str = os.getenv("DASHBOARD_API_KEY", "")
 
 
 def _check_api_key(x_api_key: str = Header(default="")) -> bool:
-    """Return True if request is authorized. Always passes when no key is configured."""
+    """Return True if request is authorized. Requires DASHBOARD_API_KEY env var to be set."""
     if not _DASHBOARD_API_KEY:
-        return True
+        return False
     return x_api_key == _DASHBOARD_API_KEY
 
 import os as _os
@@ -48,16 +49,14 @@ _state_loaded_from_file: bool = False
 _portfolio_lock = _threading.RLock()
 
 # Ring buffer for cross-exchange signal decisions (last 100)
-_cross_exchange_log: list[dict] = []
-_cross_exchange_log_lock = __import__("threading").Lock()
+_cross_exchange_log: collections.deque = collections.deque(maxlen=100)
+_cross_exchange_log_lock = _threading.Lock()
 
 
 def log_cross_exchange_decision(entry: dict) -> None:
     """Called by CrossExchangeStrategy to record each scan decision."""
     with _cross_exchange_log_lock:
         _cross_exchange_log.append({**entry, "ts": time.time()})
-        if len(_cross_exchange_log) > 100:
-            _cross_exchange_log.pop(0)
 
 
 def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None,
@@ -184,10 +183,12 @@ def positions():
     ]
 
 
-@app.get("/api/positions/close")
+@app.post("/api/positions/close")
 def close_position(idx: int = 0, price: float = 0.001):
     """Force-close an open position by index at the given price (paper mode only)."""
     try:
+        if price <= 0 or price > 1.0:
+            return JSONResponse({"error": f"Invalid price {price}: must be between 0 (exclusive) and 1.0"}, status_code=400)
         if not _portfolio:
             return JSONResponse({"error": "Portfolio not initialized"}, status_code=503)
 
@@ -225,6 +226,7 @@ def close_position(idx: int = 0, price: float = 0.001):
 
 @app.get("/api/closed_positions")
 def closed_positions(limit: int = 100):
+    limit = min(limit, 1000)
     if not _portfolio:
         return []
     with _portfolio_lock:
@@ -234,6 +236,7 @@ def closed_positions(limit: int = 100):
 
 @app.get("/api/trades")
 def trades(limit: int = 100):
+    limit = min(limit, 1000)
     if not _portfolio:
         return []
     with _portfolio_lock:
@@ -278,6 +281,7 @@ def strategy_trades():
 
 @app.get("/api/logs")
 def logs(since: float = 0, limit: int = 200):
+    limit = min(limit, 1000)
     from src.utils.logger import get_log_buffer
     all_logs = get_log_buffer()
     filtered = [l for l in all_logs if l["t"] > since]
@@ -1044,7 +1048,7 @@ def code_review_list():
 
 _autofix_status: dict = {"state": "idle", "results": [], "error": None, "started_at": None, "finished_at": None, "git": None}
 _pending_deploys: list[dict] = []
-_pending_deploys_lock = __import__("threading").Lock()
+_pending_deploys_lock = _threading.Lock()
 
 
 def get_pending_deploys() -> list[dict]:
@@ -1248,7 +1252,9 @@ async def _git_commit_push(changed_files: list[str]) -> dict:
                        "Add GITHUB_TOKEN to Railway env vars to enable auto-push.",
         }
 
-    repo = os.getenv("GITHUB_REPO", "MichaelParizhsky/polymarket-arb-bot")
+    repo = os.getenv("GITHUB_REPO", "")
+    if not repo:
+        return {"pushed": False, "message": "GITHUB_REPO not set — add it to Railway env vars (e.g. username/polymarket-arb-bot)."}
     api = f"https://api.github.com/repos/{repo}"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -1398,6 +1404,17 @@ async def deploy_proposal(proposal_id: str, x_api_key: str = Header(default=""))
 
         if meta.get("deployed"):
             return JSONResponse({"ok": False, "error": "Already deployed"}, status_code=409)
+
+        # Path traversal guard: validate file_path is under logs/proposals/
+        _proposals_dir = os.path.realpath("logs/proposals")
+        _requested = os.path.realpath(meta.get("file_path", ""))
+        if not _requested.startswith(_proposals_dir + os.sep):
+            return JSONResponse({"ok": False, "error": "Invalid file path"}, status_code=400)
+
+        # Path traversal guard: validate file_name has no directory components
+        _file_name = meta.get("file_name", "")
+        if not _file_name or os.sep in _file_name or "/" in _file_name or ".." in _file_name:
+            return JSONResponse({"ok": False, "error": "Invalid file name"}, status_code=400)
 
         # Load and validate code
         try:
@@ -2633,7 +2650,7 @@ async function closePosition(idx){
   const price = parseFloat(priceStr);
   if(isNaN(price)||price<0||price>1){alert('Invalid price. Must be between 0 and 1.');return;}
   try{
-    const r=await fetch(`/api/positions/close?idx=${idx}&price=${price}`);
+    const r=await fetch(`/api/positions/close?idx=${idx}&price=${price}`,{method:'POST'});
     const d=await r.json();
     if(d.ok){
       alert(`Closed ${d.contracts} contracts @ ${d.price}. Position removed.`);

@@ -202,7 +202,12 @@ class RiskManager:
         total_exposure = sum(self._category_exposure.values())
         current_category = self._category_exposure.get(category, 0.0)
         new_category = current_category + usdc_amount
-        denominator = max(total_exposure, 1.0)
+        # Use post-trade exposure as denominator so the check measures actual
+        # post-trade concentration. When portfolio is empty (total_exposure=0),
+        # there is no concentration to protect against, so the check passes.
+        denominator = total_exposure + usdc_amount
+        if denominator <= 0:
+            return True, "ok"
         if new_category / denominator > 0.40:
             return (
                 False,

@@ -31,6 +31,27 @@ ALLOWED_TUNE_PARAMS = frozenset({
     "LATENCY_PRICE_LAG_THRESHOLD",
 })
 
+# Valid ranges for tunable params — prevents meta-agent from proposing extreme values.
+PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "MIN_EDGE_THRESHOLD":           (0.005, 0.15),
+    "REBALANCING_MIN_EDGE":         (0.010, 0.20),
+    "COMBO_MIN_EDGE":               (0.010, 0.20),
+    "CROSS_EXCHANGE_MIN_EDGE":      (0.020, 0.25),
+    "ENSEMBLE_MIN_EDGE":            (0.010, 0.20),
+    "QUICK_RESOLUTION_MIN_EDGE":    (0.005, 0.15),
+    "LATENCY_PRICE_LAG_THRESHOLD":  (0.005, 0.10),
+}
+
+
+def validate_param_change(param_name: str, new_value: float) -> tuple[bool, str]:
+    """Return (ok, reason). Validates a proposed param value is within safe bounds."""
+    if param_name not in PARAM_BOUNDS:
+        return False, f"Parameter '{param_name}' is not in ALLOWED_TUNE_PARAMS"
+    lo, hi = PARAM_BOUNDS[param_name]
+    if not (lo <= new_value <= hi):
+        return False, f"{param_name}={new_value} is outside safe range [{lo}, {hi}]"
+    return True, "ok"
+
 
 @dataclass
 class StrategyMetrics:
