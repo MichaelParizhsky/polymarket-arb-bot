@@ -598,7 +598,8 @@ class EventDrivenStrategy(BaseStrategy):
                             headline = top["title"]
                             sentiment = top.get("sentiment", "neutral")
 
-                    if headline:
+                    # Only boost on directional sentiment — neutral means no edge
+                    if headline and sentiment in ("positive", "negative"):
                         self.log(
                             f"[NEWS] '{market.question[:50]}' | "
                             f"{headline[:80]} [{sentiment}] (+0.2x size boost)"

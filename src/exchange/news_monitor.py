@@ -190,7 +190,7 @@ class NewsMonitor:
 
         keywords = self._extract_keywords(question)
         if not keywords:
-            return recent[:max_results]
+            return []  # no keywords = can't determine relevance; return nothing
 
         scored = [
             (self._keyword_score(h["title"], keywords), h)
