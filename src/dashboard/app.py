@@ -42,7 +42,6 @@ _binance_ref = None
 _kalshi_ref = None
 _news_monitor_ref = None
 _hedge_manager_ref = None
-_ensemble_strategy_ref = None
 _state_loaded_from_file: bool = False
 
 # Lock protecting reads of the portfolio object from the dashboard thread
@@ -62,10 +61,10 @@ def log_cross_exchange_decision(entry: dict) -> None:
 
 
 def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None,
-             news_monitor=None, hedge_manager=None, ensemble_strategy=None,
+             news_monitor=None, hedge_manager=None,
              state_loaded_from_file: bool = False) -> None:
     global _portfolio, _bot_start_time, _config, _risk, _binance_ref, _kalshi_ref
-    global _news_monitor_ref, _hedge_manager_ref, _ensemble_strategy_ref, _state_loaded_from_file
+    global _news_monitor_ref, _hedge_manager_ref, _state_loaded_from_file
     _portfolio = portfolio
     _bot_start_time = start_time
     _config = config
@@ -74,7 +73,6 @@ def register(portfolio, start_time: float, config=None, risk=None, binance=None,
     _kalshi_ref = kalshi
     _news_monitor_ref = news_monitor
     _hedge_manager_ref = hedge_manager
-    _ensemble_strategy_ref = ensemble_strategy
     _state_loaded_from_file = state_loaded_from_file
 
 
@@ -278,14 +276,17 @@ def system_status():
 
     # --- Strategies ---
     strategy_notes = {
-        "rebalancing":    "Trades YES+NO deviation from $1",
-        "combinatorial":  "Multi-outcome portfolio imbalance",
-        "latency_arb":    "Polymarket lagging Binance prices",
-        "market_making":  "Passive liquidity / earn spread",
-        "resolution":     "Mispriced near-expiry markets",
-        "event_driven":   "News/event catalyst markets",
-        "cross_exchange": "Polymarket vs Kalshi divergence",
-        "futures_hedge":  "Binance futures hedge on crypto",
+        "rebalancing":       "Trades YES+NO deviation from $1",
+        "combinatorial":     "Multi-outcome portfolio imbalance",
+        "latency_arb":       "Polymarket lagging Binance prices",
+        "market_making":     "Passive liquidity / earn spread",
+        "resolution":        "Mispriced near-expiry markets",
+        "event_driven":      "News/event catalyst markets",
+        "cross_exchange":    "Polymarket vs Kalshi divergence",
+        "futures_hedge":     "Binance futures hedge on crypto",
+        "quick_resolution":  "High-conviction near-expiry entries",
+        "crypto_5m":         "5m/15m dual-arb + Grok snipe",
+        "swarm":             "MiroFish crowd simulation mispricing",
     }
     strategies = {}
     if _config is not None:
@@ -345,6 +346,33 @@ def system_status():
         "polymarket":   bool(os.getenv("POLYMARKET_API_KEY") or os.getenv("POLY_API_KEY")),
         "kalshi_rsa":   bool(os.getenv("KALSHI_RSA_KEY") or os.getenv("KALSHI_PRIVATE_KEY")),
         "kalshi_token": bool(os.getenv("KALSHI_API_TOKEN") or os.getenv("KALSHI_TOKEN")),
+        "perplexity":   bool(os.getenv("PERPLEXITY_API_KEY")),
+        "grok":         bool(os.getenv("GROK_API_KEY")),
+    }
+
+    # --- AI Research integrations ---
+    ai_research = {
+        "perplexity": {
+            "configured": bool(os.getenv("PERPLEXITY_API_KEY")),
+            "label": "Perplexity Sonar",
+            "note": "Real-time web search — news polling, event context, meta-agent",
+            "add_key": "PERPLEXITY_API_KEY",
+            "docs": "https://docs.perplexity.ai",
+        },
+        "grok": {
+            "configured": bool(os.getenv("GROK_API_KEY")),
+            "label": "Grok (xAI)",
+            "note": "Live X/Twitter sentiment — crypto snipe gate",
+            "add_key": "GROK_API_KEY",
+            "docs": "https://docs.x.ai/api",
+        },
+        "mirofish": {
+            "configured": bool(os.getenv("MIROFISH_URL")),
+            "label": "MiroFish",
+            "note": "Full swarm simulation (1M agents) — fallback: LLM persona simulation",
+            "add_key": "MIROFISH_URL",
+            "docs": "https://github.com/666ghj/MiroFish",
+        },
     }
 
     # --- Risk health ---
@@ -401,6 +429,7 @@ def system_status():
         "strategies": strategies,
         "connections": connections,
         "api_keys": api_keys,
+        "ai_research": ai_research,
         "risk": risk_data,
         "meta_agent": meta_agent,
         "disk": disk,
@@ -1398,29 +1427,6 @@ async def api_hedges():
         return {"hedges": {}, "count": 0, "enabled": False, "error": str(e)}
 
 
-@app.get("/api/ensemble/recent")
-async def api_ensemble_recent():
-    if _ensemble_strategy_ref is None:
-        return {"evaluations": [], "status": "unavailable"}
-    try:
-        cache = getattr(_ensemble_strategy_ref, '_cache', {})
-        items = []
-        import time as _time
-        for cid, (stored_at, claude_prob, openai_prob) in cache.items():
-            age_minutes = (_time.monotonic() - stored_at) / 60
-            items.append({
-                "condition_id": cid[:16],
-                "claude_prob": claude_prob,
-                "openai_prob": openai_prob,
-                "consensus": (claude_prob + openai_prob) / 2 if claude_prob and openai_prob else (claude_prob or openai_prob),
-                "age_minutes": round(age_minutes, 1),
-            })
-        items.sort(key=lambda x: x["age_minutes"])
-        return {"evaluations": items[:20], "status": "ok", "cache_size": len(cache)}
-    except Exception as e:
-        return {"evaluations": [], "status": str(e)}
-
-
 # ------------------------------------------------------------------ #
 #  Compare endpoint                                                    #
 # ------------------------------------------------------------------ #
@@ -1559,199 +1565,239 @@ fetch('/api/bot_info').then(r=>r.json()).then(d=>{
   const isB=(d.name||'').toLowerCase().includes('b');
   const badge=isB
     ? '<span style="font-size:0.6em;background:#6366f1;color:#fff;padding:2px 10px;border-radius:9999px;vertical-align:middle;margin-left:8px">'+d.name+'</span>'
-    : '<span style="font-size:0.6em;background:#22c55e;color:#000;padding:2px 10px;border-radius:9999px;vertical-align:middle;margin-left:8px">'+d.name+'</span>';
+    : '<span style="font-size:0.6em;background:#10b981;color:#000;padding:2px 10px;border-radius:9999px;vertical-align:middle;margin-left:8px">'+d.name+'</span>';
   el.innerHTML='Polymarket Arb Bot'+badge;
 });
 </script>
 
 <style>
+:root{
+  --bg:#0a0a0f;
+  --surface:#12121a;
+  --surface2:#1a1a26;
+  --border:#1e1e2e;
+  --accent:#7c3aed;
+  --accent2:#06b6d4;
+  --green:#10b981;
+  --red:#ef4444;
+  --yellow:#f59e0b;
+  --text:#e2e8f0;
+  --muted:#64748b;
+  --card-radius:12px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0a0a0a;color:#e0e0e0;font-family:'Segoe UI',sans-serif;font-size:13px}
-header{background:#111;border-bottom:1px solid #222;padding:12px 20px;display:flex;align-items:center;gap:16px}
-header h1{color:#00e5ff;font-size:1.1rem;letter-spacing:.05em}
-#mode-badge{font-size:.7rem;padding:3px 10px;border-radius:4px;background:#1a3a4a;color:#00e5ff}
-#uptime-info{color:#555;font-size:.75rem;margin-left:auto}
-#reset-btn{font-size:.7rem;padding:4px 12px;border-radius:4px;background:#1a0000;color:#ff5252;border:1px solid #3d0000;cursor:pointer;transition:all .2s}
-#reset-btn:hover{background:#3d0000}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}
+header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;gap:16px}
+header h1{color:var(--accent2);font-size:1.1rem;letter-spacing:.05em;font-weight:700}
+#mode-badge{font-size:.7rem;padding:3px 10px;border-radius:6px;background:#0e1a2a;color:var(--accent2);border:1px solid #1a3a5a;font-weight:600}
+#uptime-info{color:var(--muted);font-size:.75rem;margin-left:auto}
+#reset-btn{font-size:.7rem;padding:4px 12px;border-radius:6px;background:#1f0a0a;color:var(--red);border:1px solid #3d1515;cursor:pointer;transition:all .2s}
+#reset-btn:hover{background:#3d1515}
 
-.tabs{display:flex;background:#111;border-bottom:1px solid #1e1e1e;padding:0 20px;flex-wrap:wrap}
-.tab{padding:10px 18px;cursor:pointer;color:#666;font-size:.8rem;border-bottom:2px solid transparent;transition:all .2s}
-.tab:hover{color:#aaa}
-.tab.active{color:#00e5ff;border-bottom-color:#00e5ff}
+.tabs{display:flex;background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;gap:2px}
+.tab{padding:11px 20px;cursor:pointer;color:var(--muted);font-size:.8rem;font-weight:500;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent2);border-bottom-color:var(--accent2)}
 
-.page{display:none;padding:20px;animation:fadein .2s}
+.page{display:none;padding:20px;animation:fadein .2s;max-width:1600px}
 .page.active{display:block}
 @keyframes fadein{from{opacity:0}to{opacity:1}}
 
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px}
-.card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px}
-.card .lbl{color:#555;font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
-.card .val{font-size:1.3rem;font-weight:700;color:#fff}
-.card .sub{color:#444;font-size:.65rem;margin-top:3px}
-.card .val.green{color:#00e676}.card .val.red{color:#ff5252}.card .val.blue{color:#00e5ff}.card .val.yellow{color:#ffd740}.card .val.purple{color:#ce93d8}
+/* Metric cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;position:relative;overflow:hidden}
+.card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:3px;background:var(--card-accent,var(--border));border-radius:0 0 var(--card-radius) var(--card-radius)}
+.card .lbl{color:var(--muted);font-size:.63rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:7px;font-weight:600}
+.card .val{font-size:1.45rem;font-weight:700;color:var(--text);line-height:1}
+.card .sub{color:var(--muted);font-size:.65rem;margin-top:5px}
+.card .val.green{color:var(--green)}.card .val.red{color:var(--red)}.card .val.blue{color:var(--accent2)}.card .val.yellow{color:var(--yellow)}.card .val.purple{color:#a78bfa}
 
-.pnl-split{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:18px}
-.pnl-split h3{font-size:.72rem;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
-.pnl-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #1a1a1a}
-.pnl-row:last-child{border-bottom:none}
-.pnl-label{color:#888;font-size:.78rem}
-.pnl-value{font-size:.95rem;font-weight:700}
-.pnl-note{color:#444;font-size:.65rem;margin-top:2px}
+.card-pnl{--card-accent:var(--green)}
+.card-balance{--card-accent:var(--accent2)}
+.card-winrate{--card-accent:var(--yellow)}
+.card-trades{--card-accent:var(--accent)}
 
-.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
-.chart-box{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px}
-.chart-box h3{font-size:.72rem;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
+/* Chart boxes */
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
+.chart-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px}
+.chart-box h3{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;font-weight:600}
 .chart-box canvas{max-height:200px}
 
-.section{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:14px}
-.section h3{font-size:.72rem;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
-table{width:100%;border-collapse:collapse}
-th{text-align:left;color:#444;font-weight:500;padding:5px 8px;border-bottom:1px solid #1e1e1e;font-size:.7rem}
-td{padding:5px 8px;border-bottom:1px solid #141414;font-size:.75rem}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:#181818}
-.buy{color:#00e676}.sell{color:#ff5252}.win{color:#00e676}.loss{color:#ff5252}
-.badge{display:inline-block;padding:1px 7px;border-radius:3px;font-size:.65rem;font-weight:600}
-.badge.rebalancing{background:#1a2a1a;color:#00e676}
-.badge.combinatorial{background:#1a1a2a;color:#7986cb}
-.badge.latency_arb{background:#2a1a1a;color:#ff7043}
-.badge.market_making{background:#2a2a1a;color:#ffd740}
-.badge.resolution{background:#1a2a2a;color:#4dd0e1}
-.badge.event_driven{background:#2a1a2a;color:#ce93d8}
+/* Sections */
+.section{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;margin-bottom:14px}
+.section h3{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;font-weight:600}
 
+table{width:100%;border-collapse:collapse}
+th{text-align:left;color:var(--muted);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--border);font-size:.67rem;text-transform:uppercase;letter-spacing:.05em}
+td{padding:6px 8px;border-bottom:1px solid var(--surface2);font-size:.75rem;color:var(--text)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface2)}
+.buy{color:var(--green)}.sell{color:var(--red)}.win{color:var(--green)}.loss{color:var(--red)}
+
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.63rem;font-weight:700;letter-spacing:.04em}
+.badge.rebalancing{background:#0d1f0d;color:var(--green)}
+.badge.combinatorial{background:#0d0d2a;color:#818cf8}
+.badge.latency_arb{background:#1f0d0d;color:#fb923c}
+.badge.market_making{background:#1f1a00;color:var(--yellow)}
+.badge.resolution{background:#0d1f1f;color:var(--accent2)}
+.badge.event_driven{background:#1a0d2a;color:#c084fc}
+.badge.cross_exchange{background:#0d1a2a;color:#60a5fa}
+.badge.futures_hedge{background:#1a0d1a;color:#e879f9}
+.badge.swarm{background:#0d1a1a;color:#34d399}
+.badge.quick_resolution{background:#1a1a0d;color:#fbbf24}
+.badge.crypto_5m{background:#0d0d1a;color:#a5b4fc}
+
+/* Strategy bars */
 .strat-bars{display:flex;flex-direction:column;gap:8px}
 .strat-row{display:flex;align-items:center;gap:10px}
-.strat-row .name{width:150px;font-size:.75rem;color:#888}
-.strat-row .bar-wrap{flex:1;background:#0d0d0d;border-radius:4px;height:20px;overflow:hidden}
-.strat-row .bar{height:100%;border-radius:4px;display:flex;align-items:center;padding:0 8px;font-size:.7rem;font-weight:700;min-width:50px;transition:width .5s}
-.bar.pos{background:#003d1a;color:#00e676}.bar.neg{background:#3d0000;color:#ff5252}
+.strat-row .name{width:160px;font-size:.73rem;color:var(--muted)}
+.strat-row .bar-wrap{flex:1;background:var(--bg);border-radius:4px;height:22px;overflow:hidden}
+.strat-row .bar{height:100%;border-radius:4px;display:flex;align-items:center;padding:0 10px;font-size:.7rem;font-weight:700;min-width:60px;transition:width .5s}
+.bar.pos{background:#0a2a1a;color:var(--green)}.bar.neg{background:#2a0a0a;color:var(--red)}
 
-#log-feed{background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;height:500px;overflow-y:auto;padding:10px;font-family:monospace;font-size:.72rem}
-.log-line{padding:1px 0;border-bottom:1px solid #111;line-height:1.5}
-.log-line .ts{color:#444;margin-right:8px}
+/* Log feed */
+#log-feed{background:var(--bg);border:1px solid var(--border);border-radius:var(--card-radius);height:500px;overflow-y:auto;padding:10px;font-family:'Cascadia Code','Consolas',monospace;font-size:.71rem}
+.log-line{padding:2px 0;border-bottom:1px solid var(--surface);line-height:1.5}
+.log-line .ts{color:#3a3a5a;margin-right:8px}
 .log-line .lvl{margin-right:8px;font-weight:700}
-.log-line .lvl.INFO{color:#00e5ff}.log-line .lvl.WARNING{color:#ffd740}.log-line .lvl.ERROR{color:#ff5252}.log-line .lvl.DEBUG{color:#555}.log-line .lvl.SUCCESS{color:#00e676}
+.log-line .lvl.INFO{color:var(--accent2)}.log-line .lvl.WARNING{color:var(--yellow)}.log-line .lvl.ERROR{color:var(--red)}.log-line .lvl.DEBUG{color:#3a3a5a}.log-line .lvl.SUCCESS{color:var(--green)}
 
-.meta-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:16px;margin-bottom:14px}
-.meta-card h3{color:#7986cb;margin-bottom:8px;font-size:.85rem}
-.meta-analysis{color:#ccc;font-size:.78rem;line-height:1.6;white-space:pre-wrap;max-height:300px;overflow-y:auto}
-.change-table td:nth-child(3){color:#00e676}
-.ts-small{color:#555;font-size:.65rem}
-.no-data{color:#333;text-align:center;padding:30px;font-size:.8rem}
-#last-update{color:#333;font-size:.65rem;text-align:right;padding:6px 20px}
+/* Meta cards */
+.meta-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;margin-bottom:14px}
+.meta-card h3{color:#818cf8;margin-bottom:10px;font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.meta-analysis{color:#cbd5e1;font-size:.76rem;line-height:1.7;white-space:pre-wrap;max-height:320px;overflow-y:auto}
+.change-table td:nth-child(3){color:var(--green)}
+.ts-small{color:var(--muted);font-size:.65rem}
+.no-data{color:#2a2a3a;text-align:center;padding:32px;font-size:.8rem}
+#last-update{color:#2a2a3a;font-size:.65rem;text-align:right;padding:6px 20px}
 
-/* Status tab */
-.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:18px}
-.status-item{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:12px;display:flex;align-items:center;gap:10px}
-.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-.dot.ok{background:#00e676;box-shadow:0 0 6px #00e676}
-.dot.warn{background:#ffd740;box-shadow:0 0 6px #ffd740}
-.dot.err{background:#ff5252;box-shadow:0 0 6px #ff5252}
-.status-label{font-size:.78rem;color:#ccc}
-.status-detail{font-size:.65rem;color:#555;margin-top:2px}
+/* Status / System tab */
+.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:18px}
+.status-item{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px;display:flex;align-items:center;gap:10px}
+.dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.dot.ok{background:var(--green);box-shadow:0 0 8px var(--green)}
+.dot.warn{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}
+.dot.err{background:var(--red);box-shadow:0 0 8px var(--red)}
+.status-label{font-size:.76rem;color:var(--text);font-weight:500}
+.status-detail{font-size:.63rem;color:var(--muted);margin-top:2px}
 
-.strat-card{background:#141414;border:2px solid #1e1e1e;border-radius:8px;padding:12px}
-.strat-card.enabled{border-color:#1a3a1a}
-.strat-card.disabled{border-color:#2a1a1a;opacity:.6}
-.strat-card h4{font-size:.8rem;margin-bottom:4px}
-.strat-card .strat-status{font-size:.65rem;font-weight:700}
-.strat-card .strat-note{font-size:.65rem;color:#555;margin-top:4px}
+/* Strategy cards for Strategies tab */
+.strat-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px}
+.strat-card.enabled{border-color:#1a3a2a}
+.strat-card.disabled{border-color:#2a1a1a;opacity:.55}
+.strat-card h4{font-size:.8rem;font-weight:700;margin-bottom:6px;color:var(--text)}
+.strat-card .strat-status{font-size:.63rem;font-weight:700}
+.strat-card .strat-note{font-size:.63rem;color:var(--muted);margin-top:5px;line-height:1.5}
+.strat-card .strat-metrics{display:flex;gap:12px;margin-top:8px;flex-wrap:wrap}
+.strat-metric{display:flex;flex-direction:column;gap:2px}
+.strat-metric .sm-lbl{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.strat-metric .sm-val{font-size:.82rem;font-weight:700}
 
-.health-bar{height:8px;border-radius:4px;background:#1a1a1a;overflow:hidden;margin-top:6px}
-.health-fill{height:100%;border-radius:4px;transition:width .5s}
+.health-bar{height:6px;border-radius:3px;background:var(--surface2);overflow:hidden;margin-top:6px}
+.health-fill{height:100%;border-radius:3px;transition:width .5s}
 
-/* Analytics tab */
+/* Analytics / Strategies tab */
 .analytics-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-.thinking-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:14px;margin-bottom:14px}
-.thinking-card h3{font-size:.72rem;color:#7986cb;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
+.thinking-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;margin-bottom:14px}
+.thinking-card h3{font-size:.68rem;color:#818cf8;text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;font-weight:600}
 
 /* Time-to-real-PnL widget */
-.ttpl-card{background:#111;border:1px solid #1e2a1e;border-top:3px solid #00e676;border-radius:8px;padding:16px;margin-bottom:18px}
+.ttpl-card{background:var(--surface);border:1px solid var(--border);border-top:3px solid var(--green);border-radius:var(--card-radius);padding:16px;margin-bottom:20px}
 .ttpl-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-.ttpl-title{font-size:.85rem;font-weight:700;color:#ccc;text-transform:uppercase;letter-spacing:.06em}
-.ttpl-badge{font-size:.7rem;font-weight:700;padding:3px 10px;border-radius:4px;background:#1a2a1a;color:#00e676}
-.ttpl-badge.bootstrap{background:#2a1a00;color:#ffd740}
-.ttpl-badge.active{background:#001a0a;color:#00e676}
-.ttpl-badge.profit{background:#001a1a;color:#00e5ff}
+.ttpl-title{font-size:.82rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:.06em}
+.ttpl-badge{font-size:.68rem;font-weight:700;padding:3px 10px;border-radius:6px;background:#0d2a0d;color:var(--green)}
+.ttpl-badge.bootstrap{background:#2a1a00;color:var(--yellow)}
+.ttpl-badge.active{background:#0d1a0d;color:var(--green)}
+.ttpl-badge.profit{background:#0d1a2a;color:var(--accent2)}
 .ttpl-milestones{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:12px}
-.ttpl-milestone{background:#141414;border:1px solid #1e1e1e;border-radius:6px;padding:12px}
-.ttpl-milestone.done{border-color:#1a3a1a}
-.ttpl-milestone.done .ttpl-ms-eta{color:#00e676}
-.ttpl-ms-label{font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
-.ttpl-ms-eta{font-size:1.1rem;font-weight:700;color:#ffd740;margin-bottom:4px}
-.ttpl-ms-sub{font-size:.65rem;color:#444}
-.ttpl-ms-bar{height:4px;background:#1a1a1a;border-radius:2px;margin-top:8px;overflow:hidden}
+.ttpl-milestone{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px}
+.ttpl-milestone.done{border-color:#1a3a2a}
+.ttpl-milestone.done .ttpl-ms-eta{color:var(--green)}
+.ttpl-ms-label{font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.ttpl-ms-eta{font-size:1.1rem;font-weight:700;color:var(--yellow);margin-bottom:4px}
+.ttpl-ms-sub{font-size:.63rem;color:var(--muted)}
+.ttpl-ms-bar{height:4px;background:var(--bg);border-radius:2px;margin-top:8px;overflow:hidden}
 .ttpl-ms-fill{height:100%;border-radius:2px;transition:width .5s}
-.ttpl-verdict{font-size:.78rem;color:#666;line-height:1.6;padding-top:8px;border-top:1px solid #1a1a1a}
+.ttpl-verdict{font-size:.76rem;color:var(--muted);line-height:1.7;padding-top:10px;border-top:1px solid var(--border)}
 
-/* Balances tab */
+/* Balances absorbed into System tab */
 .bal-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:18px}
-.bal-card{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:18px}
-.bal-card.anthropic{border-top:3px solid #ce93d8}
-.bal-card.railway{border-top:3px solid #4dd0e1}
-.bal-card.bot{border-top:3px solid #00e676}
-.bal-card h3{font-size:.8rem;font-weight:700;margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}
-.bal-card.anthropic h3{color:#ce93d8}
-.bal-card.railway h3{color:#4dd0e1}
-.bal-card.bot h3{color:#00e676}
-.bal-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #1a1a1a;font-size:.78rem}
+.bal-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:18px}
+.bal-card.anthropic{border-top:3px solid #a78bfa}
+.bal-card.railway{border-top:3px solid var(--accent2)}
+.bal-card.bot{border-top:3px solid var(--green)}
+.bal-card h3{font-size:.78rem;font-weight:700;margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}
+.bal-card.anthropic h3{color:#a78bfa}
+.bal-card.railway h3{color:var(--accent2)}
+.bal-card.bot h3{color:var(--green)}
+.bal-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);font-size:.76rem}
 .bal-row:last-child{border-bottom:none}
-.bal-lbl{color:#555}
-.bal-val{font-weight:600;color:#ccc}
-.budget-bar{height:6px;border-radius:3px;background:#1a1a1a;overflow:hidden;margin-top:10px}
+.bal-lbl{color:var(--muted)}
+.bal-val{font-weight:600;color:var(--text)}
+.budget-bar{height:5px;border-radius:3px;background:var(--surface2);overflow:hidden;margin-top:10px}
 .budget-fill{height:100%;border-radius:3px;transition:width .5s}
-.budget-label{font-size:.65rem;color:#555;margin-top:4px;display:flex;justify-content:space-between}
-.cycle-bar{background:#141414;border:1px solid #1e1e1e;border-radius:8px;padding:16px;margin-bottom:18px}
-.cycle-bar h3{font-size:.72rem;color:#666;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
-.cycle-progress{height:10px;border-radius:5px;background:#1a1a1a;overflow:hidden;margin-bottom:8px}
-.cycle-fill{height:100%;border-radius:5px;background:linear-gradient(90deg,#00e5ff,#7986cb);transition:width .5s}
-.refill-link{display:block;margin-top:12px;text-align:center;font-size:.72rem;font-weight:600;padding:7px;border-radius:5px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;text-decoration:none;transition:all .2s}
-.refill-link:hover{background:#222;color:#ccc;border-color:#444}
+.budget-label{font-size:.63rem;color:var(--muted);margin-top:4px;display:flex;justify-content:space-between}
+.cycle-bar{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;margin-bottom:18px}
+.cycle-bar h3{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;font-weight:600}
+.cycle-progress{height:8px;border-radius:4px;background:var(--surface2);overflow:hidden;margin-bottom:8px}
+.cycle-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .5s}
+.refill-link{display:block;margin-top:12px;text-align:center;font-size:.7rem;font-weight:600;padding:7px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);text-decoration:none;transition:all .2s}
+.refill-link:hover{background:var(--border);color:var(--text)}
 
-/* Research tab */
-.res-insights-card{background:#111;border:1px solid #2a2a1a;border-top:3px solid #ffd740;border-radius:8px;padding:16px;margin-bottom:14px}
+/* Research / AI Intel */
+.res-insights-card{background:var(--surface);border:1px solid var(--border);border-top:3px solid var(--yellow);border-radius:var(--card-radius);padding:16px;margin-bottom:14px}
 .res-insights-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.res-run-label{font-size:.65rem;color:#555}
-.res-insight{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid #1a1a1a;font-size:.78rem;color:#ccc;line-height:1.5}
+.res-run-label{font-size:.63rem;color:var(--muted)}
+.res-insight{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:.76rem;color:#cbd5e1;line-height:1.6}
 .res-insight:last-child{border-bottom:none}
-.res-insight-bullet{color:#ffd740;font-size:.9rem;flex-shrink:0;margin-top:1px}
-.res-finding{background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:12px;margin-bottom:8px;border-left:3px solid #333}
-.res-finding.high{border-left-color:#00e676}
-.res-finding.medium{border-left-color:#ffd740}
-.res-finding.low{border-left-color:#555}
+.res-insight-bullet{color:var(--yellow);font-size:.85rem;flex-shrink:0;margin-top:1px}
+.res-finding{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid var(--border)}
+.res-finding.high{border-left-color:var(--green)}
+.res-finding.medium{border-left-color:var(--yellow)}
+.res-finding.low{border-left-color:var(--muted)}
 .res-finding-meta{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
-.res-rel{font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase}
-.res-rel.high{background:#001a0a;color:#00e676}
-.res-rel.medium{background:#2a2a00;color:#ffd740}
-.res-rel.low{background:#1a1a1a;color:#555}
-.res-cat{font-size:.65rem;background:#1a1a2a;color:#7986cb;padding:2px 7px;border-radius:3px}
-.res-source{font-size:.65rem;color:#555;font-style:italic}
-.res-title{font-size:.82rem;font-weight:600;color:#ddd;margin-bottom:4px}
-.res-summary{font-size:.75rem;color:#888;line-height:1.5;margin-bottom:5px}
-.res-suggestion{font-size:.72rem;color:#00e5ff;padding:5px 8px;background:#001a1a;border-radius:4px}
-.res-experiment{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid #1a1a1a;font-size:.78rem;color:#ccc}
+.res-rel{font-size:.63rem;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase}
+.res-rel.high{background:#0a2a1a;color:var(--green)}
+.res-rel.medium{background:#2a1a00;color:var(--yellow)}
+.res-rel.low{background:var(--surface2);color:var(--muted)}
+.res-cat{font-size:.63rem;background:#0d0d2a;color:#818cf8;padding:2px 7px;border-radius:3px}
+.res-source{font-size:.63rem;color:var(--muted);font-style:italic}
+.res-title{font-size:.8rem;font-weight:600;color:var(--text);margin-bottom:4px}
+.res-summary{font-size:.73rem;color:var(--muted);line-height:1.5;margin-bottom:5px}
+.res-suggestion{font-size:.7rem;color:var(--accent2);padding:5px 8px;background:#0a1a2a;border-radius:4px}
+.res-experiment{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:.76rem;color:#cbd5e1}
 .res-experiment:last-child{border-bottom:none}
-.res-exp-num{color:#7986cb;font-weight:700;flex-shrink:0;min-width:18px}
+.res-exp-num{color:#818cf8;font-weight:700;flex-shrink:0;min-width:18px}
 
-/* Code Review tab */
-.cr-finding{background:#111;border:1px solid #1e1e1e;border-radius:6px;padding:12px;margin-bottom:8px;border-left:3px solid #333}
-.cr-finding.high{border-left-color:#ff5252}
-.cr-finding.medium{border-left-color:#ffd740}
-.cr-finding.low{border-left-color:#00e5ff}
-.cr-finding.info{border-left-color:#555}
+/* Code Review (inside System tab) */
+.cr-finding{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid var(--border)}
+.cr-finding.high{border-left-color:var(--red)}
+.cr-finding.medium{border-left-color:var(--yellow)}
+.cr-finding.low{border-left-color:var(--accent2)}
+.cr-finding.info{border-left-color:var(--muted)}
 .cr-finding-header{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-.cr-sev{font-size:.65rem;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase}
-.cr-sev.high{background:#3d0000;color:#ff5252}
-.cr-sev.medium{background:#3d3000;color:#ffd740}
-.cr-sev.low{background:#001a3d;color:#00e5ff}
-.cr-sev.info{background:#1a1a1a;color:#666}
-.cr-cat{font-size:.65rem;color:#555;font-style:italic}
-.cr-file{font-size:.65rem;color:#7986cb;font-family:monospace}
-.cr-title{font-size:.82rem;font-weight:600;color:#ddd}
-.cr-desc{font-size:.75rem;color:#888;margin-top:4px;line-height:1.5}
-.cr-suggestion{font-size:.72rem;color:#4dd0e1;margin-top:5px;padding:5px 8px;background:#001a1a;border-radius:4px}
-.cr-strength{font-size:.78rem;color:#00e676;padding:4px 0;display:flex;align-items:flex-start;gap:6px}
-.cr-grade-A{color:#00e676}.cr-grade-B{color:#00e5ff}.cr-grade-C{color:#ffd740}.cr-grade-D{color:#ff7043}.cr-grade-F{color:#ff5252}
+.cr-sev{font-size:.63rem;font-weight:700;padding:2px 7px;border-radius:3px;text-transform:uppercase}
+.cr-sev.high{background:#2a0a0a;color:var(--red)}
+.cr-sev.medium{background:#2a1a00;color:var(--yellow)}
+.cr-sev.low{background:#0a1a2a;color:var(--accent2)}
+.cr-sev.info{background:var(--surface2);color:var(--muted)}
+.cr-cat{font-size:.63rem;color:var(--muted);font-style:italic}
+.cr-file{font-size:.63rem;color:#818cf8;font-family:monospace}
+.cr-title{font-size:.8rem;font-weight:600;color:var(--text)}
+.cr-desc{font-size:.73rem;color:var(--muted);margin-top:4px;line-height:1.5}
+.cr-suggestion{font-size:.7rem;color:var(--accent2);margin-top:5px;padding:5px 8px;background:#0a1a2a;border-radius:4px}
+.cr-strength{font-size:.76rem;color:var(--green);padding:4px 0;display:flex;align-items:flex-start;gap:6px}
+.cr-grade-A{color:var(--green)}.cr-grade-B{color:var(--accent2)}.cr-grade-C{color:var(--yellow)}.cr-grade-D{color:#fb923c}.cr-grade-F{color:var(--red)}
+
+/* AI Intel status cards */
+.ai-status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-bottom:20px}
+.ai-status-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--card-radius);padding:18px}
+.ai-status-card.configured{border-color:#1a3a2a;border-top:3px solid var(--green)}
+.ai-status-card.missing{border-top:3px solid var(--muted)}
+.ai-card-name{font-size:.9rem;font-weight:700;color:var(--text);margin-bottom:4px}
+.ai-card-status{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.ai-card-note{font-size:.68rem;color:var(--muted);line-height:1.5}
+.ai-card-key{font-size:.63rem;color:var(--muted);font-family:monospace;margin-top:6px;padding:4px 8px;background:var(--bg);border-radius:4px}
 </style>
 </head>
 <body>
@@ -1765,56 +1811,85 @@ tr:hover td{background:#181818}
 
 <div class="tabs">
   <div class="tab active" onclick="showTab('overview')">Overview</div>
-  <div class="tab" onclick="showTab('live')">Live Feed</div>
   <div class="tab" onclick="showTab('positions')">Positions</div>
   <div class="tab" onclick="showTab('trades')">Trades</div>
-  <div class="tab" onclick="showTab('status')">Status</div>
-  <div class="tab" onclick="showTab('analytics')">Analytics</div>
-  <div class="tab" onclick="showTab('balances')">Balances</div>
-  <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
-  <div class="tab" onclick="showTab('codereview')">Code Review</div>
-  <div class="tab" onclick="showTab('research')">Research</div>
+  <div class="tab" onclick="showTab('strategies')">Strategies</div>
   <div class="tab" onclick="showTab('ai-intel')">AI Intel</div>
-  <div class="tab" onclick="showTab('compare')">Compare</div>
+  <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
+  <div class="tab" onclick="showTab('system')">System</div>
 </div>
 
-<!-- OVERVIEW TAB -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 1: OVERVIEW                                            -->
+<!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page active" id="tab-overview">
 
-  <!-- Polymarket profile link -->
-  <div style="display:flex;justify-content:flex-end;margin-bottom:10px;gap:8px">
+  <div style="display:flex;justify-content:flex-end;margin-bottom:14px;gap:8px">
     <a id="poly-profile-link" href="https://polymarket.com/portfolio" target="_blank"
-       style="display:inline-flex;align-items:center;gap:6px;background:#1a2744;color:#90caf9;
-              padding:7px 14px;border-radius:6px;font-size:.72rem;font-weight:700;
-              text-decoration:none;border:1px solid #1e3a6e;transition:background .15s"
-       onmouseover="this.style.background='#243a6e'" onmouseout="this.style.background='#1a2744'">
+       style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);color:var(--accent2);
+              padding:7px 14px;border-radius:8px;font-size:.72rem;font-weight:700;
+              text-decoration:none;border:1px solid var(--border);transition:background .15s"
+       onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background='var(--surface2)'">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-      View My Positions on Polymarket
+      Polymarket Profile
     </a>
     <a href="https://polymarket.com/portfolio" target="_blank" id="poly-portfolio-link"
-       style="display:inline-flex;align-items:center;gap:6px;background:#1a2744;color:#69f0ae;
-              padding:7px 14px;border-radius:6px;font-size:.72rem;font-weight:700;
-              text-decoration:none;border:1px solid #1e5a3e;transition:background .15s"
-       onmouseover="this.style.background='#1a3a2e'" onmouseout="this.style.background='#1a2744'">
+       style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);color:var(--green);
+              padding:7px 14px;border-radius:8px;font-size:.72rem;font-weight:700;
+              text-decoration:none;border:1px solid var(--border);transition:background .15s"
+       onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background='var(--surface2)'">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-      Portfolio Overview
+      Portfolio
     </a>
   </div>
 
-  <div class="cards">
-    <div class="card"><div class="lbl">Cash Balance</div><div class="val blue" id="balance">--</div></div>
-    <div class="card"><div class="lbl">Total Value</div><div class="val" id="total-value">--</div><div class="sub" id="total-pnl-sub">--</div></div>
+  <!-- Top 4 metric cards -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px">
+    <div class="card card-pnl">
+      <div class="lbl">Total P&amp;L</div>
+      <div class="val" id="total-value" style="font-size:1.6rem">--</div>
+      <div class="sub" id="total-pnl-sub">--</div>
+    </div>
+    <div class="card card-balance">
+      <div class="lbl">Cash Balance</div>
+      <div class="val blue" id="balance" style="font-size:1.6rem">--</div>
+    </div>
+    <div class="card card-winrate">
+      <div class="lbl">Win Rate</div>
+      <div class="val" id="win-rate" style="font-size:1.6rem">--</div>
+      <div class="sub">closed positions</div>
+    </div>
+    <div class="card card-trades">
+      <div class="lbl">Trades Today</div>
+      <div class="val purple" id="trades-per-hr" style="font-size:1.6rem">--</div>
+      <div class="sub" id="total-trades-sub">-- total</div>
+    </div>
+  </div>
+
+  <!-- Second row: realized P&L, positions, exposure, fees -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px">
     <div class="card">
-      <div class="lbl">Realized P&amp;L ✓</div>
+      <div class="lbl">Realized P&amp;L</div>
       <div class="val" id="realized-pnl">--</div>
       <div class="sub" id="realized-pnl-pct">-- | <span id="closed-count">0</span> closed</div>
     </div>
-    <div class="card"><div class="lbl">Win Rate</div><div class="val" id="win-rate">--</div><div class="sub">closed positions</div></div>
-    <div class="card"><div class="lbl">Open Positions</div><div class="val yellow" id="pos-count">--</div><div class="sub" id="exposure-sub">--</div></div>
-    <div class="card"><div class="lbl">Trades / hr</div><div class="val purple" id="trades-per-hr">--</div><div class="sub" id="total-trades-sub">-- total</div></div>
-    <div class="card"><div class="lbl">Fees Paid</div><div class="val red" id="fees">--</div></div>
+    <div class="card">
+      <div class="lbl">Open Positions</div>
+      <div class="val yellow" id="pos-count">--</div>
+      <div class="sub" id="exposure-sub">--</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Fees Paid</div>
+      <div class="val red" id="fees">--</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Cycle Count</div>
+      <div class="val blue" id="live-cycle">--</div>
+      <div class="sub" id="live-uptime-sub">--</div>
+    </div>
   </div>
 
+  <!-- Charts -->
   <div class="chart-grid">
     <div class="chart-box">
       <h3>Portfolio Value Over Time</h3>
@@ -1826,66 +1901,54 @@ tr:hover td{background:#181818}
     </div>
   </div>
 
+  <!-- Strategy P&L bars -->
   <div class="section">
-    <h3>Strategy P&L</h3>
+    <h3>Strategy P&amp;L</h3>
     <div class="strat-bars" id="strat-bars"><div class="no-data">Waiting for trades...</div></div>
   </div>
 
   <!-- Agent countdown timers -->
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px" id="agent-timers">
-    <div style="background:#111;border-radius:6px;padding:12px 14px;border-left:3px solid #7c4dff">
-      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:#7c4dff;font-weight:700;margin-bottom:4px">Meta-Agent</div>
-      <div style="font-size:1.1rem;font-weight:700;font-family:monospace;color:#e0e0e0" id="timer-meta">--</div>
-      <div style="font-size:.62rem;color:#555;margin-top:2px" id="timer-meta-sub">last run --</div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px">
+    <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--card-radius);padding:14px">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);font-weight:700;margin-bottom:5px">Meta-Agent</div>
+      <div style="font-size:1.2rem;font-weight:700;font-family:monospace;color:var(--text)" id="timer-meta">--</div>
+      <div style="font-size:.62rem;color:var(--muted);margin-top:3px" id="timer-meta-sub">last run --</div>
     </div>
-    <div style="background:#111;border-radius:6px;padding:12px 14px;border-left:3px solid #00bcd4">
-      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:#00bcd4;font-weight:700;margin-bottom:4px">Research Agent</div>
-      <div style="font-size:1.1rem;font-weight:700;font-family:monospace;color:#e0e0e0" id="timer-research">--</div>
-      <div style="font-size:.62rem;color:#555;margin-top:2px" id="timer-research-sub">last run --</div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent2);border-radius:var(--card-radius);padding:14px">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent2);font-weight:700;margin-bottom:5px">Research Agent</div>
+      <div style="font-size:1.2rem;font-weight:700;font-family:monospace;color:var(--text)" id="timer-research">--</div>
+      <div style="font-size:.62rem;color:var(--muted);margin-top:3px" id="timer-research-sub">last run --</div>
     </div>
-    <div style="background:#111;border-radius:6px;padding:12px 14px;border-left:3px solid #ff9800">
-      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:#ff9800;font-weight:700;margin-bottom:4px">Code Review</div>
-      <div style="font-size:1.1rem;font-weight:700;font-family:monospace;color:#e0e0e0" id="timer-review">--</div>
-      <div style="font-size:.62rem;color:#555;margin-top:2px" id="timer-review-sub">last run --</div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--yellow);border-radius:var(--card-radius);padding:14px">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--yellow);font-weight:700;margin-bottom:5px">Code Review</div>
+      <div style="font-size:1.2rem;font-weight:700;font-family:monospace;color:var(--text)" id="timer-review">--</div>
+      <div style="font-size:.62rem;color:var(--muted);margin-top:3px" id="timer-review-sub">last run --</div>
     </div>
   </div>
 </div>
 
-<!-- LIVE FEED TAB -->
-<div class="page" id="tab-live">
-  <div class="cards" style="grid-template-columns:repeat(5,1fr);margin-bottom:14px">
-    <div class="card"><div class="lbl">Cycle</div><div class="val blue" id="live-cycle">--</div></div>
-    <div class="card"><div class="lbl">Uptime</div><div class="val" id="live-uptime">--</div></div>
-    <div class="card"><div class="lbl">Realized P&amp;L</div><div class="val" id="live-realized">--</div></div>
-    <div class="card"><div class="lbl">Win Rate</div><div class="val" id="live-winrate">--</div></div>
-    <div class="card"><div class="lbl">Trades</div><div class="val" id="live-trades">--</div></div>
-  </div>
-  <div class="section">
-    <h3>Bot Log Stream <span style="color:#555;font-weight:normal">(last 500 lines)</span>
-      <label style="float:right;color:#555;font-size:.7rem"><input type="checkbox" id="autoscroll" checked> Auto-scroll</label>
-    </h3>
-    <div id="log-feed"></div>
-  </div>
-</div>
-
-<!-- POSITIONS TAB -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 2: POSITIONS                                           -->
+<!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page" id="tab-positions">
   <div class="section">
     <h3>Open Positions (<span id="open-pos-count">0</span>)</h3>
     <div id="positions-table"><div class="no-data">No open positions</div></div>
   </div>
   <div class="section">
-    <h3>Closed Positions — Recent 100 <span style="color:#555;font-weight:normal;font-size:.65rem">These are REAL results</span></h3>
+    <h3>Closed Positions — Recent 100 <span style="color:var(--muted);font-weight:normal;font-size:.63rem">Realized results only</span></h3>
     <div id="closed-table"><div class="no-data">No closed positions yet</div></div>
   </div>
 </div>
 
-<!-- TRADES TAB -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 3: TRADES                                              -->
+<!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page" id="tab-trades">
-  <div class="cards" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px">
     <div class="card"><div class="lbl">Total Trades</div><div class="val blue" id="t-total">--</div></div>
-    <div class="card"><div class="lbl">Buy Trades</div><div class="val green" id="t-buys">--</div></div>
-    <div class="card"><div class="lbl">Sell Trades</div><div class="val red" id="t-sells">--</div></div>
+    <div class="card"><div class="lbl">Buys</div><div class="val green" id="t-buys">--</div></div>
+    <div class="card"><div class="lbl">Sells</div><div class="val red" id="t-sells">--</div></div>
     <div class="card"><div class="lbl">Fees Paid</div><div class="val yellow" id="t-fees">--</div></div>
   </div>
   <div class="section">
@@ -1894,41 +1957,24 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
-<!-- STATUS TAB -->
-<div class="page" id="tab-status">
-  <div class="section">
-    <h3>System Connections</h3>
-    <div class="status-grid" id="status-connections">
-      <div class="no-data">Loading...</div>
-    </div>
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 4: STRATEGIES  (was Analytics + Status strategy cards) -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-strategies">
+
+  <!-- Risk Health Score (from Status) -->
+  <div class="section" style="margin-bottom:14px">
+    <h3>Risk Health</h3>
+    <div id="status-risk"><div class="no-data">Loading...</div></div>
   </div>
 
-  <div class="section">
+  <!-- Strategy Cards -->
+  <div class="section" style="margin-bottom:14px">
     <h3>Strategies</h3>
     <div class="status-grid" id="status-strategies">
       <div class="no-data">Loading...</div>
     </div>
   </div>
-
-  <div class="section">
-    <h3>Risk Health</h3>
-    <div id="status-risk"><div class="no-data">Loading...</div></div>
-  </div>
-
-  <div class="section">
-    <h3>Disk Usage</h3>
-    <div id="status-disk"><div class="no-data">Loading...</div></div>
-  </div>
-
-  <!-- Kalshi diagnostics -->
-  <div class="section">
-    <h3>Kalshi / Cross-Exchange</h3>
-    <div id="kalshi-diag"><div class="no-data">Loading...</div></div>
-  </div>
-</div>
-
-<!-- ANALYTICS TAB -->
-<div class="page" id="tab-analytics">
 
   <!-- Time-to-real-PnL estimator -->
   <div class="ttpl-card" id="ttpl-card">
@@ -1936,7 +1982,7 @@ tr:hover td{background:#181818}
       <span class="ttpl-title">Time to Real P&amp;L</span>
       <span class="ttpl-badge" id="ttpl-phase-badge">--</span>
     </div>
-    <div class="ttpl-body">
+    <div>
       <div class="ttpl-milestones" id="ttpl-milestones">
         <div class="no-data">Loading estimates...</div>
       </div>
@@ -1944,7 +1990,7 @@ tr:hover td{background:#181818}
     </div>
   </div>
 
-  <!-- Row 1: ROI + Win Rate -->
+  <!-- Analytics charts -->
   <div class="analytics-row">
     <div class="chart-box">
       <h3>Strategy ROI %</h3>
@@ -1956,7 +2002,6 @@ tr:hover td{background:#181818}
     </div>
   </div>
 
-  <!-- Row 2: Hourly PnL + Fee Drag -->
   <div class="analytics-row">
     <div class="chart-box">
       <h3>Hourly PnL — Last 24h</h3>
@@ -1968,15 +2013,13 @@ tr:hover td{background:#181818}
     </div>
   </div>
 
-  <!-- Row 3: Health score trend -->
   <div class="section">
     <h3>Health Score Trend (Meta-Agent History)</h3>
     <canvas id="healthTrendChart" style="max-height:160px"></canvas>
   </div>
 
-  <!-- Row 4: Bot Thinking -->
   <div class="thinking-card">
-    <h3>Bot Thinking — Recent LLM Decisions</h3>
+    <h3>Recent LLM Decisions</h3>
     <div id="llm-decisions-table"><div class="no-data">No LLM-tagged trades yet</div></div>
   </div>
 
@@ -1985,85 +2028,155 @@ tr:hover td{background:#181818}
     <div id="llm-active-signals"><div class="no-data">None in last hour</div></div>
   </div>
 
-  <!-- Row 5: Parameter change timeline -->
   <div class="thinking-card">
     <h3>Meta-Agent Parameter Change Timeline</h3>
     <div id="param-timeline"><div class="no-data">No parameter changes yet</div></div>
   </div>
 </div>
 
-<!-- BALANCES TAB -->
-<div class="page" id="tab-balances">
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 5: AI INTEL  (was AI Intel + Research)                 -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-ai-intel">
 
-  <!-- Billing cycle bar -->
-  <div class="cycle-bar">
-    <h3>Billing Cycle</h3>
-    <div id="cycle-dates" style="display:flex;justify-content:space-between;font-size:.72rem;color:#555;margin-bottom:8px">
-      <span id="cycle-start">--</span><span id="cycle-days-left" style="color:#aaa">-- days remaining</span><span id="cycle-end">--</span>
-    </div>
-    <div class="cycle-progress"><div class="cycle-fill" id="cycle-fill" style="width:0%"></div></div>
-    <div style="font-size:.65rem;color:#444;margin-top:4px;text-align:center"><span id="cycle-pct">0</span>% of billing cycle elapsed</div>
+  <!-- AI Service Status Cards -->
+  <div class="ai-status-grid" id="ai-intel-status-cards">
+    <div class="no-data">Loading AI integrations...</div>
   </div>
 
-  <!-- Service cards -->
-  <div class="bal-grid">
-
-    <!-- Anthropic -->
-    <div class="bal-card anthropic">
-      <h3>Anthropic API</h3>
-      <div class="bal-row"><span class="bal-lbl">Model</span><span class="bal-val" id="bal-ant-model">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">API Key</span><span class="bal-val" id="bal-ant-key">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Meta-Agent Runs (this deploy)</span><span class="bal-val" id="bal-ant-runs">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Est. Cost / Run</span><span class="bal-val" id="bal-ant-cpr">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Est. Spend (this deploy)</span><span class="bal-val" id="bal-ant-cost" style="color:#ce93d8">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Projected Monthly</span><span class="bal-val" id="bal-ant-proj">--</span></div>
-      <div class="bal-row" id="bal-ant-budget-row"><span class="bal-lbl">Monthly Budget</span><span class="bal-val" id="bal-ant-budget">Not set</span></div>
-      <div class="budget-bar"><div class="budget-fill" id="bal-ant-bar" style="width:0%;background:#ce93d8"></div></div>
-      <div class="budget-label"><span id="bal-ant-bar-lbl">Set ANTHROPIC_MONTHLY_BUDGET env var to track</span><span id="bal-ant-bar-pct"></span></div>
-      <a href="https://console.anthropic.com/settings/billing" target="_blank" class="refill-link">+ Add Anthropic Credits →</a>
+  <!-- Ensemble LLM Signals -->
+  <div class="section" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>Ensemble LLM Signals</h3>
+      <span id="ensemble-status" style="font-size:.65rem;color:var(--muted)">--</span>
     </div>
-
-    <!-- Railway -->
-    <div class="bal-card railway">
-      <h3>Railway</h3>
-      <div class="bal-row"><span class="bal-lbl">Plan Base Cost</span><span class="bal-val" id="bal-rail-base">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Days Left in Cycle</span><span class="bal-val" id="bal-rail-days">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Disk Used / Limit</span><span class="bal-val" id="bal-rail-disk">--</span></div>
-      <div class="budget-bar"><div class="budget-fill" id="bal-rail-bar" style="width:0%;background:#4dd0e1"></div></div>
-      <div class="budget-label"><span>Disk usage</span><span id="bal-rail-bar-pct"></span></div>
-      <div style="font-size:.68rem;color:#555;margin-top:10px">Live billing data (credit remaining, monthly spend) must be checked directly on Railway — their API does not expose it.</div>
-      <a href="https://railway.app/account/billing" target="_blank" class="refill-link">+ View Billing on Railway →</a>
-    </div>
-
-    <!-- Bot Stats -->
-    <div class="bal-card bot">
-      <h3>Bot Runtime</h3>
-      <div class="bal-row"><span class="bal-lbl">Mode</span><span class="bal-val" id="bal-bot-mode">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Uptime This Deploy</span><span class="bal-val" id="bal-bot-uptime">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Trades Executed</span><span class="bal-val" id="bal-bot-trades">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Portfolio P&amp;L</span><span class="bal-val" id="bal-bot-pnl">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Cycles Left (billing)</span><span class="bal-val" id="bal-bot-cycles">--</span></div>
-      <div class="bal-row"><span class="bal-lbl">Meta-Runs Left (billing)</span><span class="bal-val" id="bal-bot-metaruns">--</span></div>
-      <a href="https://polymarket.com/wallet" target="_blank" class="refill-link">+ Deposit USDC to Polymarket →</a>
-    </div>
-
+    <table>
+      <thead><tr>
+        <th>Market</th><th>Claude</th><th>OpenAI</th><th>Consensus</th><th>Age (min)</th>
+      </tr></thead>
+      <tbody id="ensemble-tbody">
+        <tr><td colspan="5" style="color:var(--muted);text-align:center">No evaluations yet</td></tr>
+      </tbody>
+    </table>
   </div>
 
-  <!-- Cost breakdown note -->
+  <!-- Active Research Signals -->
+  <div class="meta-card" id="res-signals-card" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+      <h3 style="margin:0">Active Research Signals</h3>
+      <span id="res-signals-status" style="font-size:.66rem;color:var(--muted)">injected into combinatorial strategy</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <span style="font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Hot topics:</span>
+      <div id="res-active-topics" style="display:flex;gap:6px;flex-wrap:wrap"><span style="color:var(--muted);font-size:.66rem">none yet</span></div>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <span style="font-size:.66rem"><span style="color:var(--muted)">Focus:</span> <span id="res-signal-focus" style="color:var(--yellow)">--</span></span>
+      <span style="font-size:.66rem"><span style="color:var(--muted)">Confidence:</span> <span id="res-signal-confidence">--</span></span>
+      <span style="font-size:.66rem"><span style="color:var(--muted)">Param hints:</span> <span id="res-signal-params" style="font-family:monospace;color:var(--accent2)">none</span></span>
+    </div>
+  </div>
+
+  <!-- Top insights from latest research run -->
+  <div class="res-insights-card" id="res-insights-card">
+    <div class="res-insights-header">
+      <span style="font-size:.78rem;font-weight:700;color:var(--yellow);text-transform:uppercase;letter-spacing:.06em">Research Top Insights</span>
+      <span class="res-run-label" id="res-run-label">--</span>
+    </div>
+    <div id="res-insights"><div class="no-data">No research yet — runs every 2 hours (RESEARCH_INTERVAL_HOURS)</div></div>
+  </div>
+
+  <!-- Research run header stats -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+    <div class="card"><div class="lbl">Last Research Run</div><div class="val blue" id="res-last">--</div></div>
+    <div class="card"><div class="lbl">Next Research Run</div><div class="val yellow" id="res-next">--</div></div>
+    <div class="card"><div class="lbl">Total Findings</div><div class="val" id="res-total">--</div><div class="sub" id="res-high">--</div></div>
+    <div class="card"><div class="lbl">Web Search</div><div class="val" id="res-websearch">--</div><div class="sub" id="res-interval">every -- h</div></div>
+  </div>
+
+  <!-- Research findings -->
+  <div class="section" style="margin-top:14px">
+    <h3>Findings <span style="color:var(--muted);font-weight:normal;font-size:.63rem" id="res-topics-label"></span></h3>
+    <div id="res-findings"><div class="no-data">No findings yet.</div></div>
+  </div>
+
+  <!-- Suggested experiments -->
+  <div class="section" style="margin-top:14px">
+    <h3>Suggested Experiments</h3>
+    <div id="res-experiments"><div class="no-data">No suggestions yet.</div></div>
+  </div>
+
+  <!-- Research run history -->
+  <div class="section" style="margin-top:14px">
+    <h3>Research History <span style="color:var(--muted);font-weight:normal;font-size:.63rem">(last 24 runs)</span></h3>
+    <div id="res-history"><div class="no-data">No history yet.</div></div>
+  </div>
+
+  <!-- Strategy Proposals -->
+  <div class="section" style="margin-top:14px">
+    <h3>Strategy Proposals <span style="color:var(--muted);font-weight:normal;font-size:.63rem">generated by research agent</span></h3>
+    <div id="res-proposals"><div class="no-data">No proposals yet — generated automatically from high-relevance research findings.</div></div>
+  </div>
+
+  <!-- News Feed -->
+  <div class="section" style="margin-bottom:14px;margin-top:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>News Feed</h3>
+      <span id="news-status" style="font-size:.65rem;color:var(--muted)">--</span>
+    </div>
+    <div id="news-list" style="display:flex;flex-direction:column;gap:6px">
+      <div style="color:var(--muted);font-size:.72rem">No news loaded yet</div>
+    </div>
+  </div>
+
+  <!-- Active Hedges -->
+  <div class="section" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <h3>Active Hedges</h3>
+      <span id="hedge-status-badge" style="font-size:.65rem;color:var(--muted)">--</span>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">
+      <span style="font-size:.72rem"><span style="color:var(--muted)">Count:</span> <span id="hedge-count" style="color:var(--accent2)">--</span></span>
+      <span style="font-size:.72rem"><span style="color:var(--muted)">Enabled:</span> <span id="hedge-enabled" style="color:var(--yellow)">--</span></span>
+    </div>
+    <table>
+      <thead><tr><th>Token ID</th><th>Details</th></tr></thead>
+      <tbody id="hedge-tbody">
+        <tr><td colspan="2" style="color:var(--muted);text-align:center">No active hedges</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- QuickResolution -->
   <div class="section">
-    <h3>Cost Breakdown Notes</h3>
-    <div style="font-size:.75rem;color:#555;line-height:1.8">
-      <div><span style="color:#ce93d8">Anthropic:</span> Claude Opus 4.6 with extended thinking — ~$0.79/meta-agent run (est. 2,500 input tokens + 10,000 output/thinking). Runs every 30 min when active.</div>
-      <div style="margin-top:6px"><span style="color:#4dd0e1">Railway:</span> Hobby plan $5/mo base + usage. "Credit Remaining" and "Days Left" come from Railway's API — requires <code style="color:#666">RAILWAY_TOKEN</code>. Get your token at railway.app → Account → Tokens.</div>
-      <div style="margin-top:6px"><span style="color:#00e676">Volume:</span> Set <code style="color:#666">RAILWAY_VOLUME_LIMIT_MB</code> if your volume size differs from 512 MB default.</div>
-      <div style="margin-top:6px"><span style="color:#ffd740">Budgets:</span> Set <code style="color:#666">ANTHROPIC_MONTHLY_BUDGET</code> env var to show Anthropic budget bar.</div>
+    <h3>QuickResolution Activity</h3>
+    <div id="qr-status" style="padding:10px;background:var(--bg);border-radius:8px;font-size:.75rem;color:var(--muted)">
+      QuickResolution: <span id="qr-active-badge" style="font-weight:700;color:var(--muted)">UNKNOWN</span>
+    </div>
+  </div>
+
+  <!-- Proposal code viewer modal -->
+  <div id="proposal-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.88);z-index:1000;overflow:auto;padding:20px">
+    <div style="max-width:800px;margin:0 auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:22px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h3 id="modal-title" style="margin:0;color:var(--text)"></h3>
+        <button onclick="closeProposalModal()" style="background:none;border:none;color:var(--text);font-size:1.2rem;cursor:pointer">&#x2715;</button>
+      </div>
+      <div id="modal-finding" style="font-size:.72rem;color:var(--muted);margin-bottom:12px;padding:8px;background:var(--bg);border-radius:4px"></div>
+      <pre id="modal-code" style="background:var(--bg);padding:14px;border-radius:8px;overflow:auto;font-size:.7rem;color:var(--text);max-height:60vh;white-space:pre-wrap"></pre>
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+        <button id="modal-deploy-btn" onclick="deployProposal()" style="padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:700">Deploy Strategy</button>
+        <span id="modal-deploy-status" style="font-size:.72rem;color:var(--muted)"></span>
+      </div>
     </div>
   </div>
 </div>
 
-<!-- META-AGENT TAB -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 6: META-AGENT                                          -->
+<!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page" id="tab-meta">
-  <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px">
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px">
     <div class="card"><div class="lbl">Analyses Run</div><div class="val blue" id="meta-count">--</div></div>
     <div class="card"><div class="lbl">Last Run</div><div class="val" id="meta-last">--</div></div>
     <div class="card"><div class="lbl">Next Run</div><div class="val yellow" id="meta-next">--</div></div>
@@ -2077,327 +2190,210 @@ tr:hover td{background:#181818}
   </div>
 </div>
 
-<!-- CODE REVIEW TAB -->
-<div class="page" id="tab-codereview">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-    <button id="cr-runnow-btn" onclick="runCodeReviewNow()" style="padding:6px 16px;background:#1b5e20;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:700">▶ Run Review Now</button>
-    <span id="cr-runnow-status" style="font-size:.7rem;color:#555"></span>
-  </div>
-  <div class="cards" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
-    <div class="card"><div class="lbl">Code Grade</div><div class="val blue" id="cr-grade">--</div></div>
-    <div class="card"><div class="lbl">Health Score</div><div class="val" id="cr-score">--</div></div>
-    <div class="card"><div class="lbl">Last Review</div><div class="val yellow" id="cr-date">--</div></div>
-    <div class="card"><div class="lbl">Findings</div><div class="val" id="cr-total">--</div><div class="sub" id="cr-severity">--</div></div>
-  </div>
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 7: SYSTEM  (was Status + Balances + Code Review + Compare) -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-system">
 
-  <div class="meta-card" id="cr-summary-card">
-    <h3>Summary</h3>
-    <div id="cr-summary" class="meta-analysis">No review yet — runs automatically once a week (first run 5 minutes after bot start).</div>
-  </div>
-
-  <div class="meta-card" id="cr-strengths-card" style="display:none">
-    <h3>Strengths</h3>
-    <div id="cr-strengths"></div>
-  </div>
-
-  <div class="section" style="margin-top:14px">
-    <h3>Findings</h3>
-    <div id="cr-findings"><div class="no-data">No findings yet.</div></div>
-  </div>
-
-  <div class="section" style="margin-top:14px">
-    <h3>Review History</h3>
-    <div id="cr-history"><div class="no-data">No history yet.</div></div>
-  </div>
-
-  <!-- Auto-Fix Panel -->
-  <div class="meta-card" style="margin-top:14px" id="cr-autofix-card">
-    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <h3 style="margin:0">Auto-Fix with Claude</h3>
-      <button id="cr-autofix-btn" onclick="triggerAutofix()" style="padding:6px 16px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:.75rem;font-weight:700">
-        ▶ Run Auto-Fix
-      </button>
-      <span id="cr-autofix-status" style="font-size:.7rem;color:#555"></span>
-    </div>
-    <div style="font-size:.68rem;color:#555;margin-top:4px">
-      Sends each high &amp; medium finding to Claude Sonnet, which applies targeted edits and validates syntax.
-    </div>
-    <div id="cr-autofix-results" style="margin-top:10px"></div>
-  </div>
-</div>
-
-<!-- RESEARCH TAB -->
-<div class="page" id="tab-research">
-
-  <div class="cards" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
-    <div class="card"><div class="lbl">Last Run</div><div class="val blue" id="res-last">--</div></div>
-    <div class="card"><div class="lbl">Next Run</div><div class="val yellow" id="res-next">--</div></div>
-    <div class="card"><div class="lbl">Total Findings</div><div class="val" id="res-total">--</div><div class="sub" id="res-high">--</div></div>
-    <div class="card"><div class="lbl">Web Search</div><div class="val" id="res-websearch">--</div><div class="sub" id="res-interval">every -- h</div></div>
-  </div>
-
-  <!-- Active Research Signals -->
-  <div class="meta-card" id="res-signals-card" style="margin-bottom:14px">
-    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
-      <h3 style="margin:0">Active Research Signals</h3>
-      <span id="res-signals-status" style="font-size:.68rem;color:#555">injected into combinatorial strategy</span>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style="font-size:.68rem;color:#888;text-transform:uppercase;letter-spacing:.05em">Hot topics:</span>
-      <div id="res-active-topics" style="display:flex;gap:6px;flex-wrap:wrap"><span style="color:#555;font-size:.68rem">none yet</span></div>
-    </div>
-    <div style="margin-top:6px;display:flex;gap:16px;flex-wrap:wrap">
-      <span style="font-size:.68rem"><span style="color:#888">Strategy focus:</span> <span id="res-signal-focus" style="color:#ffd740">--</span></span>
-      <span style="font-size:.68rem"><span style="color:#888">Confidence:</span> <span id="res-signal-confidence">--</span></span>
-      <span style="font-size:.68rem"><span style="color:#888">Param hints:</span> <span id="res-signal-params" style="font-family:monospace;color:#90caf9">none</span></span>
-    </div>
-  </div>
-
-  <!-- Top insights from latest run -->
-  <div class="res-insights-card" id="res-insights-card">
-    <div class="res-insights-header">
-      <span style="font-size:.8rem;font-weight:700;color:#ffd740;text-transform:uppercase;letter-spacing:.06em">Top Insights</span>
-      <span class="res-run-label" id="res-run-label">--</span>
-    </div>
-    <div id="res-insights"><div class="no-data">No research yet — runs every 2 hours (configurable via RESEARCH_INTERVAL_HOURS)</div></div>
-  </div>
-
-  <!-- Findings list -->
-  <div class="section" style="margin-top:14px">
-    <h3>Findings <span style="color:#555;font-weight:normal;font-size:.65rem" id="res-topics-label"></span></h3>
-    <div id="res-findings"><div class="no-data">No findings yet.</div></div>
-  </div>
-
-  <!-- Suggested experiments -->
-  <div class="section" style="margin-top:14px">
-    <h3>Suggested Experiments</h3>
-    <div id="res-experiments"><div class="no-data">No suggestions yet.</div></div>
-  </div>
-
-  <!-- Run history -->
-  <div class="section" style="margin-top:14px">
-    <h3>Research History <span style="color:#555;font-weight:normal;font-size:.65rem">(last 24 runs)</span></h3>
-    <div id="res-history"><div class="no-data">No history yet.</div></div>
-  </div>
-
-  <!-- Strategy Proposals -->
-  <div class="section" style="margin-top:14px">
-    <h3>Strategy Proposals <span style="color:#555;font-weight:normal;font-size:.65rem">generated by research agent</span></h3>
-    <div id="res-proposals"><div class="no-data">No proposals yet — generated automatically when a high-relevance strategy finding is found.</div></div>
-  </div>
-
-  <!-- Proposal code viewer modal -->
-  <div id="proposal-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);z-index:1000;overflow:auto;padding:20px">
-    <div style="max-width:800px;margin:0 auto;background:#1a1a1a;border-radius:8px;padding:20px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <h3 id="modal-title" style="margin:0"></h3>
-        <button onclick="closeProposalModal()" style="background:none;border:none;color:#fff;font-size:1.2rem;cursor:pointer">&#x2715;</button>
-      </div>
-      <div id="modal-finding" style="font-size:.72rem;color:#888;margin-bottom:12px;padding:8px;background:#111;border-radius:4px"></div>
-      <pre id="modal-code" style="background:#0a0a0a;padding:14px;border-radius:4px;overflow:auto;font-size:.7rem;color:#e0e0e0;max-height:60vh;white-space:pre-wrap"></pre>
-      <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
-        <button id="modal-deploy-btn" onclick="deployProposal()" style="padding:8px 20px;background:#1565c0;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:700">Deploy Strategy</button>
-        <span id="modal-deploy-status" style="font-size:.72rem;color:#555"></span>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- AI INTEL TAB -->
-<div class="page" id="tab-ai-intel">
-
-  <!-- Ensemble LLM Signals -->
-  <div class="section" style="margin-bottom:14px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <h3>Ensemble LLM Signals</h3>
-      <span id="ensemble-status" style="font-size:.65rem;color:#555">--</span>
-    </div>
-    <table>
-      <thead><tr>
-        <th>Market</th>
-        <th>Claude</th>
-        <th>OpenAI</th>
-        <th>Consensus</th>
-        <th>Age (min)</th>
-      </tr></thead>
-      <tbody id="ensemble-tbody">
-        <tr><td colspan="5" style="color:#555;text-align:center">No evaluations yet</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- News Feed -->
-  <div class="section" style="margin-bottom:14px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <h3>News Feed</h3>
-      <span id="news-status" style="font-size:.65rem;color:#555">--</span>
-    </div>
-    <div id="news-list" style="display:flex;flex-direction:column;gap:6px">
-      <div style="color:#555;font-size:.72rem">No news loaded yet</div>
-    </div>
-  </div>
-
-  <!-- Active Hedges -->
-  <div class="section" style="margin-bottom:14px">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <h3>Active Hedges</h3>
-      <span id="hedge-status-badge" style="font-size:.65rem;color:#555">--</span>
-    </div>
-    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px">
-      <span style="font-size:.72rem"><span style="color:#888">Count:</span> <span id="hedge-count" style="color:#00e5ff">--</span></span>
-      <span style="font-size:.72rem"><span style="color:#888">Enabled:</span> <span id="hedge-enabled" style="color:#ffd740">--</span></span>
-    </div>
-    <table>
-      <thead><tr>
-        <th>Token ID</th>
-        <th>Details</th>
-      </tr></thead>
-      <tbody id="hedge-tbody">
-        <tr><td colspan="2" style="color:#555;text-align:center">No active hedges</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- QuickResolution Activity -->
+  <!-- Connections + API keys checklist -->
   <div class="section">
-    <h3>QuickResolution Activity</h3>
-    <div id="qr-status" style="padding:10px;background:#0d0d0d;border-radius:6px;font-size:.75rem;color:#888">
-      QuickResolution: <span id="qr-active-badge" style="font-weight:700;color:#555">UNKNOWN</span>
+    <h3>Connections &amp; API Keys</h3>
+    <div class="status-grid" id="status-connections">
+      <div class="no-data">Loading...</div>
     </div>
   </div>
 
-</div>
-
-<div class="page" id="tab-compare">
+  <!-- AI Research integrations -->
   <div class="section">
+    <h3>AI Research Integrations</h3>
+    <div id="status-ai-research"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <!-- Disk + costs -->
+  <div class="section">
+    <h3>Disk Usage</h3>
+    <div id="status-disk"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <!-- Kalshi diagnostics -->
+  <div class="section">
+    <h3>Kalshi / Cross-Exchange</h3>
+    <div id="kalshi-diag"><div class="no-data">Loading...</div></div>
+  </div>
+
+  <!-- Billing cycle bar -->
+  <div class="cycle-bar" style="margin-top:14px">
+    <h3>Billing Cycle</h3>
+    <div id="cycle-dates" style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--muted);margin-bottom:8px">
+      <span id="cycle-start">--</span><span id="cycle-days-left" style="color:var(--text)">-- days remaining</span><span id="cycle-end">--</span>
+    </div>
+    <div class="cycle-progress"><div class="cycle-fill" id="cycle-fill" style="width:0%"></div></div>
+    <div style="font-size:.63rem;color:var(--muted);margin-top:5px;text-align:center"><span id="cycle-pct">0</span>% of billing cycle elapsed</div>
+  </div>
+
+  <!-- Service cost cards -->
+  <div class="bal-grid">
+    <div class="bal-card anthropic">
+      <h3>Anthropic API</h3>
+      <div class="bal-row"><span class="bal-lbl">Model</span><span class="bal-val" id="bal-ant-model">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">API Key</span><span class="bal-val" id="bal-ant-key">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Meta-Agent Runs</span><span class="bal-val" id="bal-ant-runs">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Est. Cost / Run</span><span class="bal-val" id="bal-ant-cpr">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Est. Spend This Deploy</span><span class="bal-val" id="bal-ant-cost" style="color:#a78bfa">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Projected Monthly</span><span class="bal-val" id="bal-ant-proj">--</span></div>
+      <div class="bal-row" id="bal-ant-budget-row"><span class="bal-lbl">Monthly Budget</span><span class="bal-val" id="bal-ant-budget">Not set</span></div>
+      <div class="budget-bar"><div class="budget-fill" id="bal-ant-bar" style="width:0%;background:#a78bfa"></div></div>
+      <div class="budget-label"><span id="bal-ant-bar-lbl">Set ANTHROPIC_MONTHLY_BUDGET to track</span><span id="bal-ant-bar-pct"></span></div>
+      <a href="https://console.anthropic.com/settings/billing" target="_blank" class="refill-link">+ Add Anthropic Credits</a>
+    </div>
+
+    <div class="bal-card railway">
+      <h3>Railway</h3>
+      <div class="bal-row"><span class="bal-lbl">Plan Base Cost</span><span class="bal-val" id="bal-rail-base">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Days Left in Cycle</span><span class="bal-val" id="bal-rail-days">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Disk Used / Limit</span><span class="bal-val" id="bal-rail-disk">--</span></div>
+      <div class="budget-bar"><div class="budget-fill" id="bal-rail-bar" style="width:0%;background:var(--accent2)"></div></div>
+      <div class="budget-label"><span>Disk usage</span><span id="bal-rail-bar-pct"></span></div>
+      <div style="font-size:.66rem;color:var(--muted);margin-top:10px">Live billing data must be checked directly on Railway.</div>
+      <a href="https://railway.app/account/billing" target="_blank" class="refill-link">View Billing on Railway</a>
+    </div>
+
+    <div class="bal-card bot">
+      <h3>Bot Runtime</h3>
+      <div class="bal-row"><span class="bal-lbl">Mode</span><span class="bal-val" id="bal-bot-mode">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Uptime This Deploy</span><span class="bal-val" id="bal-bot-uptime">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Trades Executed</span><span class="bal-val" id="bal-bot-trades">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Portfolio P&amp;L</span><span class="bal-val" id="bal-bot-pnl">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Cycles Left (billing)</span><span class="bal-val" id="bal-bot-cycles">--</span></div>
+      <div class="bal-row"><span class="bal-lbl">Meta-Runs Left (billing)</span><span class="bal-val" id="bal-bot-metaruns">--</span></div>
+      <a href="https://polymarket.com/wallet" target="_blank" class="refill-link">+ Deposit USDC to Polymarket</a>
+    </div>
+  </div>
+
+  <!-- Code Review -->
+  <div class="section" style="margin-top:14px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <h3 style="margin:0">Code Review</h3>
+      <button id="cr-runnow-btn" onclick="runCodeReviewNow()" style="padding:5px 14px;background:#0a2a1a;color:var(--green);border:1px solid #1a4a2a;border-radius:8px;cursor:pointer;font-size:.72rem;font-weight:700">Run Now</button>
+      <span id="cr-runnow-status" style="font-size:.7rem;color:var(--muted)"></span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px">
+      <div class="card"><div class="lbl">Code Grade</div><div class="val blue" id="cr-grade">--</div></div>
+      <div class="card"><div class="lbl">Health Score</div><div class="val" id="cr-score">--</div></div>
+      <div class="card"><div class="lbl">Last Review</div><div class="val yellow" id="cr-date">--</div></div>
+      <div class="card"><div class="lbl">Findings</div><div class="val" id="cr-total">--</div><div class="sub" id="cr-severity">--</div></div>
+    </div>
+
+    <div class="meta-card" id="cr-summary-card">
+      <h3>Summary</h3>
+      <div id="cr-summary" class="meta-analysis">No review yet — runs automatically once a week.</div>
+    </div>
+
+    <div class="meta-card" id="cr-strengths-card" style="display:none">
+      <h3>Strengths</h3>
+      <div id="cr-strengths"></div>
+    </div>
+
+    <div style="margin-top:10px">
+      <h3 style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">Findings</h3>
+      <div id="cr-findings"><div class="no-data">No findings yet.</div></div>
+    </div>
+
+    <div style="margin-top:14px">
+      <h3 style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">Review History</h3>
+      <div id="cr-history"><div class="no-data">No history yet.</div></div>
+    </div>
+
+    <!-- Auto-Fix Panel -->
+    <div class="meta-card" style="margin-top:14px" id="cr-autofix-card">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h3 style="margin:0">Auto-Fix with Claude</h3>
+        <button id="cr-autofix-btn" onclick="triggerAutofix()" style="padding:5px 14px;background:#0a1a3a;color:var(--accent2);border:1px solid #1a2a5a;border-radius:8px;cursor:pointer;font-size:.72rem;font-weight:700">
+          Run Auto-Fix
+        </button>
+        <span id="cr-autofix-status" style="font-size:.7rem;color:var(--muted)"></span>
+      </div>
+      <div style="font-size:.66rem;color:var(--muted);margin-top:5px">
+        Sends each high &amp; medium finding to Claude Sonnet for targeted edits with syntax validation.
+      </div>
+      <div id="cr-autofix-results" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+  <!-- Bot Comparison -->
+  <div class="section" style="margin-top:14px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <h3>Bot Comparison</h3>
-      <span id="compare-ts" style="font-size:.65rem;color:#555">--</span>
+      <span id="compare-ts" style="font-size:.65rem;color:var(--muted)">--</span>
     </div>
 
-    <div id="compare-b-warning" style="display:none;background:#2a2000;border:1px solid #554400;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:.75rem;color:#ffd740"></div>
+    <div id="compare-b-warning" style="display:none;background:#2a1a00;border:1px solid #4a3000;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:.75rem;color:var(--yellow)"></div>
 
-    <!-- Side-by-side cards -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
-      <!-- Bot A card -->
-      <div style="background:#111;border:1px solid #1e2e1e;border-top:3px solid #00e676;border-radius:8px;padding:16px">
-        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:#00e676;margin-bottom:12px" id="compare-a-name">Bot A</div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-top:3px solid var(--green);border-radius:var(--card-radius);padding:16px">
+        <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;color:var(--green);margin-bottom:12px;font-weight:700" id="compare-a-name">Bot A</div>
         <div style="display:flex;flex-direction:column;gap:8px">
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Balance</span>
-            <span id="compare-a-bal" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Total PnL</span>
-            <span id="compare-a-pnl">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Realized PnL</span>
-            <span id="compare-a-realized">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">ROI</span>
-            <span id="compare-a-roi" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Win Rate</span>
-            <span id="compare-a-wr" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Fees Paid</span>
-            <span id="compare-a-fees" style="color:#ff7043">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Exposure</span>
-            <span id="compare-a-exp" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Open Positions</span>
-            <span id="compare-a-pos" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Total Trades</span>
-            <span id="compare-a-trades" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Trades/hr</span>
-            <span id="compare-a-tph" style="color:#e0e0e0">--</span>
-          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Balance</span><span id="compare-a-bal">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Total PnL</span><span id="compare-a-pnl">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Realized PnL</span><span id="compare-a-realized">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">ROI</span><span id="compare-a-roi">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Win Rate</span><span id="compare-a-wr">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Fees Paid</span><span id="compare-a-fees" style="color:var(--red)">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Exposure</span><span id="compare-a-exp">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Open Positions</span><span id="compare-a-pos">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Total Trades</span><span id="compare-a-trades">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Trades/hr</span><span id="compare-a-tph">--</span></div>
         </div>
       </div>
-      <!-- Bot B card -->
-      <div style="background:#111;border:1px solid #1a1a2e;border-top:3px solid #7986cb;border-radius:8px;padding:16px">
+      <div style="background:var(--surface2);border:1px solid var(--border);border-top:3px solid #818cf8;border-radius:var(--card-radius);padding:16px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-          <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:#7986cb" id="compare-b-name">Bot B</div>
-          <span id="compare-b-fresh-badge" style="display:none;font-size:.65rem;background:#1a1a00;color:#ffd600;border:1px solid #ffd600;border-radius:4px;padding:1px 6px">Just started</span>
-          <span id="compare-b-noconfig-badge" style="display:none;font-size:.65rem;background:#1a0000;color:#ff5252;border:1px solid #ff5252;border-radius:4px;padding:1px 6px">Not configured</span>
+          <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.07em;color:#818cf8;font-weight:700" id="compare-b-name">Bot B</div>
+          <span id="compare-b-fresh-badge" style="display:none;font-size:.63rem;background:#1a1a00;color:var(--yellow);border:1px solid var(--yellow);border-radius:4px;padding:1px 6px">Just started</span>
+          <span id="compare-b-noconfig-badge" style="display:none;font-size:.63rem;background:#1a0000;color:var(--red);border:1px solid var(--red);border-radius:4px;padding:1px 6px">Not configured</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:8px">
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Balance</span>
-            <span id="compare-b-bal" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Total PnL</span>
-            <span id="compare-b-pnl">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Realized PnL</span>
-            <span id="compare-b-realized">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">ROI</span>
-            <span id="compare-b-roi" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Win Rate</span>
-            <span id="compare-b-wr" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Fees Paid</span>
-            <span id="compare-b-fees" style="color:#ff7043">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Exposure</span>
-            <span id="compare-b-exp" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Open Positions</span>
-            <span id="compare-b-pos" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Total Trades</span>
-            <span id="compare-b-trades" style="color:#e0e0e0">--</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:.78rem">
-            <span style="color:#666">Trades/hr</span>
-            <span id="compare-b-tph" style="color:#e0e0e0">--</span>
-          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Balance</span><span id="compare-b-bal">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Total PnL</span><span id="compare-b-pnl">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Realized PnL</span><span id="compare-b-realized">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">ROI</span><span id="compare-b-roi">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Win Rate</span><span id="compare-b-wr">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Fees Paid</span><span id="compare-b-fees" style="color:var(--red)">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Exposure</span><span id="compare-b-exp">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Open Positions</span><span id="compare-b-pos">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Total Trades</span><span id="compare-b-trades">--</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:.76rem"><span style="color:var(--muted)">Trades/hr</span><span id="compare-b-tph">--</span></div>
         </div>
       </div>
     </div>
 
-    <!-- Strategy comparison table -->
-    <h3 style="margin-bottom:10px">Strategy Breakdown</h3>
+    <h3 style="font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">Strategy Breakdown</h3>
     <table>
       <thead><tr>
         <th>Strategy</th>
-        <th style="text-align:right">A PnL</th>
-        <th style="text-align:right">A Trades</th>
-        <th style="text-align:right">B PnL</th>
-        <th style="text-align:right">B Trades</th>
+        <th style="text-align:right">A PnL</th><th style="text-align:right">A Trades</th>
+        <th style="text-align:right">B PnL</th><th style="text-align:right">B Trades</th>
       </tr></thead>
       <tbody id="compare-strat-tbody">
-        <tr><td colspan="5" style="color:#555;text-align:center">No data yet</td></tr>
+        <tr><td colspan="5" style="color:var(--muted);text-align:center">No data yet</td></tr>
       </tbody>
     </table>
 
-    <!-- Setup instructions shown when PEER_BOT_URL not set -->
-    <div id="compare-setup" style="display:none;margin-top:20px;background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:16px;font-size:.75rem;color:#888;line-height:1.7">
-      <div style="color:#ffd740;font-weight:700;margin-bottom:8px">Setup required</div>
-      Set the <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;color:#00e5ff">PEER_BOT_URL</code> environment variable to the base URL of Bot B's dashboard (e.g. <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;color:#00e5ff">https://botb.example.com</code>) and restart this bot.
+    <div id="compare-setup" style="display:none;margin-top:20px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;font-size:.75rem;color:var(--muted);line-height:1.7">
+      <div style="color:var(--yellow);font-weight:700;margin-bottom:8px">Setup required</div>
+      Set the <code style="background:var(--bg);padding:2px 6px;border-radius:4px;color:var(--accent2)">PEER_BOT_URL</code> environment variable to Bot B's dashboard URL and restart.
     </div>
   </div>
+
+</div>
+
+<!-- Hidden elements required by log stream (live-uptime, live-realized, etc.) -->
+<div style="display:none">
+  <span id="live-uptime">--</span>
+  <span id="live-realized">--</span>
+  <span id="live-winrate">--</span>
+  <span id="live-trades">--</span>
+  <div id="log-feed"></div>
+  <input type="checkbox" id="autoscroll" checked>
 </div>
 
 <div id="last-update">--</div>
@@ -2416,43 +2412,41 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-const allTabs=['overview','live','positions','trades','status','analytics','balances','meta','codereview','research','ai-intel','compare'];
+// 7 tabs: overview, positions, trades, strategies, ai-intel, meta, system
+const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  $('tab-'+name).classList.add('active');
+  const pg=$('tab-'+name);
+  if(pg) pg.classList.add('active');
   currentTab=name;
 
-  if(name==='status'){
+  if(name==='system'){
     fetchSystemStatus();
+    fetchBalances();
+    fetchCodeReview();
+    fetchCompare();
     if(_statusInterval) clearInterval(_statusInterval);
     _statusInterval=setInterval(fetchSystemStatus,10000);
+    if(_compareInterval)clearInterval(_compareInterval);
+    _compareInterval=setInterval(fetchCompare,30000);
   } else {
     if(_statusInterval){clearInterval(_statusInterval);_statusInterval=null;}
+    if(_compareInterval){clearInterval(_compareInterval);_compareInterval=null;}
   }
 
-  if(name==='analytics'){
+  if(name==='strategies'){
     fetchAnalytics();
-  }
-
-  if(name==='balances'){
-    fetchBalances();
-  }
-
-  if(name==='codereview'){
-    fetchCodeReview();
-  }
-
-  if(name==='research'){
-    fetchResearch();
+    fetchSystemStatus();
   }
 
   if(name==='ai-intel'){
     fetchEnsemble();
     fetchNews();
     fetchHedges();
+    fetchResearch();
     if(_ensembleInterval)clearInterval(_ensembleInterval);
     if(_newsInterval)clearInterval(_newsInterval);
     if(_hedgeInterval)clearInterval(_hedgeInterval);
@@ -2463,14 +2457,6 @@ function showTab(name){
     if(_ensembleInterval){clearInterval(_ensembleInterval);_ensembleInterval=null;}
     if(_newsInterval){clearInterval(_newsInterval);_newsInterval=null;}
     if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
-  }
-
-  if(name==='compare'){
-    fetchCompare();
-    if(_compareInterval)clearInterval(_compareInterval);
-    _compareInterval=setInterval(fetchCompare,30000);
-  } else {
-    if(_compareInterval){clearInterval(_compareInterval);_compareInterval=null;}
   }
 }
 
@@ -2539,9 +2525,11 @@ function updateStatus(s){
   $('balance').textContent=fmt(s.balance);
 
   const tv=s.total_value||0,tp=s.pnl||0,tpp=s.pnl_pct||0;
-  $('total-value').textContent=fmt(tv);
-  $('total-pnl-sub').textContent=(tp>=0?'+':'')+tp.toFixed(2)+' ('+tpp.toFixed(2)+'%)';
-  $('total-pnl-sub').style.color=tp>=0?'#00e676':'#ff5252';
+  // Overview: show total P&L as the big number, not total value
+  $('total-value').textContent=fmtPnl(tp);
+  $('total-value').className='val '+(tp>=0?'green':'red');
+  $('total-pnl-sub').textContent=fmt(tv)+' total value · '+(tpp>=0?'+':'')+tpp.toFixed(2)+'%';
+  $('total-pnl-sub').style.color=tp>=0?'var(--green)':'var(--red)';
 
   const rp=s.realized_pnl||0,rpp=s.realized_pnl_pct||0;
   $('realized-pnl').textContent=fmtPnl(rp);
@@ -2550,7 +2538,7 @@ function updateStatus(s){
 
   const wr=s.win_rate||0;
   $('win-rate').textContent=wr.toFixed(1)+'%';
-  $('win-rate').className='val '+(wr>=50?'green':'red');
+  $('win-rate').className='val '+(wr>=50?'green':'yellow');
 
   $('pos-count').textContent=s.open_positions;
   $('exposure-sub').textContent='Exposure: '+fmt(s.exposure);
@@ -2560,14 +2548,21 @@ function updateStatus(s){
 
   $('fees').textContent=fmt(s.fees_paid);
 
-  // live tab
-  $('live-cycle').textContent=s.cycle_count;
-  $('live-uptime').textContent=s.uptime;
-  $('live-realized').textContent=fmtPnl(rp);
-  $('live-realized').className='val '+(rp>=0?'green':'red');
-  $('live-winrate').textContent=wr.toFixed(1)+'%';
-  $('live-winrate').className='val '+(wr>=50?'green':'red');
-  $('live-trades').textContent=s.total_trades;
+  // Cycle count card
+  const lc=$('live-cycle');
+  if(lc) lc.textContent=s.cycle_count;
+  const lu=$('live-uptime-sub');
+  if(lu) lu.textContent=s.uptime;
+
+  // Hidden live-tab elements (kept for log-stream compatibility)
+  const liveu=$('live-uptime');
+  if(liveu) liveu.textContent=s.uptime;
+  const liver=$('live-realized');
+  if(liver){liver.textContent=fmtPnl(rp);liver.className='val '+(rp>=0?'green':'red');}
+  const livew=$('live-winrate');
+  if(livew){livew.textContent=wr.toFixed(1)+'%';livew.className='val '+(wr>=50?'green':'red');}
+  const livet=$('live-trades');
+  if(livet) livet.textContent=s.total_trades;
 
   // Update Polymarket links with wallet address if available
   const addr=s.polymarket_address||'';
@@ -2682,8 +2677,8 @@ function renderSystemStatus(d){
   // Mode badge in header
   const modeBadge=$('mode-badge');
   modeBadge.textContent=d.mode||'PAPER';
-  modeBadge.style.background=d.mode==='LIVE'?'#3a1a1a':'#1a3a4a';
-  modeBadge.style.color=d.mode==='LIVE'?'#ff5252':'#00e5ff';
+  modeBadge.style.background=d.mode==='LIVE'?'#2a0a0a':'#0e1a2a';
+  modeBadge.style.color=d.mode==='LIVE'?'var(--red)':'var(--accent2)';
 
   // Connections section
   const connItems=[
@@ -2692,10 +2687,12 @@ function renderSystemStatus(d){
     {key:'kalshi',label:'Kalshi'},
   ];
   const apiItems=[
-    {key:'anthropic',label:'Anthropic API'},
+    {key:'anthropic',label:'Anthropic API Key'},
     {key:'polymarket',label:'Polymarket Key'},
     {key:'kalshi_rsa',label:'Kalshi RSA Key'},
     {key:'kalshi_token',label:'Kalshi Token'},
+    {key:'perplexity',label:'Perplexity API Key'},
+    {key:'grok',label:'Grok API Key'},
   ];
 
   let connHtml=connItems.map(({key,label})=>{
@@ -2720,63 +2717,150 @@ function renderSystemStatus(d){
   const maDetail=ma.enabled?(ma.last_run_ago_minutes!=null?'Last run '+ma.last_run_ago_minutes+'m ago':'Not run yet'):'No API key';
   connHtml+=`<div class="status-item">
     <div class="dot ${maStatus}"></div>
-    <div><div class="status-label">Meta-Agent</div><div class="status-detail">${maDetail} · every ${ma.interval_minutes||30}m</div></div>
+    <div><div class="status-label">Meta-Agent (Claude)</div><div class="status-detail">${maDetail} · every ${ma.interval_minutes||30}m</div></div>
   </div>`;
 
-  $('status-connections').innerHTML=connHtml;
+  const connEl=$('status-connections');
+  if(connEl) connEl.innerHTML=connHtml;
 
-  // Strategies section
+  // Strategies section — rich cards with metrics
   const strats=d.strategies||{};
-  const stratHtml=Object.entries(strats).map(([name,info])=>{
-    const cls=info.enabled?'enabled':'disabled';
-    const statusTxt=info.enabled?'<span class="strat-status" style="color:#00e676">ENABLED</span>':'<span class="strat-status" style="color:#ff5252">DISABLED</span>';
-    return`<div class="strat-card ${cls}">
-      <h4>${name}</h4>
-      ${statusTxt}
-      <div class="strat-note">${info.note||''}</div>
-    </div>`;
-  }).join('');
-  $('status-strategies').innerHTML=stratHtml||'<div class="no-data">No strategy info</div>';
+  // We need analytics data for per-strategy PnL/winrate — fetch async and merge
+  const stratEl=$('status-strategies');
+  if(stratEl){
+    const stratHtml=Object.entries(strats).map(([name,info])=>{
+      const cls=info.enabled?'enabled':'disabled';
+      const statusTxt=info.enabled
+        ?'<span class="strat-status" style="color:var(--green);font-size:.68rem;font-weight:700;background:#0a2a1a;padding:2px 8px;border-radius:10px">ENABLED</span>'
+        :'<span class="strat-status" style="color:var(--red);font-size:.68rem;font-weight:700;background:#2a0a0a;padding:2px 8px;border-radius:10px">DISABLED</span>';
+      return`<div class="strat-card ${cls}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <h4>${name}</h4>${statusTxt}
+        </div>
+        <div class="strat-note">${info.note||''}</div>
+        <div class="strat-metrics" id="sm-${name}">
+          <div class="strat-metric"><span class="sm-lbl">P&amp;L</span><span class="sm-val" style="color:var(--muted)">--</span></div>
+          <div class="strat-metric"><span class="sm-lbl">Trades</span><span class="sm-val" style="color:var(--muted)">--</span></div>
+          <div class="strat-metric"><span class="sm-lbl">Win%</span><span class="sm-val" style="color:var(--muted)">--</span></div>
+        </div>
+      </div>`;
+    }).join('');
+    stratEl.innerHTML=stratHtml||'<div class="no-data">No strategy info</div>';
+
+    // Async fetch analytics to fill strategy metrics
+    fetch('/api/analytics').then(r=>r.json()).then(an=>{
+      Object.keys(strats).forEach(name=>{
+        const el=document.getElementById('sm-'+name);
+        if(!el)return;
+        const pnl=an.strategy_roi&&an.strategy_roi[name]!=null?an.strategy_roi[name]:null;
+        const trades=an.strategy_trade_counts&&an.strategy_trade_counts[name]!=null?an.strategy_trade_counts[name]:null;
+        const wr=an.strategy_win_rates&&an.strategy_win_rates[name]!=null?an.strategy_win_rates[name]:null;
+        const spans=el.querySelectorAll('.sm-val');
+        if(spans[0]&&pnl!=null){
+          spans[0].textContent=(pnl>=0?'+':'')+pnl.toFixed(1)+'%';
+          spans[0].style.color=pnl>=0?'var(--green)':'var(--red)';
+        }
+        if(spans[1]&&trades!=null){
+          spans[1].textContent=trades;
+          spans[1].style.color='var(--text)';
+        }
+        if(spans[2]&&wr!=null){
+          spans[2].textContent=wr.toFixed(0)+'%';
+          spans[2].style.color=wr>=50?'var(--green)':'var(--yellow)';
+        }
+      });
+    }).catch(()=>{});
+  }
 
   // Risk health section
   const risk=d.risk||{};
   const score=risk.health_score;
   const grade=risk.health_grade||'N/A';
-  const gradeColor=grade==='HEALTHY'?'#00e676':grade==='WEAK'?'#ffd740':grade==='CRITICAL'?'#ff5252':'#888';
+  const gradeColor=grade==='HEALTHY'?'var(--green)':grade==='WEAK'?'var(--yellow)':grade==='CRITICAL'?'var(--red)':'var(--muted)';
   const drawdown=risk.drawdown_pct||0;
   const exposure=risk.exposure_pct||0;
   const flags=risk.flags||[];
   const scoreDisplay=score!=null?score.toFixed(1):'--';
-  const hardStopBadge=risk.hard_stop?'<span style="background:#3d0000;color:#ff5252;padding:2px 8px;border-radius:4px;font-size:.7rem;font-weight:700;margin-left:10px">HARD STOP</span>':'';
+  const hardStopBadge=risk.hard_stop?`<span style="background:#2a0a0a;color:var(--red);padding:2px 10px;border-radius:6px;font-size:.68rem;font-weight:700;margin-left:10px">HARD STOP</span>`:'';
 
-  $('status-risk').innerHTML=`
-    <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
-      <div style="font-size:2.5rem;font-weight:700;color:${gradeColor}">${scoreDisplay}</div>
+  const riskEl=$('status-risk');
+  if(riskEl) riskEl.innerHTML=`
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+      <div style="font-size:3rem;font-weight:700;color:${gradeColor};line-height:1">${scoreDisplay}</div>
       <div>
-        <div style="font-size:1rem;font-weight:700;color:${gradeColor}">${grade}${hardStopBadge}</div>
-        <div style="font-size:.7rem;color:#555;margin-top:4px">${flags.length?flags.join(' · '):'No active risk flags'}</div>
+        <div style="font-size:1.1rem;font-weight:700;color:${gradeColor}">${grade}${hardStopBadge}</div>
+        <div style="font-size:.68rem;color:var(--muted);margin-top:5px">${flags.length?flags.join(' · '):'No active risk flags'}</div>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
       <div>
-        <div style="font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:.06em">Drawdown</div>
-        <div style="font-size:.9rem;font-weight:700;color:${drawdown>10?'#ff5252':drawdown>5?'#ffd740':'#00e676'}">${drawdown.toFixed(2)}%</div>
-        <div class="health-bar"><div class="health-fill" style="width:${Math.min(drawdown/15*100,100)}%;background:${drawdown>10?'#ff5252':drawdown>5?'#ffd740':'#00e676'}"></div></div>
+        <div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Drawdown</div>
+        <div style="font-size:.95rem;font-weight:700;color:${drawdown>10?'var(--red)':drawdown>5?'var(--yellow)':'var(--green)'}">${drawdown.toFixed(2)}%</div>
+        <div class="health-bar"><div class="health-fill" style="width:${Math.min(drawdown/15*100,100)}%;background:${drawdown>10?'var(--red)':drawdown>5?'var(--yellow)':'var(--green)'}"></div></div>
       </div>
       <div>
-        <div style="font-size:.65rem;color:#555;text-transform:uppercase;letter-spacing:.06em">Exposure</div>
-        <div style="font-size:.9rem;font-weight:700;color:${exposure>80?'#ff5252':exposure>60?'#ffd740':'#00e676'}">${exposure.toFixed(1)}%</div>
-        <div class="health-bar"><div class="health-fill" style="width:${Math.min(exposure,100)}%;background:${exposure>80?'#ff5252':exposure>60?'#ffd740':'#00e676'}"></div></div>
+        <div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:4px">Exposure</div>
+        <div style="font-size:.95rem;font-weight:700;color:${exposure>80?'var(--red)':exposure>60?'var(--yellow)':'var(--green)'}">${exposure.toFixed(1)}%</div>
+        <div class="health-bar"><div class="health-fill" style="width:${Math.min(exposure,100)}%;background:${exposure>80?'var(--red)':exposure>60?'var(--yellow)':'var(--green)'}"></div></div>
       </div>
     </div>`;
 
   // Disk section
   const disk=d.disk||{};
-  $('status-disk').innerHTML=`
-    <div style="display:flex;gap:30px;font-size:.85rem">
-      <div><span style="color:#555;font-size:.65rem;text-transform:uppercase">Log Files</span><div style="font-weight:700;color:#00e5ff;margin-top:4px">${disk.log_files_count||0}</div></div>
-      <div><span style="color:#555;font-size:.65rem;text-transform:uppercase">Total Size</span><div style="font-weight:700;color:#00e5ff;margin-top:4px">${(disk.log_files_mb||0).toFixed(2)} MB</div></div>
+  const diskEl=$('status-disk');
+  if(diskEl) diskEl.innerHTML=`
+    <div style="display:flex;gap:30px">
+      <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em">Log Files</div><div style="font-weight:700;color:var(--accent2);margin-top:5px;font-size:1.1rem">${disk.log_files_count||0}</div></div>
+      <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em">Total Size</div><div style="font-weight:700;color:var(--accent2);margin-top:5px;font-size:1.1rem">${(disk.log_files_mb||0).toFixed(2)} MB</div></div>
     </div>`;
+
+  // AI Research integrations panel (System tab)
+  const ai=d.ai_research||{};
+  const aiOrder=['perplexity','grok','mirofish'];
+  const aiHtml=aiOrder.map(key=>{
+    const item=ai[key]||{configured:false,label:key,note:'',add_key:'',docs:''};
+    const configured=item.configured;
+    const dotCls=configured?'ok':'err';
+    const statusTxt=configured
+      ? '<span style="color:var(--green);font-size:.65rem;font-weight:700;text-transform:uppercase">CONNECTED</span>'
+      : `<span style="color:var(--yellow);font-size:.65rem;font-weight:700;text-transform:uppercase">ADD KEY</span>`;
+    const keyHint=!configured&&item.add_key
+      ? `<div style="font-size:.62rem;color:var(--muted);margin-top:3px;font-family:monospace">${item.add_key}=...</div>`
+      : '';
+    const docsLink=item.docs
+      ? `<a href="${item.docs}" target="_blank" style="font-size:.62rem;color:var(--muted);text-decoration:none;margin-top:4px;display:block">docs ↗</a>`
+      : '';
+    return`<div class="status-item" style="align-items:flex-start;padding:10px 0">
+      <div class="dot ${dotCls}" style="margin-top:3px"></div>
+      <div style="flex:1">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="status-label" style="font-size:.8rem">${item.label}</div>
+          ${statusTxt}
+        </div>
+        <div style="font-size:.66rem;color:var(--muted);margin-top:3px">${item.note||''}</div>
+        ${keyHint}${docsLink}
+      </div>
+    </div>`;
+  }).join('');
+  const aiEl=$('status-ai-research');
+  if(aiEl) aiEl.innerHTML=aiHtml||'<div class="no-data">No AI integrations configured</div>';
+
+  // Also update AI Intel tab status cards if on that tab
+  const aiIntelEl=$('ai-intel-status-cards');
+  if(aiIntelEl){
+    const intelHtml=aiOrder.map(key=>{
+      const item=ai[key]||{configured:false,label:key,note:'',add_key:'',docs:''};
+      const configured=item.configured;
+      return`<div class="ai-status-card ${configured?'configured':'missing'}">
+        <div class="ai-card-name">${item.label}</div>
+        <div class="ai-card-status" style="color:${configured?'var(--green)':'var(--muted)'}">${configured?'Connected':'Not configured'}</div>
+        <div class="ai-card-note">${item.note||''}</div>
+        ${!configured&&item.add_key?`<div class="ai-card-key">${item.add_key}=...</div>`:''}
+        ${item.docs?`<a href="${item.docs}" target="_blank" style="font-size:.63rem;color:var(--muted);text-decoration:none;margin-top:6px;display:block">docs ↗</a>`:''}
+      </div>`;
+    }).join('');
+    aiIntelEl.innerHTML=intelHtml;
+  }
 }
 
 // ------------------------------------------------------------------ //
@@ -2786,55 +2870,55 @@ function renderKalshiDiag(k){
   const el=$('kalshi-diag');
   if(!el)return;
   const overall=k.overall_status==='active';
-  const statusColor=overall?'#00e676':'#ffd740';
+  const statusColor=overall?'var(--green)':'var(--yellow)';
   const statusText=overall?'ACTIVE':'SETUP REQUIRED';
 
   // Checklist
   const checkHtml=(k.checklist||[]).map(c=>`
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #1a1a1a">
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
       <span style="font-size:1rem;margin-top:1px">${c.ok?'✅':'❌'}</span>
       <div style="flex:1">
-        <div style="font-size:.75rem;font-weight:700;color:${c.ok?'#00e676':'#ffd740'}">${c.label}</div>
-        ${!c.ok?`<div style="font-size:.68rem;color:#888;margin-top:3px;font-family:monospace">${c.fix}</div>`:''}
+        <div style="font-size:.75rem;font-weight:700;color:${c.ok?'var(--green)':'var(--yellow)'}">${c.label}</div>
+        ${!c.ok?`<div style="font-size:.66rem;color:var(--muted);margin-top:3px;font-family:monospace">${c.fix}</div>`:''}
       </div>
     </div>`).join('');
 
   // Runtime info
   const rt=k.runtime||{};
   const runtimeHtml=rt.client_loaded?`
-    <div style="display:flex;gap:20px;margin-top:10px;font-size:.72rem">
-      <div><span style="color:#555">Markets cached:</span> <span style="color:#00e5ff;font-weight:700">${rt.markets_cached||0}</span></div>
-      <div><span style="color:#555">Cache age:</span> <span style="color:#00e5ff;font-weight:700">${rt.last_cache_age_s!=null?rt.last_cache_age_s+'s':'--'}</span></div>
-      <div><span style="color:#555">Auth:</span> <span style="color:#00e5ff;font-weight:700">${k.auth_method||'--'}</span></div>
-      <div><span style="color:#555">Min edge:</span> <span style="color:#00e5ff;font-weight:700">${k.min_edge_pct||5}%</span></div>
-      <div><span style="color:#555">Safe-only:</span> <span style="color:#00e5ff;font-weight:700">${k.safe_only?'Yes (crypto price only)':'No'}</span></div>
-    </div>`:'<div style="font-size:.7rem;color:#555;margin-top:8px">Client not loaded — enable KALSHI_ENABLED=true and redeploy.</div>';
+    <div style="display:flex;gap:20px;margin-top:10px;font-size:.72rem;flex-wrap:wrap">
+      <div><span style="color:var(--muted)">Markets cached:</span> <span style="color:var(--accent2);font-weight:700">${rt.markets_cached||0}</span></div>
+      <div><span style="color:var(--muted)">Cache age:</span> <span style="color:var(--accent2);font-weight:700">${rt.last_cache_age_s!=null?rt.last_cache_age_s+'s':'--'}</span></div>
+      <div><span style="color:var(--muted)">Auth:</span> <span style="color:var(--accent2);font-weight:700">${k.auth_method||'--'}</span></div>
+      <div><span style="color:var(--muted)">Min edge:</span> <span style="color:var(--accent2);font-weight:700">${k.min_edge_pct||5}%</span></div>
+      <div><span style="color:var(--muted)">Safe-only:</span> <span style="color:var(--accent2);font-weight:700">${k.safe_only?'Yes (crypto price only)':'No'}</span></div>
+    </div>`:'<div style="font-size:.7rem;color:var(--muted);margin-top:8px">Client not loaded — enable KALSHI_ENABLED=true and redeploy.</div>';
 
   // Recent decisions
   const decisions=k.recent_decisions||[];
   const decHtml=decisions.length?`
     <div style="margin-top:12px">
-      <div style="font-size:.65rem;text-transform:uppercase;letter-spacing:.07em;color:#555;margin-bottom:6px">Recent Cross-Exchange Scans (last 20)</div>
+      <div style="font-size:.63rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:6px">Recent Cross-Exchange Scans (last 20)</div>
       <div style="display:flex;flex-direction:column;gap:4px;max-height:260px;overflow-y:auto">
         ${decisions.map(d=>{
           const age=Math.round((Date.now()/1000)-(d.ts||0));
           const edgePct=d.edge!=null?(d.edge*100).toFixed(2)+'%':'--';
-          const color=d.signal?'#00e676':d.skipped?'#ffd740':'#555';
+          const color=d.signal?'var(--green)':d.skipped?'var(--yellow)':'var(--muted)';
           const label=d.signal?'SIGNAL':d.skipped?'SKIPPED':'SCANNED';
-          return`<div style="display:flex;gap:8px;align-items:center;padding:5px 8px;background:#111;border-radius:3px;border-left:3px solid ${color};font-size:.68rem">
+          return`<div style="display:flex;gap:8px;align-items:center;padding:5px 8px;background:var(--bg);border-radius:6px;border-left:3px solid ${color};font-size:.68rem">
             <span style="font-weight:700;color:${color};min-width:58px">${label}</span>
-            <span style="color:#888;min-width:36px">${age}s ago</span>
-            <span style="color:#e0e0e0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.poly_question||d.ticker||''}</span>
-            <span style="color:#ffd740;min-width:40px;text-align:right">${edgePct}</span>
+            <span style="color:var(--muted);min-width:36px">${age}s ago</span>
+            <span style="color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.poly_question||d.ticker||''}</span>
+            <span style="color:var(--yellow);min-width:40px;text-align:right">${edgePct}</span>
           </div>`;
         }).join('')}
       </div>
-    </div>`:`<div style="font-size:.7rem;color:#555;margin-top:10px">${overall?'No cross-exchange scans logged yet — strategy running.':'Enable Kalshi to see scan decisions here.'}</div>`;
+    </div>`:`<div style="font-size:.7rem;color:var(--muted);margin-top:10px">${overall?'No cross-exchange scans logged yet — strategy running.':'Enable Kalshi to see scan decisions here.'}</div>`;
 
   el.innerHTML=`
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
       <span style="font-size:1.1rem;font-weight:700;color:${statusColor}">${statusText}</span>
-      <span style="font-size:.68rem;color:#555">${k.auth_method||'No credentials set'}</span>
+      <span style="font-size:.66rem;color:var(--muted)">${k.auth_method||'No credentials set'}</span>
     </div>
     ${checkHtml}
     ${runtimeHtml}

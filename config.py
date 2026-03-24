@@ -57,6 +57,14 @@ class KalshiConfig:
 
 
 @dataclass
+class AIResearchConfig:
+    """API keys for real-time AI research integrations."""
+    perplexity_api_key: str = field(default_factory=lambda: os.getenv("PERPLEXITY_API_KEY", ""))
+    grok_api_key: str = field(default_factory=lambda: os.getenv("GROK_API_KEY", ""))
+    mirofish_url: str = field(default_factory=lambda: os.getenv("MIROFISH_URL", ""))
+
+
+@dataclass
 class RiskConfig:
     max_position_size: float = field(default_factory=lambda: _float("MAX_POSITION_SIZE", 500.0))
     max_total_exposure: float = field(default_factory=lambda: _float("MAX_TOTAL_EXPOSURE", 5000.0))
@@ -78,6 +86,7 @@ class RiskConfig:
         "quick_resolution": 400.0,
         "futures_hedge": 200.0,
         "crypto_5m": 150.0,  # tight budget — snipe mode fires blind without Binance data
+        "swarm_prediction": 300.0,  # crowd simulation strategy budget
         "auto_close": 9999.0,  # auto-close is resolution, not a strategy — no budget cap
     })
 
@@ -114,11 +123,6 @@ class StrategyConfig:
     cross_exchange_min_edge: float = field(default_factory=lambda: _float("CROSS_EXCHANGE_MIN_EDGE", 0.05))
     cross_exchange_safe_only: bool = field(default_factory=lambda: _bool("CROSS_EXCHANGE_SAFE_ONLY", True))  # only trade mechanical-resolution markets
 
-    # LLM ensemble for event-driven directional trading
-    ensemble_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_ENSEMBLE", False))
-    ensemble_min_edge: float = field(default_factory=lambda: _float("ENSEMBLE_MIN_EDGE", 0.05))  # 5% edge vs LLM estimate to trade
-    ensemble_max_markets_per_cycle: int = field(default_factory=lambda: _int("ENSEMBLE_MAX_MARKETS", 5))  # limit LLM API calls per cycle
-
     # Futures hedge ratio for crypto market positions
     hedge_ratio: float = field(default_factory=lambda: _float("HEDGE_RATIO", 0.3))  # 30% of position size
 
@@ -153,6 +157,19 @@ class StrategyConfig:
     # WebSocket orderbook feed
     use_ws_orderbook: bool = field(default_factory=lambda: _bool("USE_WS_ORDERBOOK", True))
 
+    # Swarm prediction strategy (MiroFish-inspired crowd simulation)
+    # Disabled by default — requires PERPLEXITY_API_KEY to generate signals.
+    # With MIROFISH_URL set, uses the full Node.js MiroFish engine.
+    # Without it, falls back to multi-persona LLM simulation (pure Python).
+    swarm_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_SWARM", False))
+    swarm_min_edge: float = field(default_factory=lambda: _float("SWARM_MIN_EDGE", 0.05))
+    swarm_min_confidence: float = field(default_factory=lambda: _float("SWARM_MIN_CONFIDENCE", 0.65))
+    swarm_max_spend: float = field(default_factory=lambda: _float("SWARM_MAX_SPEND", 150.0))
+    swarm_max_markets_per_cycle: int = field(default_factory=lambda: _int("SWARM_MAX_MARKETS", 5))
+    swarm_min_volume: float = field(default_factory=lambda: _float("SWARM_MIN_VOLUME", 5000.0))
+    swarm_agent_count: int = field(default_factory=lambda: _int("SWARM_AGENT_COUNT", 12))
+    swarm_cooldown_hours: float = field(default_factory=lambda: _float("SWARM_COOLDOWN_HOURS", 4.0))
+
 
 @dataclass
 class BotConfig:
@@ -167,6 +184,7 @@ class BotConfig:
     polymarket: PolymarketConfig = field(default_factory=PolymarketConfig)
     binance: BinanceConfig = field(default_factory=BinanceConfig)
     kalshi: KalshiConfig = field(default_factory=KalshiConfig)
+    ai_research: AIResearchConfig = field(default_factory=AIResearchConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     strategies: StrategyConfig = field(default_factory=StrategyConfig)
 

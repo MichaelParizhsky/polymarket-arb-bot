@@ -11,6 +11,7 @@ Two entry modes:
 2. END-OF-WINDOW SNIPE:
    Within 60 seconds of window close, if one side >80% mid, buy that side.
    Price direction is already telegraphed by momentum at T-60s.
+   Grok X sentiment is checked before firing — contradicting signals are skipped.
 
 Why this works:
   - Markets rotate every 5 or 15 minutes — capital recycles extremely fast
@@ -20,11 +21,13 @@ Why this works:
 """
 from __future__ import annotations
 
+import re as _re
 import time
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
+from src.utils.ai_research import grok
 from src.utils.constants import MIN_TRADE_USDC
 from src.utils.logger import logger
 from src.utils.metrics import arb_opportunities, edge_detected
@@ -43,6 +46,18 @@ MIN_NET_EDGE = 0.005  # 0.5%
 
 # Polymarket taker fee (standard markets, 2025 rate — near zero)
 TAKER_FEE = 0.002
+
+# Regex to extract crypto symbol from a market question
+_SYMBOL_RE = _re.compile(
+    r'\b(BTC|ETH|SOL|BNB|DOGE|ADA|XRP|AVAX|MATIC|LINK|DOT|UNI|ATOM|LTC|BCH)\b',
+    _re.IGNORECASE,
+)
+
+
+def _extract_crypto_symbol(question: str) -> str | None:
+    """Extract a known crypto ticker from a market question string."""
+    m = _SYMBOL_RE.search(question)
+    return m.group(1).upper() if m else None
 
 
 def _seconds_to_window_close(end_date_iso: str) -> float | None:
@@ -69,6 +84,7 @@ class CryptoShortStrategy(BaseStrategy):
         super().__init__(config, portfolio, risk_manager)
         # Track entered markets to avoid duplicate entries
         self._entered: dict[str, float] = {}  # condition_id -> entered_at
+        self._grok_status_logged = False
 
     async def scan(self, context: dict[str, Any]) -> list[Signal]:
         # This strategy gets its own market list from the context key
@@ -78,6 +94,11 @@ class CryptoShortStrategy(BaseStrategy):
 
         if not markets:
             return []
+
+        # Log Grok status once at startup
+        if not self._grok_status_logged:
+            self.log(f"CryptoShort: Grok X sentiment {'enabled' if grok.enabled else 'disabled (no GROK_API_KEY)'}")
+            self._grok_status_logged = True
 
         # Require live Binance data for snipe mode — without it we have no directional edge.
         # Binance.com returns HTTP 451 from US-hosted servers; if feed is stale, halt snipes.
@@ -204,6 +225,36 @@ class CryptoShortStrategy(BaseStrategy):
                 if yes_mid >= SNIPE_MIN_CONVICTION:
                     net_edge = (1.0 - yes_ask) - TAKER_FEE
                     if net_edge >= MIN_NET_EDGE and yes_ask < 1.0:
+                        # ── Grok sentiment gate (YES snipe) ──────────────
+                        grok_direction: str | None = None
+                        grok_strength: float | None = None
+                        symbol = _extract_crypto_symbol(market.question)
+                        if symbol and grok.enabled:
+                            try:
+                                momentum = await grok.get_crypto_momentum(symbol)
+                                grok_direction = momentum.get("direction", "sideways")
+                                grok_strength = momentum.get("strength", 0.0)
+
+                                if grok_strength >= 0.5 and grok_direction == "up":
+                                    # Grok confirms YES snipe direction
+                                    self.log(
+                                        f"[GROK CONFIRM] {symbol} momentum={grok_direction} "
+                                        f"strength={grok_strength:.2f}"
+                                    )
+                                elif grok_strength >= 0.5 and grok_direction not in ("up", "sideways"):
+                                    # Grok contradicts — skip this snipe
+                                    self.log(
+                                        f"[GROK BLOCK] snipe skipped — {symbol} Grok says "
+                                        f"{grok_direction} (strength={grok_strength:.2f})",
+                                        "debug",
+                                    )
+                                    continue  # skip to next market
+                                # else: Grok unclear (strength < 0.5 or sideways) — proceed
+                            except Exception as exc:
+                                self.log(f"[GROK WARN] get_crypto_momentum failed for {symbol}: {exc}", "warning")
+                                # Do not block snipe on Grok error
+                        # ─────────────────────────────────────────────────
+
                         arb_opportunities.labels(strategy="crypto_5m").inc()
                         edge_detected.labels(strategy="crypto_5m").observe(net_edge)
                         size_usdc = self.risk.size_position(edge=net_edge, base_size=max_spend)
@@ -228,12 +279,44 @@ class CryptoShortStrategy(BaseStrategy):
                                     "net_edge": net_edge,
                                     "seconds_left": seconds_left,
                                     "condition_id": market.condition_id,
+                                    "grok_direction": grok_direction if symbol else None,
+                                    "grok_strength": grok_strength if symbol else None,
                                 },
                             ))
 
                 elif yes_mid <= (1.0 - SNIPE_MIN_CONVICTION):
                     net_edge = (1.0 - no_ask) - TAKER_FEE
                     if net_edge >= MIN_NET_EDGE and no_ask < 1.0:
+                        # ── Grok sentiment gate (NO snipe) ───────────────
+                        grok_direction = None
+                        grok_strength = None
+                        symbol = _extract_crypto_symbol(market.question)
+                        if symbol and grok.enabled:
+                            try:
+                                momentum = await grok.get_crypto_momentum(symbol)
+                                grok_direction = momentum.get("direction", "sideways")
+                                grok_strength = momentum.get("strength", 0.0)
+
+                                if grok_strength >= 0.5 and grok_direction == "down":
+                                    # Grok confirms NO snipe direction
+                                    self.log(
+                                        f"[GROK CONFIRM] {symbol} momentum={grok_direction} "
+                                        f"strength={grok_strength:.2f}"
+                                    )
+                                elif grok_strength >= 0.5 and grok_direction not in ("down", "sideways"):
+                                    # Grok contradicts — skip this snipe
+                                    self.log(
+                                        f"[GROK BLOCK] snipe skipped — {symbol} Grok says "
+                                        f"{grok_direction} (strength={grok_strength:.2f})",
+                                        "debug",
+                                    )
+                                    continue  # skip to next market
+                                # else: Grok unclear (strength < 0.5 or sideways) — proceed
+                            except Exception as exc:
+                                self.log(f"[GROK WARN] get_crypto_momentum failed for {symbol}: {exc}", "warning")
+                                # Do not block snipe on Grok error
+                        # ─────────────────────────────────────────────────
+
                         arb_opportunities.labels(strategy="crypto_5m").inc()
                         edge_detected.labels(strategy="crypto_5m").observe(net_edge)
                         size_usdc = self.risk.size_position(edge=net_edge, base_size=max_spend)
@@ -258,6 +341,8 @@ class CryptoShortStrategy(BaseStrategy):
                                     "net_edge": net_edge,
                                     "seconds_left": seconds_left,
                                     "condition_id": market.condition_id,
+                                    "grok_direction": grok_direction if symbol else None,
+                                    "grok_strength": grok_strength if symbol else None,
                                 },
                             ))
 

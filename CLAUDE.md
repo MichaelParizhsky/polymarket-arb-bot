@@ -140,3 +140,39 @@ When adding new strategies or changing logic, always:
 | `event_driven` | News/event catalysts moving markets | External research needed |
 | `cross_exchange` | Poly vs Kalshi price divergence | `combo_min_edge` |
 | `futures_hedge` | Binance futures hedge on crypto markets | `BINANCE_FUTURES_ENABLED` |
+| `quick_resolution` | High-conviction near-expiry extremes (>88% or <12%) | `QUICK_RESOLUTION_MIN_CONVICTION` |
+| `crypto_5m` | 5-min BTC/ETH/SOL binary markets, dual-arb + snipe | `STRATEGY_CRYPTO_5M` |
+| `swarm_prediction` | Multi-persona crowd simulation via Perplexity Agent API | `STRATEGY_SWARM` |
+
+## AI Integrations
+
+| Integration | Purpose | Env Var |
+|---|---|---|
+| Perplexity Sonar | Live news for event_driven, news_monitor | `PERPLEXITY_API_KEY` |
+| Perplexity Agent | Multi-step research, swarm personas | `PERPLEXITY_API_KEY` |
+| Grok (xAI) | X/Twitter crypto sentiment gate in crypto_5m | `GROK_API_KEY` |
+| MiroFish (optional) | Full swarm simulation REST API | `MIROFISH_URL` |
+
+## Slash Commands (`.claude/commands/`)
+
+- `/deploy-check` — Pre-deploy checklist before any `railway up`
+- `/review-risk` — Audit risk params and flag anything dangerous
+- `/session-handoff` — Generate handoff doc for next session
+- `/insights` — AI-powered market insights via Perplexity + Grok
+
+## Claude Hooks (`.claude/hooks/`)
+
+- `protect-files.sh` — Blocks writes to `.env`, `secrets`, `railway.toml`, `get_creds.py`
+- `audit-commands.sh` — Logs all bash commands to `.claude/logs/claude-audit.log`
+- PostToolUse: Auto-runs `ruff check --fix` + `ruff format` on all `.py` files edited
+- SessionStart: Injects git branch + last 3 commits + Railway service status
+
+## Self-Improvement Protocol
+
+Before any session involving >3 files or strategy changes:
+1. Use Plan Mode (`/plan`) to design approach before writing code
+2. Search web for latest API docs before implementing external integrations
+3. Run `/review-risk` after any config change
+4. Run `/deploy-check` before any `railway up`
+5. Run `/session-handoff` at end of session
+6. Use `/clear` between distinct tasks to keep context clean

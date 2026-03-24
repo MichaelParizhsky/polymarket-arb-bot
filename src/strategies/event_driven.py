@@ -34,6 +34,14 @@ try:
 except Exception:
     _NewsMonitor = None  # type: ignore[assignment,misc]
 
+# Optional AI research — Perplexity Sonar for real-time news grounding.
+# When configured, replaces/supplements the Google RSS news monitor with
+# live web search grounded answers.
+try:
+    from src.utils.ai_research import perplexity as _perplexity
+except Exception:
+    _perplexity = None  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -547,7 +555,7 @@ class EventDrivenStrategy(BaseStrategy):
         # This is logged only — signals already emitted above are not
         # retroactively modified (news is additive context, not a re-trade).
         # ------------------------------------------------------------------
-        if self._news_monitor and active_events:
+        if active_events and (self._news_monitor or (_perplexity and _perplexity.enabled)):
             _two_hours = 2 * 3600
             _now = time.time()
             try:
@@ -557,30 +565,50 @@ class EventDrivenStrategy(BaseStrategy):
                     matched = self._match_market_to_events(market, keyword_to_events)
                     if not matched:
                         continue
-                    news = self._news_monitor.get_relevant_news(
-                        market.question, max_results=3
-                    )
-                    # Filter to last 2 hours
-                    recent_news = [
-                        n for n in news
-                        if _now - n.get("_ts", 0) <= _two_hours
-                    ]
-                    if recent_news:
-                        top = recent_news[0]
-                        sentiment = top.get("sentiment", "neutral")
+
+                    headline = ""
+                    sentiment = "neutral"
+
+                    # --- Primary: Perplexity Sonar (real-time web grounding) ---
+                    if _perplexity and _perplexity.enabled and hasattr(self._news_monitor, "get_perplexity_context"):
+                        try:
+                            pplx_ctx = await self._news_monitor.get_perplexity_context(market.question)
+                            if pplx_ctx:
+                                headline = pplx_ctx[:200]
+                                # Simple sentiment heuristic from Perplexity text
+                                low = pplx_ctx.lower()
+                                if any(w in low for w in ("surge", "rally", "beats", "wins", "leads", "up ", "higher")):
+                                    sentiment = "positive"
+                                elif any(w in low for w in ("drop", "falls", "loses", "down", "lower", "miss", "below")):
+                                    sentiment = "negative"
+                        except Exception:
+                            pass
+
+                    # --- Fallback: Google RSS NewsMonitor ---
+                    if not headline and self._news_monitor:
+                        news = self._news_monitor.get_relevant_news(
+                            market.question, max_results=3
+                        )
+                        recent_news = [
+                            n for n in news
+                            if _now - n.get("_ts", 0) <= _two_hours
+                        ]
+                        if recent_news:
+                            top = recent_news[0]
+                            headline = top["title"]
+                            sentiment = top.get("sentiment", "neutral")
+
+                    if headline:
                         self.log(
                             f"[NEWS] '{market.question[:50]}' | "
-                            f"{top['title'][:80]} "
-                            f"[{sentiment}] (+0.2x size boost eligible)"
+                            f"{headline[:80]} [{sentiment}] (+0.2x size boost)"
                         )
-                        # Apply size boost to any signals for this market's tokens
                         market_token_ids = {t.token_id for t in market.tokens}
                         for sig in signals:
                             if sig.token_id in market_token_ids:
                                 sig.metadata["news_boost"] = True
-                                sig.metadata["news_headline"] = top["title"][:120]
+                                sig.metadata["news_headline"] = headline[:120]
                                 sig.metadata["news_sentiment"] = sentiment
-                                # Boost size_usdc by 20% for news-confirmed signals
                                 sig.size_usdc = round(sig.size_usdc * 1.2, 4)
             except Exception as exc:
                 logger.debug(f"[EventDriven] News boost step failed (non-fatal): {exc}")

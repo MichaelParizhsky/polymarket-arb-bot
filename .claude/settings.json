@@ -1,0 +1,54 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/protect-files.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'CMD=$(jq -r \".tool_input.command\" 2>/dev/null); if echo \"$CMD\" | grep -qE \"git push.*(origin )?main|git push.*(origin )?master\"; then echo \"BLOCKED: direct push to main/master forbidden — use a branch or railway up\" >&2; exit 2; fi; if echo \"$CMD\" | grep -qE \"rm -rf /|rm -rf ~\"; then echo \"BLOCKED: destructive rm pattern\" >&2; exit 2; fi; exit 0'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'FILE=$(jq -r \".tool_input.file_path // empty\" 2>/dev/null); if [[ \"$FILE\" == *.py ]]; then python -m ruff check --fix \"$FILE\" 2>/dev/null; python -m ruff format \"$FILE\" 2>/dev/null; fi; exit 0'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/audit-commands.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"=== Session Start ===\"; echo \"Branch: $(git branch --show-current 2>/dev/null || echo unknown)\"; echo \"Last commits:\"; git log --oneline -3 2>/dev/null; echo \"Bot status:\"; railway service 2>/dev/null | head -2; exit 0'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -2,7 +2,8 @@
 NewsMonitor — background news polling for the event-driven strategy.
 
 Polls free news sources every 5 minutes (configurable):
-  - Google News RSS (free, no API key required)
+  - Perplexity Sonar (primary, when PERPLEXITY_API_KEY is set)
+  - Google News RSS (free, no API key required; always runs as fallback)
   - CryptoPanic free endpoint (attempted without auth; skipped on failure)
 
 Maintains a rolling 6-hour headline cache and provides keyword-scored
@@ -13,11 +14,13 @@ Usage:
     await monitor.start()
     ...
     news = monitor.get_relevant_news("Will Bitcoin exceed $100k in 2026?")
+    context = await monitor.get_perplexity_context("Will the Fed cut rates?")
     await monitor.stop()
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -26,6 +29,7 @@ from typing import Any
 
 import httpx
 
+from src.utils.ai_research import perplexity
 from src.utils.logger import logger
 
 try:
@@ -46,6 +50,17 @@ _CRYPTOPANIC_URL = (
 )
 _CACHE_MAX_AGE_SECONDS = 6 * 3600   # 6 hours
 _REQUEST_TIMEOUT = 15.0              # seconds per HTTP request
+
+# Perplexity polling: one query per category per poll cycle
+_PERPLEXITY_CATEGORIES = [
+    "crypto markets Bitcoin Ethereum price moves last 2 hours",
+    "sports scores NBA NHL NFL MLB last 2 hours",
+    "US politics elections breaking news last 2 hours",
+    "global financial markets earnings Fed rates last 2 hours",
+]
+
+# Cache TTL for get_perplexity_context() results
+_PERPLEXITY_CONTEXT_TTL = 300  # 5 minutes
 
 # Stopwords to strip before keyword scoring
 _STOPWORDS = frozenset({
@@ -94,6 +109,10 @@ class NewsMonitor:
     """
     Background news monitor.  Call start() to begin polling, stop() to end.
     Thread-safe for reading; the internal cache is replaced atomically.
+
+    When PERPLEXITY_API_KEY is set, Perplexity Sonar is used as the primary
+    news source (polled every poll_interval seconds across 4 market categories).
+    Google News RSS always runs as fallback regardless.
     """
 
     def __init__(self, poll_interval: int = 300) -> None:
@@ -102,6 +121,9 @@ class NewsMonitor:
         self._task: asyncio.Task | None = None
         self._running = False
         self._client: httpx.AsyncClient | None = None
+
+        # Cache for get_perplexity_context(): {question_hash -> (result, expires_at)}
+        self._perplexity_cache: dict[str, tuple[str, float]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -120,10 +142,19 @@ class NewsMonitor:
         # Do an immediate fetch before scheduling the loop
         await self._fetch_all()
         self._task = asyncio.create_task(self._poll_loop(), name="news_monitor")
-        logger.info(
-            f"[NewsMonitor] Started — poll_interval={self._poll_interval}s, "
-            f"feedparser={'available' if _FEEDPARSER_AVAILABLE else 'fallback XML'}"
-        )
+
+        if perplexity.enabled:
+            logger.info(
+                f"[NewsMonitor] Started — poll_interval={self._poll_interval}s, "
+                f"primary=perplexity_sonar, fallback=google_rss, "
+                f"feedparser={'available' if _FEEDPARSER_AVAILABLE else 'fallback XML'}"
+            )
+        else:
+            logger.info(
+                f"[NewsMonitor] Started — poll_interval={self._poll_interval}s, "
+                f"primary=google_rss (no PERPLEXITY_API_KEY), "
+                f"feedparser={'available' if _FEEDPARSER_AVAILABLE else 'fallback XML'}"
+            )
 
     async def stop(self) -> None:
         """Stop background polling loop and close HTTP client."""
@@ -170,6 +201,37 @@ class NewsMonitor:
         # Only return headlines with at least one keyword hit
         return [h for score, h in scored if score > 0][:max_results]
 
+    async def get_perplexity_context(self, question: str) -> str:
+        """
+        Get targeted real-time context for a specific market question.
+        Uses sonar-reasoning-pro for high-quality analysis.
+        Returns empty string if Perplexity is not configured.
+
+        Used by EventDrivenStrategy and SwarmPredictionStrategy before trades.
+        Rate-limited: caches results per question for 5 minutes to avoid
+        hammering the API on every cycle.
+        """
+        if not perplexity.enabled:
+            return ""
+
+        cache_key = hashlib.sha256(question.encode()).hexdigest()
+        now = time.time()
+
+        cached = self._perplexity_cache.get(cache_key)
+        if cached is not None:
+            result, expires_at = cached
+            if now < expires_at:
+                return result
+
+        try:
+            result = await perplexity.research(question)
+        except Exception as exc:
+            logger.debug(f"[NewsMonitor] get_perplexity_context failed: {exc}")
+            return ""
+
+        self._perplexity_cache[cache_key] = (result, now + _PERPLEXITY_CONTEXT_TTL)
+        return result
+
     # ------------------------------------------------------------------
     # Internal polling
     # ------------------------------------------------------------------
@@ -190,20 +252,24 @@ class NewsMonitor:
         """Fetch news from all sources and merge into the cache."""
         results: list[dict] = []
 
-        # Run both fetches concurrently; failures are caught inside each method
+        # Always run RSS sources
         general_task = asyncio.create_task(
             self._fetch_general_news(_CRYPTO_RSS_QUERY)
         )
         crypto_task = asyncio.create_task(self._fetch_crypto_news())
 
-        general, crypto = await asyncio.gather(
-            general_task, crypto_task, return_exceptions=True
-        )
+        tasks: list[asyncio.Task] = [general_task, crypto_task]
 
-        if isinstance(general, list):
-            results.extend(general)
-        if isinstance(crypto, list):
-            results.extend(crypto)
+        # Run Perplexity polling as an additional source when configured
+        if perplexity.enabled:
+            perplexity_task = asyncio.create_task(self._poll_perplexity())
+            tasks.append(perplexity_task)
+
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for outcome in gathered:
+            if isinstance(outcome, list):
+                results.extend(outcome)
 
         if results:
             # Merge with existing cache, de-duplicate by URL
@@ -220,6 +286,77 @@ class NewsMonitor:
                 f"[NewsMonitor] Cache updated: {len(self._cache)} headlines "
                 f"({len(new_items)} new)"
             )
+
+    # ------------------------------------------------------------------
+    # Perplexity polling
+    # ------------------------------------------------------------------
+
+    async def _poll_perplexity(self) -> list[dict]:
+        """
+        Poll Perplexity Sonar for each active market category.
+        Runs at most 4 calls per cycle (one per category).
+        Failures per category are caught individually and skipped silently.
+        Returns a flat list of synthetic NewsItem dicts compatible with the cache.
+        """
+        if not perplexity.enabled:
+            return []
+
+        results: list[dict] = []
+
+        for category_query in _PERPLEXITY_CATEGORIES:
+            try:
+                raw = await perplexity.search(category_query, model="sonar")
+                if not raw:
+                    continue
+
+                items = self._parse_perplexity_response(raw, category_query)
+                results.extend(items)
+
+            except Exception as exc:
+                logger.debug(
+                    f"[NewsMonitor] Perplexity poll failed for "
+                    f"'{category_query[:40]}...': {exc}"
+                )
+                # Fall through silently; RSS will cover this category
+
+        return results
+
+    def _parse_perplexity_response(self, raw_text: str, category: str) -> list[dict]:
+        """
+        Convert a Perplexity free-text response into synthetic NewsItem dicts
+        compatible with the existing headline cache.
+
+        Each non-empty sentence/line becomes one headline. Duplicate-safe URLs
+        are built from a hash of the content so de-duplication in _fetch_all works.
+        """
+        results: list[dict] = []
+        now = time.time()
+
+        # Split on newlines and sentence boundaries; filter short fragments
+        import re
+        lines = re.split(r"\n+|(?<=[.!?])\s+", raw_text)
+
+        for line in lines:
+            line = line.strip()
+            # Strip common markdown artifacts
+            line = re.sub(r"^\s*[\*\-•]\s*", "", line)
+            line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+
+            if len(line) < 20:
+                continue
+
+            # Build a stable synthetic URL so de-duplication works across polls
+            url_hash = hashlib.md5(line.encode()).hexdigest()
+            synthetic_url = f"perplexity://sonar/{url_hash}"
+
+            results.append(self._build_headline(
+                title=line[:300],
+                url=synthetic_url,
+                published="",   # _parse_published_ts returns now() for empty string
+                source="Perplexity Sonar",
+            ))
+
+        return results
 
     # ------------------------------------------------------------------
     # Source fetchers

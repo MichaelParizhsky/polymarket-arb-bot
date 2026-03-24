@@ -21,7 +21,7 @@ import math
 import time
 from typing import Any
 
-from src.exchange.binance import BinanceFeed, SYMBOL_MAP
+from src.exchange.binance import BinanceFeed
 from src.exchange.polymarket import Market, Orderbook
 from src.strategies.base import BaseStrategy, Signal
 from src.utils.metrics import arb_opportunities, edge_detected, price_lag

@@ -38,8 +38,12 @@ from src.strategies.event_driven import EventDrivenStrategy
 from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
 from src.strategies.quick_resolution import QuickResolutionStrategy
-from src.strategies.ensemble import EnsembleStrategy
 from src.strategies.crypto_5m import CryptoShortStrategy
+try:
+    from src.strategies.swarm_prediction import SwarmPredictionStrategy
+    _SWARM_AVAILABLE = True
+except ImportError:
+    _SWARM_AVAILABLE = False
 from src.utils.hedge_manager import HedgeManager
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
@@ -120,7 +124,6 @@ class ArbBot:
         self._futures_hedge: FuturesHedge | None = None
         self._hedge_manager: HedgeManager | None = None
         self._news_monitor = None  # set in run() if NewsMonitor available
-        self._ensemble_strategy = None  # set in _build_strategies() if enabled
 
         # Strategies
         self._strategies = []
@@ -181,13 +184,14 @@ class ArbBot:
                 CryptoShortStrategy(self.config, self.portfolio, self.risk)
             )
             logger.info("CryptoShortStrategy (5m/15m dual-arb + snipe) ENABLED")
-        # EnsembleStrategy disabled: LLMs lack calibration for real-time probability
-        # estimation. Replace with a properly trained ML model before re-enabling.
-        # ensemble = EnsembleStrategy(...)
-        # self.strategies.append(ensemble)
-        if False and cfg.ensemble_enabled:  # noqa: SIM210 — intentionally disabled
-            self._ensemble_strategy = EnsembleStrategy(self.config, self.portfolio, self.risk)
-            self._strategies.append(self._ensemble_strategy)
+        if getattr(cfg, 'swarm_enabled', False):
+            if _SWARM_AVAILABLE:
+                self._strategies.append(
+                    SwarmPredictionStrategy(self.config, self.portfolio, self.risk)
+                )
+                logger.info("SwarmPredictionStrategy (crowd simulation mispricing) ENABLED")
+            else:
+                logger.warning("SwarmPredictionStrategy not available — check src/strategies/swarm_prediction.py")
         strategy_names = [s.name for s in self._strategies]
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture
@@ -199,7 +203,7 @@ class ArbBot:
             "EventDrivenStrategy": cfg.event_driven_enabled,
             "CrossExchangeStrategy": cfg.cross_exchange_enabled,
             "QuickResolutionStrategy": cfg.quick_resolution_enabled,
-            "EnsembleStrategy": cfg.ensemble_enabled,
+            "SwarmPredictionStrategy": getattr(cfg, 'swarm_enabled', False),
         }
         disabled = [k for k, v in all_flags.items() if not v]
         if disabled:
@@ -262,7 +266,6 @@ class ArbBot:
                            binance=self.binance, kalshi=self._kalshi,
                            news_monitor=self._news_monitor,
                            hedge_manager=self._hedge_manager,
-                           ensemble_strategy=self._ensemble_strategy,
                            state_loaded_from_file=self._state_loaded)
 
         # Start dashboard server in a dedicated thread with its own event loop.
@@ -842,6 +845,29 @@ class ArbBot:
                 # Include live risk health in the analysis
                 live_health = self.risk.portfolio_health_score()
 
+                # Perplexity market context — get a brief real-time summary of
+                # prediction market conditions to inform the meta-agent's analysis.
+                perplexity_context = ""
+                try:
+                    from src.utils.ai_research import perplexity as _meta_pplx
+                    if _meta_pplx.enabled:
+                        # Agent API: multi-step research across sources (search + fetch_url).
+                        # Falls back to single Sonar call automatically on error.
+                        perplexity_context = await _meta_pplx.agent(
+                            "You are researching current conditions for a Polymarket prediction market bot. "
+                            "Do the following in sequence:\n"
+                            "1. Search for major sports results and upcoming games in the last 12 hours "
+                            "(NBA, NHL, NFL, MLB, soccer) that have active Polymarket markets\n"
+                            "2. Search for significant crypto price moves in the last 6 hours "
+                            "(BTC, ETH, SOL) and any breaking macro/Fed news\n"
+                            "3. Search for any major political or world events affecting US prediction markets\n"
+                            "Summarize findings in 5-8 bullet points. Focus only on events that "
+                            "would cause prediction market prices to move."
+                        )
+                        logger.info("Meta-agent: Perplexity Agent market context fetched")
+                except Exception as _pplx_err:
+                    logger.debug(f"Meta-agent: Perplexity context fetch failed (non-fatal): {_pplx_err}")
+
                 system = (
                     "You are an expert quantitative analyst for a Polymarket/Kalshi prediction market "
                     "arbitrage bot. Your role combines four perspectives:\n\n"
@@ -904,7 +930,8 @@ class ArbBot:
                     f"**Live Risk Health:**\n```json\n{json.dumps(live_health, indent=2)}\n```\n\n"
                     f"**Current Config:**\n```json\n{json.dumps(current_env, indent=2)}\n```\n\n"
                     f"**Performance Snapshot:**\n```json\n{json.dumps(analysis_data, indent=2)}\n```\n\n"
-                    "Identify the weakest strategy by ROI, check if health requires defensive action, "
+                    + (f"**Real-Time Market Context (Perplexity Sonar):**\n{perplexity_context}\n\n" if perplexity_context else "")
+                    + "Identify the weakest strategy by ROI, check if health requires defensive action, "
                     "and suggest only evidence-backed parameter changes."
                 )
 
@@ -1003,7 +1030,6 @@ class ArbBot:
         "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),
         "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),
         "STRATEGY_QUICK_RESOLUTION": ("strategies", "quick_resolution_enabled", bool),
-        "STRATEGY_ENSEMBLE":         ("strategies", "ensemble_enabled",          bool),
     }
 
     def _apply_config_overrides(self, overrides: dict) -> list[str]:
