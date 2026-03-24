@@ -11,7 +11,7 @@ import os
 import time
 import threading as _threading
 
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
@@ -184,12 +184,17 @@ def positions():
 
 
 @app.post("/api/positions/close")
-def close_position(body: dict, x_api_key: str = Header(default="")):
+async def close_position(request: Request, x_api_key: str = Header(default="")):
     """Force-close an open position at current bid or zero (paper mode only)."""
     if not _check_api_key(x_api_key):
         return JSONResponse({"error": "Unauthorized"}, status_code=403)
     if not _portfolio:
         return JSONResponse({"error": "Portfolio not initialized"}, status_code=503)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
 
     token_id_prefix = body.get("token_id", "")
     if not token_id_prefix:
