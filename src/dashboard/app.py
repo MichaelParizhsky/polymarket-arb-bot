@@ -12,7 +12,7 @@ import os
 import time
 import threading as _threading
 
-from fastapi import FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
