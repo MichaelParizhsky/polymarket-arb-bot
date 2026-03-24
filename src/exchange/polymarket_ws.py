@@ -522,3 +522,179 @@ class PolymarketWSFeed:
                         self._books[token_id] = mbook
                     mbook.apply_price_change([[side, price, size]])
         logger.debug(f"[PolymarketWS] BATCH DELTA | {len(price_changes)} change(s)")
+
+
+# ------------------------------------------------------------------ #
+#  User channel — authenticated real-time fill feed                   #
+# ------------------------------------------------------------------ #
+
+WS_USER_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+
+
+class PolymarketUserWSFeed:
+    """
+    Authenticated WebSocket feed for user-level events.
+
+    Connects to the Polymarket user channel and fires callbacks when:
+      - An order is filled ("trade" event)
+      - An order status changes ("order" event)
+
+    Unlike the market feed (orderbooks), this channel requires API credentials
+    and gives real-time fill data so the bot doesn't have to infer fills from
+    position state changes.
+
+    Usage::
+        feed = PolymarketUserWSFeed(api_key, api_secret, api_passphrase)
+        feed.on_fill(my_fill_handler)        # async or sync callback
+        feed.subscribe_market(condition_id)  # add markets to monitor
+        await feed.start()
+        ...
+        await feed.stop()
+    """
+
+    def __init__(self, api_key: str, api_secret: str, api_passphrase: str) -> None:
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._api_passphrase = api_passphrase
+        self._running = False
+        self._ws_task: asyncio.Task | None = None
+        self._active_ws: Any = None
+        self._markets: set[str] = set()
+        self._fill_callbacks: list = []
+        self._order_callbacks: list = []
+
+    # ── Public API ──────────────────────────────────────────────────────
+
+    def on_fill(self, callback) -> None:
+        """Register a callback fired on trade fill events.
+        Callback receives the raw event dict.  Can be async or sync."""
+        self._fill_callbacks.append(callback)
+
+    def on_order_update(self, callback) -> None:
+        """Register a callback fired on order status-change events."""
+        self._order_callbacks.append(callback)
+
+    def subscribe_market(self, condition_id: str) -> None:
+        """Add a market (by condition_id) to the subscription set."""
+        self._markets.add(condition_id)
+
+    async def start(self) -> None:
+        """Start the background WebSocket task."""
+        if self._running:
+            return
+        if not self._api_key:
+            logger.warning("[PolymarketUserWS] No API key — user feed disabled")
+            return
+        self._running = True
+        self._ws_task = asyncio.create_task(self._run_forever())
+        logger.info("[PolymarketUserWS] Feed started")
+
+    async def stop(self) -> None:
+        """Gracefully stop the feed."""
+        self._running = False
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+            self._ws_task = None
+        logger.info("[PolymarketUserWS] Feed stopped")
+
+    # ── Internal ────────────────────────────────────────────────────────
+
+    async def _run_forever(self) -> None:
+        while self._running:
+            try:
+                async for attempt in AsyncRetrying(
+                    retry=retry_if_exception_type(Exception),
+                    stop=stop_after_attempt(MAX_RECONNECT_ATTEMPTS),
+                    wait=wait_exponential(
+                        min=RECONNECT_DELAY_MIN, max=RECONNECT_DELAY_MAX
+                    ),
+                    reraise=True,
+                ):
+                    with attempt:
+                        if not self._running:
+                            return
+                        await self._connect()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning(
+                    f"[PolymarketUserWS] Unavailable after {MAX_RECONNECT_ATTEMPTS} "
+                    f"attempts ({exc}). Retrying in {RECONNECT_DELAY_MAX}s..."
+                )
+                try:
+                    await asyncio.sleep(RECONNECT_DELAY_MAX)
+                except asyncio.CancelledError:
+                    return
+
+    async def _connect(self) -> None:
+        logger.debug(f"[PolymarketUserWS] Connecting to {WS_USER_ENDPOINT}")
+        async with websockets.connect(
+            WS_USER_ENDPOINT,
+            ping_interval=PING_INTERVAL,
+            ping_timeout=PING_TIMEOUT,
+            open_timeout=15,
+        ) as ws:
+            self._active_ws = ws
+            logger.info("[PolymarketUserWS] Connected — sending auth + subscription")
+            await ws.send(json.dumps({
+                "auth": {
+                    "apiKey": self._api_key,
+                    "secret": self._api_secret,
+                    "passphrase": self._api_passphrase,
+                },
+                "type": "user",
+                "markets": list(self._markets),
+            }))
+            async for raw in ws:
+                if not self._running:
+                    break
+                try:
+                    await self._handle_message(raw)
+                except Exception as exc:
+                    logger.debug(f"[PolymarketUserWS] Message error: {exc}")
+            self._active_ws = None
+
+    async def _handle_message(self, raw: str) -> None:
+        """Parse and dispatch a user channel message."""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+
+        # Messages can arrive as a single object or a list
+        msgs: list[dict] = data if isinstance(data, list) else [data]
+
+        for msg in msgs:
+            event_type = msg.get("event_type") or msg.get("type")
+
+            if event_type == "trade":
+                logger.info(
+                    f"[PolymarketUserWS] Fill: asset={msg.get('asset_id', '')[:16]} "
+                    f"side={msg.get('side')} size={msg.get('size')} price={msg.get('price')}"
+                )
+                for cb in self._fill_callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(cb):
+                            await cb(msg)
+                        else:
+                            cb(msg)
+                    except Exception as exc:
+                        logger.debug(f"[PolymarketUserWS] fill callback error: {exc}")
+
+            elif event_type == "order":
+                logger.debug(
+                    f"[PolymarketUserWS] Order update: id={msg.get('order_id', '')[:16]} "
+                    f"status={msg.get('status')}"
+                )
+                for cb in self._order_callbacks:
+                    try:
+                        if asyncio.iscoroutinefunction(cb):
+                            await cb(msg)
+                        else:
+                            cb(msg)
+                    except Exception as exc:
+                        logger.debug(f"[PolymarketUserWS] order callback error: {exc}")

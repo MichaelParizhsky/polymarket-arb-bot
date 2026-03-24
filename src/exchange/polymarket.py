@@ -134,9 +134,9 @@ class PolymarketClient:
         # Pre-build the ClobClient once for the session to avoid per-order overhead
         if not self.paper_trading and self.config.private_key:
             try:
-                from py_clob_client.client import ClobClient
+                from py_clob_client.client import AsyncClobClient
                 from py_clob_client.constants import POLYGON
-                self._clob_client = ClobClient(
+                self._clob_client = AsyncClobClient(
                     host=self.CLOB_BASE,
                     chain_id=POLYGON,
                     key=self.config.private_key,
@@ -148,7 +148,7 @@ class PolymarketClient:
                     signature_type=2,
                     funder=self.config.funder_address,
                 )
-                logger.info("ClobClient initialised (session-level)")
+                logger.info("AsyncClobClient initialised (session-level, gasless via CLOB relayer)")
             except Exception as exc:
                 logger.warning(f"ClobClient init failed: {exc}")
                 self._clob_client = None
@@ -614,15 +614,14 @@ class PolymarketClient:
             return None
         try:
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            loop = asyncio.get_running_loop()
             order_args = MarketOrderArgs(token_id=token_id, amount=amount_usdc)
             try:
                 signed = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._clob_client.create_market_order, order_args),
+                    self._clob_client.create_market_order(order_args),
                     timeout=5.0,
                 )
                 resp = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._clob_client.post_order, signed, OrderType.FOK),
+                    self._clob_client.post_order(signed, OrderType.FOK),
                     timeout=5.0,
                 )
             except asyncio.TimeoutError:
@@ -657,14 +656,13 @@ class PolymarketClient:
                 size=size,
                 side=BUY if side == "BUY" else SELL,
             )
-            loop = asyncio.get_running_loop()
             try:
                 signed = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._clob_client.create_order, order_args),
+                    self._clob_client.create_order(order_args),
                     timeout=5.0,
                 )
                 resp = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._clob_client.post_order, signed, OrderType.GTC),
+                    self._clob_client.post_order(signed, OrderType.GTC),
                     timeout=5.0,
                 )
             except asyncio.TimeoutError:

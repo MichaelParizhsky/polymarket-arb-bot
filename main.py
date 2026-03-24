@@ -28,7 +28,7 @@ from src.exchange.polymarket import PolymarketClient
 from src.exchange.binance import BinanceFeed
 from src.portfolio.paper_trading import PaperPortfolio
 from src.risk.risk_manager import RiskManager
-from src.exchange.polymarket_ws import PolymarketWSFeed
+from src.exchange.polymarket_ws import PolymarketWSFeed, PolymarketUserWSFeed
 from src.exchange.kalshi import KalshiClient
 from src.strategies.rebalancing import RebalancingStrategy
 from src.strategies.combinatorial import CombinatorialStrategy
@@ -125,6 +125,7 @@ class ArbBot:
 
         self.poly: PolymarketClient | None = None
         self._ws_feed: PolymarketWSFeed | None = None
+        self._user_ws: PolymarketUserWSFeed | None = None
         self._kalshi: KalshiClient | None = None
         self._futures_hedge: FuturesHedge | None = None
         self._hedge_manager: HedgeManager | None = None
@@ -247,6 +248,15 @@ class ArbBot:
             self._ws_feed = PolymarketWSFeed()
             logger.info("Polymarket WebSocket orderbook feed enabled")
 
+        # User WebSocket feed — real-time fill notifications (live mode only)
+        if not self.paper and self.config.polymarket.api_key:
+            self._user_ws = PolymarketUserWSFeed(
+                api_key=self.config.polymarket.api_key,
+                api_secret=self.config.polymarket.api_secret,
+                api_passphrase=self.config.polymarket.api_passphrase,
+            )
+            logger.info("Polymarket user WebSocket feed enabled (real-time fills)")
+
         if self.config.kalshi.enabled:
             self._kalshi = KalshiClient(self.config.kalshi, paper_trading=self.paper)
             logger.info("Kalshi client enabled")
@@ -316,6 +326,10 @@ class ArbBot:
         # Start Polymarket WS orderbook feed if enabled
         if self._ws_feed:
             await self._ws_feed.start()
+
+        # Start user WS feed for real-time fills (live mode only)
+        if self._user_ws:
+            await self._user_ws.start()
 
         async with PolymarketClient(self.config.polymarket, paper_trading=self.paper) as poly:
             self.poly = poly
@@ -1256,6 +1270,8 @@ class ArbBot:
         await self.binance.stop()
         if self._ws_feed:
             await self._ws_feed.stop()
+        if self._user_ws:
+            await self._user_ws.stop()
         if self._news_monitor:
             try:
                 await self._news_monitor.stop()
