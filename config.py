@@ -94,7 +94,7 @@ class RiskConfig:
 
 @dataclass
 class StrategyConfig:
-    rebalancing_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_REBALANCING", True))
+    rebalancing_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_REBALANCING", False))
     combinatorial_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_COMBINATORIAL", True))
     latency_arb_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_LATENCY_ARB", False))  # disabled: Polymarket dynamic fees killed this strategy
     market_making_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_MARKET_MAKING", True))

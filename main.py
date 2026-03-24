@@ -810,7 +810,7 @@ class ArbBot:
                             token_id=token_id,
                             contracts=pos.contracts,
                             price=book.best_bid,
-                            strategy="auto_close",
+                            strategy=pos.strategy or "auto_close",
                             notes=f"[AUTO-CLOSE] resolved winner @ {book.best_bid:.4f}",
                         )
                         if trade:
@@ -826,7 +826,7 @@ class ArbBot:
                             token_id=token_id,
                             contracts=pos.contracts,
                             price=book.best_ask or 0.001,
-                            strategy="auto_close",
+                            strategy=pos.strategy or "auto_close",
                             notes=f"[AUTO-CLOSE] resolved loser @ {book.best_ask:.4f}",
                         )
                         if trade:
@@ -918,7 +918,7 @@ class ArbBot:
                         token_id=token_id,
                         contracts=pos.contracts,
                         price=exit_price,
-                        strategy="auto_close",
+                        strategy=pos.strategy or "auto_close",
                         notes=f"[EOD-CLOSE] daily dump @ {exit_price:.4f}",
                     )
                     if trade:
