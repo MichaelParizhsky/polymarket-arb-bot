@@ -73,7 +73,7 @@ async def run_research() -> dict:
         "You are a research agent for a live Polymarket/Kalshi prediction market "
         "arbitrage bot. Your job is to search the web for new strategies, improvements, "
         "and market intelligence that could make the bot more profitable or robust.\n\n"
-        "The bot currently implements: YES/NO rebalancing arb, combinatorial arb, "
+        "The bot currently implements: combinatorial arb, "
         "Binance latency arb, passive market making, resolution arb (near-expiry), "
         "event-driven directional trading, cross-exchange Poly↔Kalshi arb.\n\n"
         "For each topic you search, extract the most novel and actionable findings. "
@@ -106,7 +106,7 @@ async def run_research() -> dict:
         "}\n\n"
         "Limit findings to the 8 most impactful. Be concrete, not generic.\n"
         "For signals.active_topics: list 5-15 specific keyword phrases that are HOT right now in prediction markets (e.g. \"trump tariffs\", \"fed rate cut june\", \"ethereum etf staking\"). These are injected directly into the combinatorial strategy's topic scanner.\n"
-        "For signals.param_hints: ONLY include if a finding strongly justifies a parameter nudge. Valid keys: latency_price_lag_threshold (float 0.005-0.05), combo_min_edge (float 0.01-0.10), rebalancing_min_edge (float 0.005-0.05). Keep nudges conservative (< 20% change from defaults).\n"
+        "For signals.param_hints: ONLY include if a finding strongly justifies a parameter nudge. Valid keys: latency_price_lag_threshold (float 0.005-0.05), combo_min_edge (float 0.01-0.10). Keep nudges conservative (< 20% change from defaults).\n"
         "For signals.strategy_focus: name of the strategy most favored by this run's findings, or null."
     )
 

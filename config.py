@@ -77,7 +77,6 @@ class RiskConfig:
     hard_stop_max_count: int = 3
     hard_stop_window_hours: int = 24
     strategy_loss_budget: dict = field(default_factory=lambda: {
-        "rebalancing": 300.0,
         "combinatorial": 400.0,
         "market_making": 200.0,
         "resolution": 600.0,
@@ -94,14 +93,9 @@ class RiskConfig:
 
 @dataclass
 class StrategyConfig:
-    rebalancing_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_REBALANCING", False))
     combinatorial_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_COMBINATORIAL", True))
     latency_arb_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_LATENCY_ARB", False))  # disabled: Polymarket dynamic fees killed this strategy
     market_making_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_MARKET_MAKING", True))
-
-    # Rebalancing — must clear 2% winner fee + gas; set above 2%
-    rebalancing_min_edge: float = field(default_factory=lambda: _float("REBALANCING_MIN_EDGE", 0.025))
-    rebalancing_max_spend: float = 200.0
 
     # Combinatorial
     combo_min_edge: float = field(default_factory=lambda: _float("COMBO_MIN_EDGE", 0.03))

@@ -353,7 +353,6 @@ def system_status():
 
     # --- Strategies ---
     strategy_notes = {
-        "rebalancing":       "Trades YES+NO deviation from $1",
         "combinatorial":     "Multi-outcome portfolio imbalance",
         "latency_arb":       "Polymarket lagging Binance prices",
         "market_making":     "Passive liquidity / earn spread",
@@ -1798,7 +1797,6 @@ tr:hover td{background:var(--surface2)}
 .buy{color:var(--green)}.sell{color:var(--red)}.win{color:var(--green)}.loss{color:var(--red)}
 
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.63rem;font-weight:700;letter-spacing:.04em}
-.badge.rebalancing{background:#0d1f0d;color:var(--green)}
 .badge.combinatorial{background:#0d0d2a;color:#818cf8}
 .badge.latency_arb{background:#1f0d0d;color:#fb923c}
 .badge.market_making{background:#1f1a00;color:var(--yellow)}

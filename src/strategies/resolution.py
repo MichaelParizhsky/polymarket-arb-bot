@@ -211,7 +211,7 @@ class ResolutionStrategy(BaseStrategy):
 
             arb_opportunities.labels(strategy="resolution").inc()
             edge_detected.labels(strategy="resolution").observe(net_edge)
-            base_size = getattr(self.config.strategies, "rebalancing_max_spend", 50.0) / 2.0
+            base_size = 50.0 / 2.0
             size_usdc = self.risk.size_position(edge=net_edge, base_size=base_size)
             if size_usdc < 1.0:
                 return None
@@ -248,7 +248,7 @@ class ResolutionStrategy(BaseStrategy):
 
             arb_opportunities.labels(strategy="resolution").inc()
             edge_detected.labels(strategy="resolution").observe(net_edge)
-            base_size = getattr(self.config.strategies, "rebalancing_max_spend", 50.0) / 2.0
+            base_size = 50.0 / 2.0
             size_usdc = self.risk.size_position(edge=net_edge, base_size=base_size)
             if size_usdc < 1.0:
                 return None
@@ -368,9 +368,7 @@ class ResolutionStrategy(BaseStrategy):
         arb_opportunities.labels(strategy="resolution").inc()
         edge_detected.labels(strategy="resolution").observe(net_edge)
 
-        base_size = getattr(
-            self.config.strategies, "rebalancing_max_spend", 50.0
-        ) / 2.0
+        base_size = 50.0 / 2.0
         size_usdc = self.risk.size_position(edge=net_edge, base_size=base_size)
         if size_usdc < 1.0:
             return None
@@ -439,9 +437,7 @@ class ResolutionStrategy(BaseStrategy):
         arb_opportunities.labels(strategy="resolution").inc()
         edge_detected.labels(strategy="resolution").observe(net_edge)
 
-        base_size = getattr(
-            self.config.strategies, "rebalancing_max_spend", 50.0
-        ) / 2.0
+        base_size = 50.0 / 2.0
         size_usdc = self.risk.size_position(edge=net_edge, base_size=base_size)
         if size_usdc < 1.0:
             return None

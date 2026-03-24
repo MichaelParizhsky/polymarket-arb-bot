@@ -2,7 +2,7 @@
 """
 Polymarket Arbitrage Bot
 ========================
-Four strategies: market rebalancing, combinatorial arb,
+Three core strategies: combinatorial arb,
 latency arb vs Binance, and market making.
 
 Usage:
@@ -30,7 +30,6 @@ from src.portfolio.paper_trading import PaperPortfolio
 from src.risk.risk_manager import RiskManager
 from src.exchange.polymarket_ws import PolymarketWSFeed, PolymarketUserWSFeed
 from src.exchange.kalshi import KalshiClient
-from src.strategies.rebalancing import RebalancingStrategy
 from src.strategies.combinatorial import CombinatorialStrategy
 from src.strategies.market_making import MarketMakingStrategy
 from src.strategies.resolution import ResolutionStrategy
@@ -150,10 +149,6 @@ class ArbBot:
 
     def _build_strategies(self) -> None:
         cfg = self.config.strategies
-        if cfg.rebalancing_enabled:
-            self._strategies.append(
-                RebalancingStrategy(self.config, self.portfolio, self.risk)
-            )
         if cfg.combinatorial_enabled:
             self._strategies.append(
                 CombinatorialStrategy(self.config, self.portfolio, self.risk)
@@ -212,7 +207,6 @@ class ArbBot:
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture
         all_flags = {
-            "RebalancingStrategy": cfg.rebalancing_enabled,
             "CombinatorialStrategy": cfg.combinatorial_enabled,
             "MarketMakingStrategy": cfg.market_making_enabled,
             "ResolutionStrategy": cfg.resolution_enabled,
@@ -594,7 +588,7 @@ class ArbBot:
         # Deduplicate: same token_id + side should only execute once per cycle
         seen: set[tuple[str, str]] = set()
         # Track tokens whose paired leg was skipped so we don't execute one side alone.
-        # A rebalancing arb requires both YES and NO to fill — executing only one leg
+        # A paired arb requires both YES and NO to fill — executing only one leg
         # creates an unhedged directional position instead of a risk-free arb.
         skipped_pairs: set[str] = set()
 
@@ -602,7 +596,7 @@ class ArbBot:
         min_interval = self.config.risk.min_trade_interval
         token_cooldown = self.config.risk.token_cooldown
 
-        # Identify paired signals (rebalancing YES+NO pairs).
+        # Identify paired signals (YES+NO pairs).
         # If rate budget can't cover even 1 trade, skip BOTH legs to avoid an unhedged position.
         pair_groups: dict[str, list] = {}
         for sig in signals:
@@ -1049,7 +1043,7 @@ class ArbBot:
                     "MAX_SLIPPAGE, MIN_TRADE_INTERVAL, TOKEN_COOLDOWN\n"
                     "  Market making: MM_SPREAD_BPS, MM_ORDER_SIZE, MM_MAX_INVENTORY\n"
                     "  Coverage: MAX_DAYS_TO_RESOLUTION, MAX_MARKETS\n"
-                    "  Strategies (enable/disable): STRATEGY_REBALANCING, STRATEGY_COMBINATORIAL, "
+                    "  Strategies (enable/disable): STRATEGY_COMBINATORIAL, "
                     "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, "
                     "STRATEGY_EVENT_DRIVEN\n\n"
 
@@ -1175,7 +1169,6 @@ class ArbBot:
         "MM_MAX_INVENTORY":        ("strategies", "mm_max_inventory",         float),
         "MAX_DAYS_TO_RESOLUTION":  ("strategies", "max_days_to_resolution",   int),
         "MAX_MARKETS":             ("strategies", "max_markets",              int),
-        "STRATEGY_REBALANCING":    ("strategies", "rebalancing_enabled",      bool),
         "STRATEGY_COMBINATORIAL":  ("strategies", "combinatorial_enabled",    bool),
         "STRATEGY_MARKET_MAKING":  ("strategies", "market_making_enabled",    bool),
         "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),

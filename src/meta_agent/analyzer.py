@@ -373,9 +373,7 @@ class PortfolioSnapshot:
 
             # Derive which strategy this param belongs to (best-effort heuristic)
             strategy: str | None = None
-            if key_upper.startswith("REBALANCING"):
-                strategy = "rebalancing"
-            elif key_upper.startswith("COMBO"):
+            if key_upper.startswith("COMBO"):
                 strategy = "combinatorial"
             elif key_upper.startswith("CROSS_EXCHANGE"):
                 strategy = "cross_exchange"

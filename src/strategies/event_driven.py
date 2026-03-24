@@ -503,7 +503,7 @@ class EventDrivenStrategy(BaseStrategy):
         # During event windows we relax the threshold by 20% to catch
         # more opportunities amid high volatility.
         base_min_edge: float = getattr(
-            self.config.strategies, "rebalancing_min_edge", 0.02
+            self.config.strategies, "combo_min_edge", 0.02
         )
         event_min_edge: float = base_min_edge * 0.8
 
@@ -940,10 +940,7 @@ class EventDrivenStrategy(BaseStrategy):
             net_edge = gross_edge - fee_cost
 
             if net_edge >= min_edge:
-                base_size = getattr(
-                    self.config.strategies, "rebalancing_max_spend",
-                    50.0
-                )
+                base_size = 50.0
                 size_usdc = self.risk.size_position(edge=net_edge, base_size=base_size)
                 size_usdc *= event.size_multiplier
 
@@ -994,9 +991,7 @@ class EventDrivenStrategy(BaseStrategy):
         elif yes_book.best_ask and abs(mid_sum - 1.0) < 0.05:
             deviation = yes_mid - yes_book.best_ask
             if deviation - fee_cost >= min_edge:
-                base_size = getattr(
-                    self.config.strategies, "rebalancing_max_spend", 50.0
-                )
+                base_size = 50.0
                 size_usdc = self.risk.size_position(
                     edge=deviation - fee_cost, base_size=base_size
                 ) * event.size_multiplier
