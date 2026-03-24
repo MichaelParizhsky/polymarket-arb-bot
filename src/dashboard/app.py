@@ -25,9 +25,11 @@ _DASHBOARD_API_KEY: str = os.getenv("DASHBOARD_API_KEY", "")
 
 
 def _check_api_key(x_api_key: str = Header(default="")) -> bool:
-    """Return True if request is authorized. Requires DASHBOARD_API_KEY env var to be set."""
+    """Return True if request is authorized.
+    If DASHBOARD_API_KEY is not set, all requests are allowed (open access).
+    If set, the header must match."""
     if not _DASHBOARD_API_KEY:
-        return False
+        return True
     return x_api_key == _DASHBOARD_API_KEY
 
 import os as _os
@@ -2647,7 +2649,7 @@ function showTab(name){
 }
 
 function loadWeather(){
-  fetch('/api/weather/stats',{headers:API_HEADERS}).then(r=>r.json()).then(d=>{
+  fetch('/api/weather/stats').then(r=>r.json()).then(d=>{
     $('w-total').textContent=d.total_trades;
     $('w-wins').textContent=d.wins;
     $('w-winrate').textContent=d.win_rate+'%';
@@ -3864,7 +3866,7 @@ fetch('/api/logs?limit=200').then(r=>r.json()).then(logs=>{
 async function resetPortfolio(){
   if(!confirm('Reset portfolio to $10,000? This will erase all trades, positions, and history.'))return;
   try{
-    const r=await fetch('/api/reset',{method:'POST'});
+    const r=await fetch('/api/reset',{method:'POST',headers:{'X-Api-Key':window._dashApiKey||''}});
     const d=await r.json();
     if(d.ok){
       alert('Portfolio reset to $'+d.starting_balance.toLocaleString());
