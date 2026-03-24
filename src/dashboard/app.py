@@ -178,6 +178,7 @@ def positions():
             "cost_basis": round(pos.cost_basis, 2),
             "strategy": pos.strategy,
             "opened_at": int(pos.opened_at),
+            "end_date_iso": getattr(pos, "end_date_iso", ""),
         }
         for tid, pos in items
     ]
@@ -186,28 +187,40 @@ def positions():
 @app.get("/api/positions/close")
 def close_position(idx: int = 0, price: float = 0.001):
     """Force-close an open position by index at the given price (paper mode only)."""
-    if not _portfolio:
-        return JSONResponse({"error": "Portfolio not initialized"}, status_code=503)
+    try:
+        if not _portfolio:
+            return JSONResponse({"error": "Portfolio not initialized"}, status_code=503)
 
-    with _portfolio_lock:
-        keys = list(_portfolio.positions.keys())
-        if idx < 0 or idx >= len(keys):
-            return JSONResponse({"error": f"No position at index {idx} (have {len(keys)})"}, status_code=404)
-        matched_id = keys[idx]
-        pos = _portfolio.positions[matched_id]
-        contracts = pos.contracts
-        trade = _portfolio.sell(
-            token_id=matched_id,
-            contracts=contracts,
-            price=price,
-            strategy=pos.strategy,
-            notes="Manual close via dashboard",
-        )
+        with _portfolio_lock:
+            keys = list(_portfolio.positions.keys())
+            if idx < 0 or idx >= len(keys):
+                return JSONResponse(
+                    {"error": f"No position at index {idx} (have {len(keys)})"},
+                    status_code=404,
+                )
+            matched_id = keys[idx]
+            pos = _portfolio.positions[matched_id]
+            contracts = pos.contracts
+            strategy = pos.strategy
+            trade = _portfolio.sell(
+                token_id=matched_id,
+                contracts=contracts,
+                price=price,
+                strategy=strategy,
+                notes="Manual close via dashboard",
+            )
 
-    if trade:
-        _portfolio.save_state()
-        return {"ok": True, "token_id": matched_id[:16] or "(empty)", "contracts": contracts, "price": price}
-    return JSONResponse({"error": "Sell failed — check logs"}, status_code=500)
+        if not trade:
+            return JSONResponse({"error": "sell() returned None — position may already be gone"}, status_code=500)
+
+        try:
+            _portfolio.save_to_json()
+        except Exception as save_err:
+            pass  # non-fatal: state will be saved on next auto-save cycle
+
+        return {"ok": True, "token_id": matched_id[:16] or "(empty)", "contracts": round(contracts, 4), "price": price}
+    except Exception as exc:
+        return JSONResponse({"error": f"Unexpected error: {exc}"}, status_code=500)
 
 
 @app.get("/api/closed_positions")
@@ -2635,18 +2648,38 @@ function updatePositions(open,closed){
   if(!open.length){
     $('positions-table').innerHTML='<div class="no-data">No open positions</div>';
   }else{
+    const now=Math.floor(Date.now()/1000);
     $('positions-table').innerHTML=`<table>
-      <tr><th>Market</th><th>Outcome</th><th>Contracts</th><th>Avg Cost</th><th>Cost Basis</th><th>Strategy</th><th>Opened</th><th></th></tr>
-      ${open.map((p,i)=>`<tr>
-        <td title="${p.question}">${p.question}</td>
-        <td>${p.outcome}</td>
-        <td>${p.contracts}</td>
-        <td>${fmtN(p.avg_cost)}</td>
-        <td>${fmt(p.cost_basis)}</td>
-        <td>${badge(p.strategy)}</td>
-        <td class="ts-small">${ts(p.opened_at)}</td>
-        <td><button onclick="closePosition(${i})" style="font-size:.7rem;padding:3px 8px;background:#2a0a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer">Close</button></td>
-      </tr>`).join('')}
+      <tr><th>Market</th><th>Outcome</th><th>Contracts</th><th>Avg Cost</th><th>Cost Basis</th><th>Strategy</th><th>Age</th><th>Est. Close</th><th></th></tr>
+      ${open.map((p,i)=>{
+        const ageSec=now-p.opened_at;
+        const ageDays=ageSec/86400;
+        const ageStr=ageDays>=1?Math.floor(ageDays)+'d '+Math.floor((ageSec%86400)/3600)+'h':Math.floor(ageSec/3600)+'h '+Math.floor((ageSec%3600)/60)+'m';
+        const stale=ageDays>7;
+        let estClose='—';
+        if(p.end_date_iso){
+          const d=new Date(p.end_date_iso);
+          const dSec=d.getTime()/1000;
+          if(dSec>now){
+            const rem=dSec-now;
+            const remDays=rem/86400;
+            estClose=remDays>=1?Math.floor(remDays)+'d '+Math.floor((rem%86400)/3600)+'h':Math.floor(rem/3600)+'h '+Math.floor((rem%3600)/60)+'m';
+          } else {
+            estClose='<span style="color:var(--red)">overdue</span>';
+          }
+        }
+        return`<tr style="${stale?'background:#1a0a0a':''}">
+          <td title="${p.question}">${p.question||'<em style="color:var(--muted)">unknown market</em>'}</td>
+          <td>${p.outcome}</td>
+          <td>${p.contracts}</td>
+          <td>${fmtN(p.avg_cost)}</td>
+          <td>${fmt(p.cost_basis)}</td>
+          <td>${badge(p.strategy)}</td>
+          <td class="ts-small" style="${stale?'color:var(--red)':''}" title="Opened ${ts(p.opened_at)}">${ageStr}${stale?' ⚠':''}</td>
+          <td class="ts-small">${estClose}</td>
+          <td><button onclick="closePosition(${i})" style="font-size:.7rem;padding:3px 8px;background:#2a0a0a;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer">Close</button></td>
+        </tr>`;
+      }).join('')}
     </table>`;
   }
 

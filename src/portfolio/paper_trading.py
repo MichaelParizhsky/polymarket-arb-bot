@@ -39,6 +39,7 @@ class Position:
     strategy: str
     opened_at: float = field(default_factory=time.time)
     realized_pnl: float = 0.0
+    end_date_iso: str = ""   # ISO date string for market resolution (optional)
 
     @property
     def cost_basis(self) -> float:
@@ -365,6 +366,7 @@ class PaperPortfolio:
                     "strategy": pos.strategy,
                     "opened_at": pos.opened_at,
                     "realized_pnl": round(pos.realized_pnl, 6),
+                    "end_date_iso": pos.end_date_iso,
                 }
                 for tid, pos in self.positions.items()
             },
@@ -431,6 +433,7 @@ class PaperPortfolio:
                         strategy=p.get("strategy", ""),
                         opened_at=p.get("opened_at", time.time()),
                         realized_pnl=p.get("realized_pnl", 0.0),
+                        end_date_iso=p.get("end_date_iso", ""),
                     )
             else:
                 # Legacy fallback: reconstruct from truncated trade history
