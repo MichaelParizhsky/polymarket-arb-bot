@@ -1591,6 +1591,79 @@ async def api_compare():
 
 
 # ------------------------------------------------------------------ #
+#  Weather stats endpoint                                              #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/weather/stats")
+def weather_stats(api_key: str = Depends(_check_api_key)):
+    import re as _re
+    trades = list(portfolio.trades)
+    weather_trades = [t for t in trades if getattr(t, 'strategy', '') == 'weather']
+
+    # Parse NOAA notes: "NOAA {city} {date}: model={prob:.1%} market={YES/NO}@{price:.2f} edge={edge:.1%} ..."
+    _notes_re = _re.compile(
+        r"NOAA (?P<city>[^:]+?) (?P<date>\S+): model=(?P<model>[\d.]+)% "
+        r"market=(?P<side>\w+)@(?P<price>[\d.]+) edge=(?P<edge>[\d.]+)%"
+    )
+
+    city_stats: dict = {}
+    recent_signals = []
+
+    for t in weather_trades:
+        notes = getattr(t, 'notes', '') or ''
+        m = _notes_re.search(notes)
+        city = m.group('city') if m else 'Unknown'
+        won = getattr(t, 'pnl', 0) > 0
+        pnl = getattr(t, 'pnl', 0)
+
+        if city not in city_stats:
+            city_stats[city] = {'trades': 0, 'wins': 0, 'pnl': 0.0}
+        city_stats[city]['trades'] += 1
+        city_stats[city]['wins'] += int(won)
+        city_stats[city]['pnl'] += pnl
+
+        if m:
+            recent_signals.append({
+                'date': m.group('date'),
+                'city': city,
+                'model_prob': float(m.group('model')),
+                'market_price': float(m.group('price')),
+                'edge': float(m.group('edge')),
+                'side': m.group('side'),
+                'pnl': round(pnl, 2),
+                'won': won,
+            })
+
+    total = len(weather_trades)
+    wins = sum(1 for t in weather_trades if getattr(t, 'pnl', 0) > 0)
+    total_pnl = sum(getattr(t, 'pnl', 0) for t in weather_trades)
+
+    cities = [
+        {
+            'city': c,
+            'trades': v['trades'],
+            'win_rate': round(v['wins'] / v['trades'] * 100, 1) if v['trades'] else 0,
+            'pnl': round(v['pnl'], 2),
+        }
+        for c, v in city_stats.items()
+    ]
+    cities.sort(key=lambda x: x['pnl'], reverse=True)
+
+    # Most recent 20 signals
+    recent_signals = recent_signals[-20:]
+    recent_signals.reverse()
+
+    return {
+        'total_trades': total,
+        'wins': wins,
+        'win_rate': round(wins / total * 100, 1) if total else 0,
+        'total_pnl': round(total_pnl, 2),
+        'cities': cities,
+        'recent_signals': recent_signals,
+    }
+
+
+# ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
 
@@ -1875,6 +1948,7 @@ tr:hover td{background:var(--surface2)}
   <div class="tab" onclick="showTab('ai-intel')">AI Intel</div>
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
   <div class="tab" onclick="showTab('system')">System</div>
+  <div class="tab" onclick="showTab('weather')">Weather</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -2444,6 +2518,56 @@ tr:hover td{background:var(--surface2)}
 
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 8: WEATHER                                             -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-weather">
+
+  <!-- Summary cards -->
+  <div class="kpi-row" id="weather-kpi-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+    <div class="kpi-card"><div class="kpi-label">Total Trades</div><div class="kpi-value" id="w-total">--</div></div>
+    <div class="kpi-card"><div class="kpi-label">Wins</div><div class="kpi-value" id="w-wins">--</div></div>
+    <div class="kpi-card"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="w-winrate">--</div></div>
+    <div class="kpi-card"><div class="kpi-label">Total PnL</div><div class="kpi-value" id="w-pnl">--</div></div>
+  </div>
+
+  <!-- Per-city breakdown -->
+  <div class="section">
+    <h3>Per-City Breakdown</h3>
+    <table class="trade-table">
+      <thead><tr>
+        <th>City</th>
+        <th style="text-align:right">Trades</th>
+        <th style="text-align:right">Win Rate</th>
+        <th style="text-align:right">PnL</th>
+      </tr></thead>
+      <tbody id="w-city-tbody">
+        <tr><td colspan="4" style="color:var(--muted);text-align:center">No weather trades yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Recent signals -->
+  <div class="section">
+    <h3>Recent Signals</h3>
+    <table class="trade-table">
+      <thead><tr>
+        <th>Date</th>
+        <th>City</th>
+        <th style="text-align:right">Model</th>
+        <th style="text-align:right">Market</th>
+        <th style="text-align:right">Edge</th>
+        <th>Side</th>
+        <th style="text-align:right">PnL</th>
+      </tr></thead>
+      <tbody id="w-signals-tbody">
+        <tr><td colspan="7" style="color:var(--muted);text-align:center">No signals yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
 <!-- Hidden elements required by log stream (live-uptime, live-realized, etc.) -->
 <div style="display:none">
   <span id="live-uptime">--</span>
@@ -2470,8 +2594,8 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-// 7 tabs: overview, positions, trades, strategies, ai-intel, meta, system
-const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system'];
+// 8 tabs: overview, positions, trades, strategies, ai-intel, meta, system, weather
+const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system','weather'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
 
 function showTab(name){
@@ -2500,6 +2624,10 @@ function showTab(name){
     fetchSystemStatus();
   }
 
+  if(name==='weather'){
+    loadWeather();
+  }
+
   if(name==='ai-intel'){
     fetchEnsemble();
     fetchNews();
@@ -2516,6 +2644,48 @@ function showTab(name){
     if(_newsInterval){clearInterval(_newsInterval);_newsInterval=null;}
     if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
   }
+}
+
+function loadWeather(){
+  fetch('/api/weather/stats',{headers:API_HEADERS}).then(r=>r.json()).then(d=>{
+    $('w-total').textContent=d.total_trades;
+    $('w-wins').textContent=d.wins;
+    $('w-winrate').textContent=d.win_rate+'%';
+    const pEl=$('w-pnl');
+    pEl.textContent=fmtPnl(d.total_pnl);
+    pEl.className='kpi-value '+(d.total_pnl>=0?'green':'red');
+
+    // City table
+    const ctb=$('w-city-tbody');
+    if(d.cities&&d.cities.length){
+      ctb.innerHTML=d.cities.map(c=>`
+        <tr>
+          <td>${c.city}</td>
+          <td style="text-align:right">${c.trades}</td>
+          <td style="text-align:right">${c.win_rate}%</td>
+          <td style="text-align:right;color:${c.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(c.pnl)}</td>
+        </tr>`).join('');
+    } else {
+      ctb.innerHTML='<tr><td colspan="4" style="color:var(--muted);text-align:center">No weather trades yet</td></tr>';
+    }
+
+    // Signals table
+    const stb=$('w-signals-tbody');
+    if(d.recent_signals&&d.recent_signals.length){
+      stb.innerHTML=d.recent_signals.map(s=>`
+        <tr>
+          <td>${s.date}</td>
+          <td>${s.city}</td>
+          <td style="text-align:right">${s.model_prob}%</td>
+          <td style="text-align:right">${(s.market_price*100).toFixed(1)}%</td>
+          <td style="text-align:right">${s.edge}%</td>
+          <td><span class="badge ${s.side==='BUY'?'green':'yellow'}">${s.side}</span></td>
+          <td style="text-align:right;color:${s.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(s.pnl)}</td>
+        </tr>`).join('');
+    } else {
+      stb.innerHTML='<tr><td colspan="7" style="color:var(--muted);text-align:center">No signals yet</td></tr>';
+    }
+  }).catch(e=>console.error('weather stats error',e));
 }
 
 const chartDefaults={responsive:true,maintainAspectRatio:true,plugins:{legend:{display:false}},scales:{x:{display:false,grid:{color:'#1a1a1a'}},y:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}}}};
