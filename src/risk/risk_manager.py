@@ -45,9 +45,20 @@ class RiskManager:
         if self._hard_stop:
             return False, "Hard stop active"
 
-        # Drawdown check applies to all trade directions
+        # Drawdown check: use realized P&L to catch losses before open positions close.
+        # total_value() marks open positions at cost (no price feed), so unrealized losses
+        # are invisible until positions close. realized_pnl() reflects actual closed losses
+        # immediately and is always <= 0 when the bot is losing money.
+        realized_loss_drawdown = max(
+            0.0,
+            -self.portfolio.realized_pnl() / self.portfolio.starting_balance,
+        )
         total = self.portfolio.total_value()
-        drawdown = (self.portfolio.starting_balance - total) / self.portfolio.starting_balance
+        mtm_drawdown = max(
+            0.0,
+            (self.portfolio.starting_balance - total) / self.portfolio.starting_balance,
+        )
+        drawdown = max(realized_loss_drawdown, mtm_drawdown)
         if drawdown >= self.config.risk.max_drawdown_pct:
             self._hard_stop = True
             now = time.time()
