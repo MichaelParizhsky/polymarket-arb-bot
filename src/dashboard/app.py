@@ -4222,19 +4222,23 @@ async function runMetaAgentNow(){
   }
   status.textContent='Running — usually ~20s…';
   if(_maPollInterval)clearInterval(_maPollInterval);
-  _maPollInterval=setInterval(async()=>{
-    try{
-      const d=await fetch('/api/meta-agent/run-now/status').then(r=>r.json());
-      if(!d.running){
-        clearInterval(_maPollInterval);_maPollInterval=null;
-        status.textContent='Done ✓ — results updated';
-        status.style.color='#00e676';
-        btn.disabled=false;
-        await fetchMeta();
-        setTimeout(()=>{status.textContent='';},5000);
-      }
-    }catch(e){console.error('meta-agent poll error',e);}
-  },3000);
+  // Wait 8s before polling — the trigger takes up to 5s to be picked up by the loop.
+  // Polling before that sees running=false and incorrectly declares done.
+  setTimeout(()=>{
+    _maPollInterval=setInterval(async()=>{
+      try{
+        const d=await fetch('/api/meta-agent/run-now/status').then(r=>r.json());
+        if(!d.running){
+          clearInterval(_maPollInterval);_maPollInterval=null;
+          status.textContent='Done ✓ — results updated';
+          status.style.color='#00e676';
+          btn.disabled=false;
+          await fetchMeta();
+          setTimeout(()=>{status.textContent='';},5000);
+        }
+      }catch(e){console.error('meta-agent poll error',e);}
+    },3000);
+  },8000);
 }
 
 // ------------------------------------------------------------------ //
