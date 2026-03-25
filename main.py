@@ -949,12 +949,23 @@ class ArbBot:
 
         logger.info(f"Meta-agent started — first analysis in {interval//60} minutes")
 
+        import src.dashboard.app as _dash_mod
+
         while self._running:
-            await asyncio.sleep(interval)
+            # Wait for interval OR a manual trigger from the dashboard
+            elapsed = 0
+            while elapsed < interval and self._running:
+                await asyncio.sleep(5)
+                elapsed += 5
+                if getattr(_dash_mod, "_meta_agent_trigger", False):
+                    _dash_mod._meta_agent_trigger = False
+                    logger.info("Meta-agent: manual trigger received from dashboard")
+                    break
             if not self._running:
                 break
 
             try:
+                _dash_mod._meta_agent_running = True
                 # Use live portfolio data directly (no file dependency)
                 self.portfolio.save_to_json(STATE_PATH)
                 state_path = "logs/portfolio_state.json"
@@ -1045,7 +1056,7 @@ class ArbBot:
                     "  Coverage: MAX_DAYS_TO_RESOLUTION, MAX_MARKETS\n"
                     "  Strategies (enable/disable): STRATEGY_COMBINATORIAL, "
                     "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, "
-                    "STRATEGY_EVENT_DRIVEN\n\n"
+                    "STRATEGY_EVENT_DRIVEN, STRATEGY_QUICK_RESOLUTION, STRATEGY_CRYPTO_5M\n\n"
 
                     "DECISION RULES (override your own judgment only with strong evidence):\n"
                     "  - bootstrap_phase=true: DO NOT change any parameters. Observe only.\n"
@@ -1151,6 +1162,8 @@ class ArbBot:
                 break
             except Exception as exc:
                 logger.warning(f"Meta-agent error: {exc}")
+            finally:
+                _dash_mod._meta_agent_running = False
 
     # ------------------------------------------------------------------ #
     #  Live config tuning                                                  #

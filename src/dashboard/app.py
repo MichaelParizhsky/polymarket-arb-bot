@@ -1006,6 +1006,8 @@ def research_list():
 
 
 _review_running: bool = False
+_meta_agent_running: bool = False
+_meta_agent_trigger: bool = False
 
 
 @app.post("/api/code_review/run_now")
@@ -1035,6 +1037,22 @@ async def code_review_run_now(x_api_key: str = Header(default="")):
 @app.get("/api/code_review/run_now/status")
 def code_review_run_now_status():
     return {"running": _review_running}
+
+
+@app.post("/api/meta-agent/run-now")
+async def meta_agent_run_now(x_api_key: str = Header(default="")):
+    if not _check_api_key(x_api_key):
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
+    global _meta_agent_trigger
+    if _meta_agent_running:
+        return JSONResponse({"ok": False, "error": "Already running"}, status_code=409)
+    _meta_agent_trigger = True
+    return {"ok": True}
+
+
+@app.get("/api/meta-agent/run-now/status")
+def meta_agent_run_now_status():
+    return {"running": _meta_agent_running}
 
 
 @app.get("/api/code_review/latest")
@@ -2338,10 +2356,16 @@ tr:hover td{background:var(--surface2)}
 <!-- TAB 6: META-AGENT                                          -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page" id="tab-meta">
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px">
-    <div class="card"><div class="lbl">Analyses Run</div><div class="val blue" id="meta-count">--</div></div>
-    <div class="card"><div class="lbl">Last Run</div><div class="val" id="meta-last">--</div></div>
-    <div class="card"><div class="lbl">Next Run</div><div class="val yellow" id="meta-next">--</div></div>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;flex:1;min-width:0">
+      <div class="card"><div class="lbl">Analyses Run</div><div class="val blue" id="meta-count">--</div></div>
+      <div class="card"><div class="lbl">Last Run</div><div class="val" id="meta-last">--</div></div>
+      <div class="card"><div class="lbl">Next Run</div><div class="val yellow" id="meta-next">--</div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+      <button id="ma-runnow-btn" onclick="runMetaAgentNow()" style="padding:7px 18px;background:#0a1a2a;color:#60a0ff;border:1px solid #1a3a5a;border-radius:8px;cursor:pointer;font-size:.75rem;font-weight:700;white-space:nowrap">Run Now</button>
+      <span id="ma-runnow-status" style="font-size:.68rem;color:var(--muted)"></span>
+    </div>
   </div>
   <div id="meta-latest-card">
     <div class="no-data">No meta-agent analysis yet.</div>
@@ -4169,6 +4193,49 @@ async function runCodeReviewNow(){
         setTimeout(()=>{status.textContent='';},4000);
       }
     }catch(e){console.error('review poll error',e);}
+  },3000);
+}
+
+// ------------------------------------------------------------------ //
+//  Meta-Agent — run now button                                        //
+// ------------------------------------------------------------------ //
+let _maPollInterval=null;
+
+async function runMetaAgentNow(){
+  const btn=$('ma-runnow-btn');
+  const status=$('ma-runnow-status');
+  btn.disabled=true;
+  status.textContent='Triggering…';
+  status.style.color='#ffd740';
+  try{
+    const r=await fetch('/api/meta-agent/run-now',{method:'POST',headers:{'X-Api-Key':window._dashApiKey||''}});
+    const d=await r.json();
+    if(!d.ok){
+      status.textContent='Error: '+(d.error||'unknown');
+      status.style.color='#ff5252';
+      btn.disabled=false;
+      return;
+    }
+  }catch(e){
+    status.textContent='Request failed: '+e;
+    status.style.color='#ff5252';
+    btn.disabled=false;
+    return;
+  }
+  status.textContent='Running — usually ~20s…';
+  if(_maPollInterval)clearInterval(_maPollInterval);
+  _maPollInterval=setInterval(async()=>{
+    try{
+      const d=await fetch('/api/meta-agent/run-now/status').then(r=>r.json());
+      if(!d.running){
+        clearInterval(_maPollInterval);_maPollInterval=null;
+        status.textContent='Done ✓ — results updated';
+        status.style.color='#00e676';
+        btn.disabled=false;
+        await fetchMeta();
+        setTimeout(()=>{status.textContent='';},5000);
+      }
+    }catch(e){console.error('meta-agent poll error',e);}
   },3000);
 }
 
