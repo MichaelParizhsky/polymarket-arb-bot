@@ -968,12 +968,11 @@ class ArbBot:
                 _dash_mod._meta_agent_running = True
                 # Use live portfolio data directly (no file dependency)
                 self.portfolio.save_to_json(STATE_PATH)
-                state_path = "logs/portfolio_state.json"
-                if not os.path.exists(state_path):
+                if not os.path.exists(STATE_PATH):
                     logger.info("Meta-agent: no portfolio state yet, skipping this cycle")
                     continue
 
-                snapshot = PortfolioSnapshot.from_json(state_path)
+                snapshot = PortfolioSnapshot.from_json(STATE_PATH)
                 # Always write a heartbeat so we can tell the meta-agent loop is alive
                 heartbeat = {
                     "alive": True,

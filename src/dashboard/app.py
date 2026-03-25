@@ -1050,7 +1050,13 @@ async def meta_agent_run_now():
 
 @app.get("/api/meta-agent/run-now/status")
 def meta_agent_run_now_status():
-    return {"running": _meta_agent_running}
+    heartbeat = {}
+    try:
+        with open("logs/meta_agent_heartbeat.json") as f:
+            heartbeat = json.load(f)
+    except Exception:
+        pass
+    return {"running": _meta_agent_running, "heartbeat": heartbeat}
 
 
 @app.get("/api/code_review/latest")
