@@ -965,15 +965,16 @@ class ArbBot:
                 break
 
             try:
-                _dash_mod._meta_agent_running = True
-                # Use live portfolio data directly (no file dependency)
+                # --- Pre-flight checks (do NOT set running=True yet) ---
                 self.portfolio.save_to_json(STATE_PATH)
                 if not os.path.exists(STATE_PATH):
-                    logger.info("Meta-agent: no portfolio state yet, skipping this cycle")
+                    logger.info("Meta-agent: no portfolio state yet, skipping")
+                    _dash_mod._meta_agent_last_error = "no portfolio state file"
                     continue
 
                 snapshot = PortfolioSnapshot.from_json(STATE_PATH)
-                # Always write a heartbeat so we can tell the meta-agent loop is alive
+
+                # Heartbeat — always written so dashboard can confirm loop is alive
                 heartbeat = {
                     "alive": True,
                     "timestamp": time.time(),
@@ -985,7 +986,9 @@ class ArbBot:
                     json.dump(heartbeat, _hf)
 
                 if len(snapshot.trades) < min_trades:
-                    logger.info(f"Meta-agent: only {len(snapshot.trades)} trades so far (need {min_trades}), skipping analysis")
+                    msg = f"only {len(snapshot.trades)} trades (need {min_trades}), skipping"
+                    logger.info(f"Meta-agent: {msg}")
+                    _dash_mod._meta_agent_last_error = msg
                     continue
 
                 analysis_data = snapshot.to_analysis_dict()
@@ -993,21 +996,13 @@ class ArbBot:
                     self.config.risk if v[0] == "risk" else self.config.strategies,
                     v[1]
                 )) for k, v in self._CONFIG_MAP.items()}
-
-                logger.info("Meta-agent: calling Claude for performance analysis...")
-                client = anthropic.AsyncAnthropic(api_key=api_key)
-
-                # Include live risk health in the analysis
                 live_health = self.risk.portfolio_health_score()
 
-                # Perplexity market context — get a brief real-time summary of
-                # prediction market conditions to inform the meta-agent's analysis.
+                # Perplexity market context (optional, non-blocking)
                 perplexity_context = ""
                 try:
                     from src.utils.ai_research import perplexity as _meta_pplx
                     if _meta_pplx.enabled:
-                        # Agent API: multi-step research across sources (search + fetch_url).
-                        # Falls back to single Sonar call automatically on error.
                         perplexity_context = await _meta_pplx.agent(
                             "You are researching current conditions for a Polymarket prediction market bot. "
                             "Do the following in sequence:\n"
@@ -1019,152 +1014,182 @@ class ArbBot:
                             "Summarize findings in 5-8 bullet points. Focus only on events that "
                             "would cause prediction market prices to move."
                         )
-                        logger.info("Meta-agent: Perplexity Agent market context fetched")
+                        logger.info("Meta-agent: Perplexity market context fetched")
                 except Exception as _pplx_err:
-                    logger.debug(f"Meta-agent: Perplexity context fetch failed (non-fatal): {_pplx_err}")
+                    logger.debug(f"Meta-agent: Perplexity context failed (non-fatal): {_pplx_err}")
 
-                system = (
-                    "You are an expert quantitative analyst for a Polymarket/Kalshi prediction market "
-                    "arbitrage bot. Your role combines four perspectives:\n\n"
+                # --- Now set running=True: Claude call is about to happen ---
+                _dash_mod._meta_agent_running = True
+                _dash_mod._meta_agent_last_error = ""
+                logger.info("Meta-agent: calling Claude for performance analysis...")
 
-                    "1. QUANT ANALYST: Evaluate each strategy as a revenue line. "
-                    "Think in terms of ROI (PnL / volume traded), not just raw PnL. "
-                    "A strategy trading $10k volume for $50 PnL (0.5% ROI) is better than one "
-                    "trading $1k for $30 (3% ROI) only if it scales — check trades_per_hour.\n\n"
+                try:
+                    client = anthropic.AsyncAnthropic(api_key=api_key)
 
-                    "2. RISK MANAGER: Use the health score as your primary triage signal. "
-                    "CRITICAL (<25) or WEAK (<50) health requires defensive action first — "
-                    "widen thresholds, reduce exposure — before optimizing returns. "
-                    "HEALTHY (>75) health permits more aggressive parameter tuning. "
-                    "Never raise MAX_TOTAL_EXPOSURE when drawdown is above 8%. "
-                    "Never lower MIN_EDGE_THRESHOLD when win_rate is below 45%.\n\n"
+                    system = (
+                        "You are an expert quantitative analyst for a Polymarket/Kalshi prediction market "
+                        "arbitrage bot. Your role combines four perspectives:\n\n"
 
-                    "3. SCENARIO THINKER: Before recommending any change, consider its failure mode. "
-                    "If you raise MM_SPREAD_BPS, does inventory risk increase? "
-                    "If you disable a strategy, does it leave a gap in market coverage? "
-                    "Prefer reversible changes. Prefer changes with evidence from >= 10 trades.\n\n"
+                        "1. QUANT ANALYST: Evaluate each strategy as a revenue line. "
+                        "Think in terms of ROI (PnL / volume traded), not just raw PnL. "
+                        "A strategy trading $10k volume for $50 PnL (0.5% ROI) is better than one "
+                        "trading $1k for $30 (3% ROI) only if it scales — check trades_per_hour.\n\n"
 
-                    "4. DECISION LOGGER: Your JSON output is stored and audited. "
-                    "Every non-empty change must be justified by data in the performance snapshot. "
-                    "Do not make changes based on gut feel or recency bias from a single bad cycle.\n\n"
+                        "2. RISK MANAGER: Use the health score as your primary triage signal. "
+                        "CRITICAL (<25) or WEAK (<50) health requires defensive action first — "
+                        "widen thresholds, reduce exposure — before optimizing returns. "
+                        "HEALTHY (>75) health permits more aggressive parameter tuning. "
+                        "Never raise MAX_TOTAL_EXPOSURE when drawdown is above 8%. "
+                        "Never lower MIN_EDGE_THRESHOLD when win_rate is below 45%.\n\n"
 
-                    "PARAMETERS YOU CAN CHANGE:\n"
-                    "  Risk: MIN_EDGE_THRESHOLD, MAX_POSITION_SIZE, MAX_TOTAL_EXPOSURE, "
-                    "MAX_SLIPPAGE, MIN_TRADE_INTERVAL, TOKEN_COOLDOWN\n"
-                    "  Market making: MM_SPREAD_BPS, MM_ORDER_SIZE, MM_MAX_INVENTORY\n"
-                    "  Coverage: MAX_DAYS_TO_RESOLUTION, MAX_MARKETS\n"
-                    "  Strategies (enable/disable): STRATEGY_COMBINATORIAL, "
-                    "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, "
-                    "STRATEGY_EVENT_DRIVEN, STRATEGY_QUICK_RESOLUTION, STRATEGY_CRYPTO_5M\n\n"
+                        "3. SCENARIO THINKER: Before recommending any change, consider its failure mode. "
+                        "If you raise MM_SPREAD_BPS, does inventory risk increase? "
+                        "If you disable a strategy, does it leave a gap in market coverage? "
+                        "Prefer reversible changes. Prefer changes with evidence from >= 10 trades.\n\n"
 
-                    "DECISION RULES — these are MANDATORY, not suggestions:\n"
-                    "  - bootstrap_phase=true: DO NOT change any parameters. Observe only.\n"
-                    "  - Health CRITICAL (score<25): YOU MUST disable the worst ROI strategy AND raise MIN_EDGE_THRESHOLD by 20%. No exceptions.\n"
-                    "  - Health WEAK (score<50) AND NOT bootstrap: YOU MUST raise MIN_EDGE_THRESHOLD by 10%.\n"
-                    "  - Win rate < 40% AND >= 30 closed positions: YOU MUST raise MIN_EDGE_THRESHOLD.\n"
-                    "  - Strategy ROI < -1% AND >= 30 trades: YOU MUST disable that strategy.\n"
-                    "  - Fee drag > 1.5% of volume AND >= 30 trades: YOU MUST raise MIN_EDGE_THRESHOLD.\n"
-                    "  - trades_per_hour > 20: raise MIN_TRADE_INTERVAL.\n"
-                    "  - trades_per_hour < 0.5 AND health HEALTHY: lower MIN_EDGE_THRESHOLD 10%.\n"
-                    "  - Best strategy ROI > 2% AND >= 30 trades: consider raising MAX_POSITION_SIZE.\n"
-                    "  IMPORTANT: If health is CRITICAL or WEAK you MUST output a non-empty JSON block. "
-                    "Outputting {} when health is CRITICAL is an error.\n\n"
+                        "4. DECISION LOGGER: Your JSON output is stored and audited. "
+                        "Every non-empty change must be justified by data in the performance snapshot. "
+                        "Do not make changes based on gut feel or recency bias from a single bad cycle.\n\n"
 
-                    "OUTPUT FORMAT:\n"
-                    "Write 3 sections:\n"
-                    "## Performance Summary\n"
-                    "One paragraph: health grade, top performer, worst performer, key concern.\n\n"
-                    "## Analysis\n"
-                    "Per-strategy assessment (1 line each) using ROI and win rate data.\n\n"
-                    "## Decision\n"
-                    "What you are changing and why (cite the specific data point). "
-                    "Then provide the JSON block with ONLY changed keys:\n"
-                    "```json\n{...}\n```\n"
-                    "If no changes needed, return ```json\n{}\n```"
-                )
+                        "PARAMETERS YOU CAN CHANGE:\n"
+                        "  Risk: MIN_EDGE_THRESHOLD, MAX_POSITION_SIZE, MAX_TOTAL_EXPOSURE, "
+                        "MAX_SLIPPAGE, MIN_TRADE_INTERVAL, TOKEN_COOLDOWN\n"
+                        "  Market making: MM_SPREAD_BPS, MM_ORDER_SIZE, MM_MAX_INVENTORY\n"
+                        "  Coverage: MAX_DAYS_TO_RESOLUTION, MAX_MARKETS\n"
+                        "  Strategies (enable/disable): STRATEGY_COMBINATORIAL, "
+                        "STRATEGY_LATENCY_ARB, STRATEGY_MARKET_MAKING, STRATEGY_RESOLUTION, "
+                        "STRATEGY_EVENT_DRIVEN, STRATEGY_QUICK_RESOLUTION, STRATEGY_CRYPTO_5M\n\n"
 
-                user_msg = (
-                    f"Analyze this Polymarket arb bot cycle.\n\n"
-                    f"**Live Risk Health:**\n```json\n{json.dumps(live_health, indent=2)}\n```\n\n"
-                    f"**Current Config:**\n```json\n{json.dumps(current_env, indent=2)}\n```\n\n"
-                    f"**Performance Snapshot:**\n```json\n{json.dumps(analysis_data, indent=2)}\n```\n\n"
-                    + (f"**Real-Time Market Context (Perplexity Sonar):**\n{perplexity_context}\n\n" if perplexity_context else "")
-                    + "Identify the weakest strategy by ROI, check if health requires defensive action, "
-                    "and suggest only evidence-backed parameter changes."
-                )
+                        "DECISION RULES — these are MANDATORY, not suggestions:\n"
+                        "  - bootstrap_phase=true: DO NOT change any parameters. Observe only.\n"
+                        "  - Health CRITICAL (score<25): YOU MUST disable the worst ROI strategy AND raise MIN_EDGE_THRESHOLD by 20%. No exceptions.\n"
+                        "  - Health WEAK (score<50) AND NOT bootstrap: YOU MUST raise MIN_EDGE_THRESHOLD by 10%.\n"
+                        "  - Win rate < 40% AND >= 30 closed positions: YOU MUST raise MIN_EDGE_THRESHOLD.\n"
+                        "  - Strategy ROI < -1% AND >= 30 trades: YOU MUST disable that strategy.\n"
+                        "  - Fee drag > 1.5% of volume AND >= 30 trades: YOU MUST raise MIN_EDGE_THRESHOLD.\n"
+                        "  - trades_per_hour > 20: raise MIN_TRADE_INTERVAL.\n"
+                        "  - trades_per_hour < 0.5 AND health HEALTHY: lower MIN_EDGE_THRESHOLD 10%.\n"
+                        "  - Best strategy ROI > 2% AND >= 30 trades: consider raising MAX_POSITION_SIZE.\n"
+                        "  IMPORTANT: If health is CRITICAL or WEAK you MUST output a non-empty JSON block. "
+                        "Outputting {} when health is CRITICAL is an error.\n\n"
 
-                response = await client.messages.create(
-                    model="claude-opus-4-6",
-                    max_tokens=1500,
-                    thinking={"type": "adaptive"},
-                    system=system,
-                    messages=[{"role": "user", "content": user_msg}],
-                )
-                text = next((b.text for b in response.content if hasattr(b, "text")), "")
-
-                # Extract proposed JSON changes
-                proposed = {}
-                match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-                if match:
-                    try:
-                        proposed = json.loads(match.group(1))
-                    except json.JSONDecodeError:
-                        pass
-
-                # Auto-apply proposed changes to live config
-                # Skip auto-apply during bootstrap phase (< 30 closed positions)
-                bootstrap = analysis_data.get("health", {}).get("bootstrap_phase", True)
-                applied = []
-                if proposed and not bootstrap:
-                    applied = self._apply_config_overrides(proposed)
-                    if applied:
-                        # Persist to disk so changes survive restarts
-                        config_path = "logs/meta_agent_config.json"
-                        try:
-                            existing = {}
-                            if os.path.exists(config_path):
-                                with open(config_path) as f:
-                                    existing = json.load(f)
-                            existing.update(proposed)
-                            with open(config_path, "w") as f:
-                                json.dump(existing, f, indent=2)
-                        except Exception as exc:
-                            logger.warning(f"Meta-agent: could not persist config: {exc}")
-                        logger.info(f"Meta-agent: AUTO-APPLIED {len(applied)} change(s): {applied}")
-                    else:
-                        logger.info("Meta-agent: no config changes needed")
-                elif proposed and bootstrap:
-                    logger.info(
-                        f"Meta-agent: bootstrap phase ({analysis_data['health'].get('closed_positions', 0)} "
-                        f"closed positions) — logging suggestions but NOT auto-applying changes"
+                        "OUTPUT FORMAT:\n"
+                        "Write 3 sections:\n"
+                        "## Performance Summary\n"
+                        "One paragraph: health grade, top performer, worst performer, key concern.\n\n"
+                        "## Analysis\n"
+                        "Per-strategy assessment (1 line each) using ROI and win rate data.\n\n"
+                        "## Decision\n"
+                        "What you are changing and why (cite the specific data point). "
+                        "Then provide the JSON block with ONLY changed keys:\n"
+                        "```json\n{...}\n```\n"
+                        "If no changes needed, return ```json\n{}\n```"
                     )
 
-                log_entry = {
-                    "timestamp": time.time(),
-                    "analysis": text,
-                    "proposed_changes": proposed,
-                    "applied_changes": applied,
-                    "current_values": current_env,
-                    # Store only the health summary, not full snapshot (saves disk)
-                    "health": analysis_data.get("health", {}),
-                    "strategy_roi_pct": analysis_data.get("strategy_roi_pct", {}),
-                    "portfolio_summary": analysis_data.get("portfolio", {}),
-                }
-                os.makedirs("logs", exist_ok=True)
-                log_path = f"logs/meta_agent_{int(time.time())}.json"
-                with open(log_path, "w") as f:
-                    json.dump(log_entry, f, separators=(",", ":"))
+                    user_msg = (
+                        f"Analyze this Polymarket arb bot cycle.\n\n"
+                        f"**Live Risk Health:**\n```json\n{json.dumps(live_health, indent=2)}\n```\n\n"
+                        f"**Current Config:**\n```json\n{json.dumps(current_env, indent=2)}\n```\n\n"
+                        f"**Performance Snapshot:**\n```json\n{json.dumps(analysis_data, indent=2)}\n```\n\n"
+                        + (f"**Real-Time Market Context (Perplexity Sonar):**\n{perplexity_context}\n\n" if perplexity_context else "")
+                        + "Identify the weakest strategy by ROI, check if health requires defensive action, "
+                        "and suggest only evidence-backed parameter changes."
+                    )
 
-                # Prune old meta-agent logs — keep only the last 48 (24h at 30-min intervals)
-                self._prune_meta_agent_logs(keep=48)
+                    response = await client.messages.create(
+                        model="claude-opus-4-6",
+                        max_tokens=8000,  # was 1500 — too low for adaptive thinking
+                        thinking={"type": "adaptive"},
+                        system=system,
+                        messages=[{"role": "user", "content": user_msg}],
+                    )
+                    text = next((b.text for b in response.content if hasattr(b, "text")), "")
 
-                logger.info(f"Meta-agent: analysis complete — {len(proposed)} suggestion(s), {len(applied)} applied")
+                    if not text:
+                        raise ValueError(f"Claude returned no text block (stop_reason={response.stop_reason})")
+
+                    # Extract proposed JSON changes
+                    proposed = {}
+                    match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+                    if match:
+                        try:
+                            proposed = json.loads(match.group(1))
+                        except json.JSONDecodeError as _je:
+                            logger.warning(f"Meta-agent: JSON parse failed: {_je} — raw: {match.group(1)[:200]}")
+
+                    # Auto-apply proposed changes to live config
+                    bootstrap = analysis_data.get("health", {}).get("bootstrap_phase", True)
+                    applied = []
+                    if proposed and not bootstrap:
+                        applied = self._apply_config_overrides(proposed)
+                        if applied:
+                            config_path = "logs/meta_agent_config.json"
+                            try:
+                                existing = {}
+                                if os.path.exists(config_path):
+                                    with open(config_path) as f:
+                                        existing = json.load(f)
+                                existing.update(proposed)
+                                with open(config_path, "w") as f:
+                                    json.dump(existing, f, indent=2)
+                            except Exception as exc:
+                                logger.warning(f"Meta-agent: could not persist config: {exc}")
+                            logger.info(f"Meta-agent: AUTO-APPLIED {len(applied)} change(s): {applied}")
+                        else:
+                            logger.info("Meta-agent: no config changes needed")
+                    elif proposed and bootstrap:
+                        logger.info(
+                            f"Meta-agent: bootstrap phase "
+                            f"({analysis_data['health'].get('closed_positions', 0)} closed) "
+                            f"— suggestions logged but NOT applied"
+                        )
+
+                    log_entry = {
+                        "timestamp": time.time(),
+                        "analysis": text,
+                        "proposed_changes": proposed,
+                        "applied_changes": applied,
+                        "current_values": current_env,
+                        "health": analysis_data.get("health", {}),
+                        "strategy_roi_pct": analysis_data.get("strategy_roi_pct", {}),
+                        "portfolio_summary": analysis_data.get("portfolio", {}),
+                    }
+                    os.makedirs("logs", exist_ok=True)
+                    log_path = f"logs/meta_agent_{int(time.time())}.json"
+                    with open(log_path, "w") as f:
+                        json.dump(log_entry, f, separators=(",", ":"))
+                    _dash_mod._meta_agent_last_run_ts = time.time()
+
+                    self._prune_meta_agent_logs(keep=48)
+                    logger.info(f"Meta-agent: analysis complete — {len(proposed)} suggestion(s), {len(applied)} applied")
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as _claude_exc:
+                    err_msg = str(_claude_exc)
+                    logger.warning(f"Meta-agent Claude error: {err_msg}")
+                    _dash_mod._meta_agent_last_error = err_msg
+                    # Write partial log so dashboard shows something
+                    os.makedirs("logs", exist_ok=True)
+                    log_path = f"logs/meta_agent_{int(time.time())}.json"
+                    with open(log_path, "w") as f:
+                        json.dump({
+                            "timestamp": time.time(),
+                            "analysis": f"ERROR: {err_msg}",
+                            "proposed_changes": {},
+                            "applied_changes": [],
+                            "health": analysis_data.get("health", {}),
+                            "strategy_roi_pct": analysis_data.get("strategy_roi_pct", {}),
+                            "portfolio_summary": analysis_data.get("portfolio", {}),
+                        }, f, separators=(",", ":"))
+                    _dash_mod._meta_agent_last_run_ts = time.time()
+                finally:
+                    _dash_mod._meta_agent_running = False
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.warning(f"Meta-agent error: {exc}")
-            finally:
+                logger.warning(f"Meta-agent loop error: {exc}")
                 _dash_mod._meta_agent_running = False
 
     # ------------------------------------------------------------------ #

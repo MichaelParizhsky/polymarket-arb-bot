@@ -1008,6 +1008,8 @@ def research_list():
 _review_running: bool = False
 _meta_agent_running: bool = False
 _meta_agent_trigger: bool = False
+_meta_agent_last_run_ts: float = 0.0
+_meta_agent_last_error: str = ""
 
 
 @app.post("/api/code_review/run_now")
@@ -1056,7 +1058,12 @@ def meta_agent_run_now_status():
             heartbeat = json.load(f)
     except Exception:
         pass
-    return {"running": _meta_agent_running, "heartbeat": heartbeat}
+    return {
+        "running": _meta_agent_running,
+        "last_run_ts": _meta_agent_last_run_ts,
+        "last_error": _meta_agent_last_error,
+        "heartbeat": heartbeat,
+    }
 
 
 @app.get("/api/code_review/latest")
@@ -4211,8 +4218,12 @@ async function runMetaAgentNow(){
   btn.disabled=true;
   status.textContent='Triggering…';
   status.style.color='#ffd740';
+
+  // Record timestamp before trigger so we can detect a new run completing
+  const triggerTs=Date.now()/1000;
+
   try{
-    const r=await fetch('/api/meta-agent/run-now',{method:'POST',headers:{'X-Api-Key':window._dashApiKey||''}});
+    const r=await fetch('/api/meta-agent/run-now',{method:'POST'});
     const d=await r.json();
     if(!d.ok){
       status.textContent='Error: '+(d.error||'unknown');
@@ -4226,25 +4237,38 @@ async function runMetaAgentNow(){
     btn.disabled=false;
     return;
   }
+
   status.textContent='Running — usually ~20s…';
   if(_maPollInterval)clearInterval(_maPollInterval);
-  // Wait 8s before polling — the trigger takes up to 5s to be picked up by the loop.
-  // Polling before that sees running=false and incorrectly declares done.
-  setTimeout(()=>{
-    _maPollInterval=setInterval(async()=>{
-      try{
-        const d=await fetch('/api/meta-agent/run-now/status').then(r=>r.json());
-        if(!d.running){
-          clearInterval(_maPollInterval);_maPollInterval=null;
+
+  // Poll every 3s. Stop when last_run_ts > triggerTs (a new log was written)
+  // OR when last_error is set (something went wrong before Claude was called).
+  // This avoids the race condition where running=false before Claude even starts.
+  _maPollInterval=setInterval(async()=>{
+    try{
+      const d=await fetch('/api/meta-agent/run-now/status').then(r=>r.json());
+      if(d.last_run_ts>triggerTs){
+        // New log written — done successfully
+        clearInterval(_maPollInterval);_maPollInterval=null;
+        btn.disabled=false;
+        if(d.last_error){
+          status.textContent='Error: '+d.last_error;
+          status.style.color='#ff5252';
+        }else{
           status.textContent='Done ✓ — results updated';
           status.style.color='#00e676';
-          btn.disabled=false;
           await fetchMeta();
           setTimeout(()=>{status.textContent='';},5000);
         }
-      }catch(e){console.error('meta-agent poll error',e);}
-    },3000);
-  },8000);
+      }else if(!d.running&&d.last_error&&d.last_error!=''){
+        // Skipped before Claude was called (e.g. not enough trades)
+        clearInterval(_maPollInterval);_maPollInterval=null;
+        status.textContent='Skipped: '+d.last_error;
+        status.style.color='#ffd740';
+        btn.disabled=false;
+      }
+    }catch(e){console.error('meta-agent poll error',e);}
+  },3000);
 }
 
 // ------------------------------------------------------------------ //
