@@ -187,7 +187,20 @@ class PortfolioSnapshot:
         total_volume = sum(t["usdc_amount"] for t in self.trades)
         fee_drag_pct = (self.fees_paid / total_volume * 100) if total_volume > 0 else 0.0
 
-        pnl_pct = (self.total_pnl / self.starting_balance) * 100 if self.starting_balance else 0.0
+        # Use realized PnL (closed positions only) instead of total_pnl.
+        # total_pnl values open positions at cost basis, masking unrealized losses.
+        # realized_pnl = sum of sell proceeds - sum of matching buy costs (from closed_positions).
+        if self.closed_positions:
+            realized_pnl = sum(cp.get("realized_pnl", 0.0) for cp in self.closed_positions)
+        else:
+            # Fallback: derive from trade list (buy costs vs sell proceeds)
+            buy_cost = sum(t["usdc_amount"] + t.get("fee", 0) for t in self.trades if t["side"] == "BUY")
+            sell_proceeds = sum(t["usdc_amount"] - t.get("fee", 0) for t in self.trades if t["side"] == "SELL")
+            realized_pnl = sell_proceeds - buy_cost
+
+        # Use whichever is worse — realized loss or mark-to-market loss
+        worst_pnl = min(realized_pnl, self.total_pnl)
+        pnl_pct = (worst_pnl / self.starting_balance) * 100 if self.starting_balance else 0.0
         drawdown_pct = max(0.0, -pnl_pct)
 
         # Win rate: use portfolio_win_rate from closed positions (most accurate)

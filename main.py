@@ -1214,6 +1214,7 @@ class ArbBot:
         "STRATEGY_RESOLUTION":     ("strategies", "resolution_enabled",       bool),
         "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),
         "STRATEGY_QUICK_RESOLUTION": ("strategies", "quick_resolution_enabled", bool),
+        "STRATEGY_CRYPTO_5M":        ("strategies", "crypto_5m_enabled",         bool),
     }
 
     def _apply_config_overrides(self, overrides: dict) -> list[str]:
