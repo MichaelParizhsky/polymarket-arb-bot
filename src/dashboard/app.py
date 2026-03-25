@@ -1040,9 +1040,7 @@ def code_review_run_now_status():
 
 
 @app.post("/api/meta-agent/run-now")
-async def meta_agent_run_now(x_api_key: str = Header(default="")):
-    if not _check_api_key(x_api_key):
-        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
+async def meta_agent_run_now():
     global _meta_agent_trigger
     if _meta_agent_running:
         return JSONResponse({"ok": False, "error": "Already running"}, status_code=409)
