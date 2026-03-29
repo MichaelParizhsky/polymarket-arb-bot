@@ -1,7 +1,7 @@
 """
 Strategy: Crypto Short Market Arb — 5-minute and 15-minute up/down markets.
 
-Two entry modes:
+Three entry modes:
 
 1. DUAL-SIDE ARB (preferred):
    If YES_ask + NO_ask < DUAL_ARB_THRESHOLD (0.995), buy BOTH sides.
@@ -13,16 +13,25 @@ Two entry modes:
    Price direction is already telegraphed by momentum at T-60s.
    Grok X sentiment is checked before firing — contradicting signals are skipped.
 
+3. ORACLE LAG DISLOCATION (new):
+   Chainlink oracle updates BTC/USD every ~10-30s or on 0.5% price deviations.
+   When BTC has moved significantly on Binance but the Polymarket token price
+   hasn't repriced yet, we have a 15-45 second window to trade the known direction.
+   Uses BinanceFeed (already in context) — no new dependencies.
+   Gated by 10-minute medium-term trend to avoid fighting the macro direction.
+
 Why this works:
   - Markets rotate every 5 or 15 minutes — capital recycles extremely fast
   - Dual-side arb is market-neutral: no prediction skill required
   - End-of-window entries capture the final price certainty premium
+  - Oracle lag exploits the Chainlink update delay with a known direction
   - These are the highest-frequency markets on Polymarket
 """
 from __future__ import annotations
 
 import re as _re
 import time
+from collections import deque
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
@@ -46,6 +55,19 @@ MIN_NET_EDGE = 0.005  # 0.5%
 
 # Polymarket taker fee (standard markets, 2025 rate — near zero)
 TAKER_FEE = 0.002
+
+# ── Oracle lag constants (Mode 3) ────────────────────────────────────────────
+# BTC must move at least this much in the look-back window to fire a signal
+ORACLE_LAG_MIN_MOVE_PCT_DEFAULT = 0.0005   # 0.05% — overridden by config
+# Minimum fee-adjusted net edge to fire
+ORACLE_LAG_MIN_EDGE_DEFAULT = 0.022        # 2.2%  — overridden by config
+# How far back to measure BTC momentum (seconds)
+ORACLE_LAG_LOOKBACK_S = 30.0
+# Medium-term trend window for gating (10 minutes)
+MEDIUM_TREND_WINDOW_S = 600
+# Only fire oracle lag signals this far from window end (avoid last-second chaos)
+ORACLE_LAG_MAX_SECONDS_LEFT = 240.0
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Regex to extract crypto symbol from a market question
 _SYMBOL_RE = _re.compile(
@@ -73,6 +95,44 @@ def _seconds_to_window_close(end_date_iso: str) -> float | None:
         return None
 
 
+def _compute_move_pct(price_history: deque, window_s: float) -> float | None:
+    """
+    Compute signed % move over the last window_s seconds from a deque of
+    (price, timestamp) tuples. Returns None if not enough data.
+    """
+    now = time.time()
+    cutoff = now - window_s
+    old_ticks = [(p, t) for p, t in price_history if t >= cutoff]
+    if len(old_ticks) < 2:
+        return None
+    oldest_price = old_ticks[0][0]
+    newest_price = old_ticks[-1][0]
+    if oldest_price <= 0:
+        return None
+    return (newest_price - oldest_price) / oldest_price
+
+
+def _compute_medium_trend(price_history: deque, window_s: float = MEDIUM_TREND_WINDOW_S) -> str | None:
+    """
+    Linear regression slope direction over the last window_s seconds.
+    Returns 'UP', 'DOWN', or None if insufficient data.
+    """
+    now = time.time()
+    cutoff = now - window_s
+    ticks = [(p, t) for p, t in price_history if t >= cutoff]
+    if len(ticks) < 10:
+        return None
+    n = len(ticks)
+    xs = list(range(n))
+    ys = [p for p, _ in ticks]
+    x_mean = sum(xs) / n
+    y_mean = sum(ys) / n
+    num = sum((xs[i] - x_mean) * (ys[i] - y_mean) for i in range(n))
+    den = sum((xs[i] - x_mean) ** 2 for i in range(n)) or 1e-9
+    slope = num / den
+    return "UP" if slope > 0 else "DOWN"
+
+
 class CryptoShortStrategy(BaseStrategy):
     """
     Targets Polymarket 5m and 15m crypto up/down markets.
@@ -85,6 +145,18 @@ class CryptoShortStrategy(BaseStrategy):
         # Track entered markets to avoid duplicate entries
         self._entered: dict[str, float] = {}  # condition_id -> entered_at
         self._grok_status_logged = False
+        # Oracle lag: per-symbol price history deque (price, timestamp)
+        # Max 1200 entries = ~20 min of 1s ticks
+        self._btc_price_history: deque = deque(maxlen=1200)
+        self._oracle_lag_status_logged = False
+
+    def _update_btc_history(self, binance_feed) -> None:
+        """Append current BTC price from BinanceFeed to the local history deque."""
+        if binance_feed is None:
+            return
+        tick = binance_feed.get_price("BTCUSDT")
+        if tick and not binance_feed.is_stale("BTCUSDT", max_age_seconds=5.0):
+            self._btc_price_history.append((tick.price, time.time()))
 
     async def scan(self, context: dict[str, Any]) -> list[Signal]:
         # This strategy gets its own market list from the context key
@@ -112,22 +184,72 @@ class CryptoShortStrategy(BaseStrategy):
                 now - getattr(p, "timestamp", 0) < 30
                 for p in prices.values()
             )
+
+        # ── Oracle lag: update BTC price history every scan cycle ─────────
+        if _binance_live:
+            self._update_btc_history(binance_feed)
+            if not self._oracle_lag_status_logged:
+                self.log("CryptoShort: Oracle lag mode (Mode 3) active — tracking BTC price history")
+                self._oracle_lag_status_logged = True
+        # ──────────────────────────────────────────────────────────────────
+
         if not _binance_live:
             self.log(
-                "Binance feed stale or unavailable — snipe mode disabled (no directional edge without price reference)",
+                "Binance feed stale or unavailable — snipe + oracle lag modes disabled (no directional edge without price reference)",
                 "warning",
             )
-            # Dual-side arb is market-neutral and doesn't need Binance — allow it to proceed
-            # but set a flag to skip snipe entries
         _snipe_allowed = _binance_live
+        _oracle_lag_allowed = _binance_live and len(self._btc_price_history) >= 10
+
+        # Load oracle lag thresholds from config (meta-agent can tune these live)
+        cfg = self.config.strategies
+        oracle_min_move = getattr(cfg, "oracle_lag_min_move_pct", ORACLE_LAG_MIN_MOVE_PCT_DEFAULT)
+        oracle_min_edge = getattr(cfg, "oracle_lag_min_edge", ORACLE_LAG_MIN_EDGE_DEFAULT)
 
         signals: list[Signal] = []
-        cfg = self.config.strategies
         max_spend = getattr(cfg, "crypto_5m_max_spend", 100.0)
 
         # Prune stale entries (windows are 5-15 min, keep 30min buffer)
         cutoff = time.time() - 1800
         self._entered = {k: v for k, v in self._entered.items() if v > cutoff}
+
+        # Pre-compute oracle lag signal (once per scan, shared across markets)
+        _oracle_direction: str | None = None
+        _oracle_move_pct: float = 0.0
+        _oracle_fee_adjusted_edge: float = 0.0
+        _oracle_confidence: str = "LOW"
+        _medium_trend: str | None = None
+
+        if _oracle_lag_allowed:
+            move_pct = _compute_move_pct(self._btc_price_history, ORACLE_LAG_LOOKBACK_S)
+            _medium_trend = _compute_medium_trend(self._btc_price_history)
+
+            if move_pct is not None and abs(move_pct) >= oracle_min_move:
+                _oracle_move_pct = move_pct
+                _oracle_direction = "YES" if move_pct > 0 else "NO"
+
+                # Gating: block signals opposing the 10-minute trend
+                if _medium_trend is not None:
+                    trend_consistent = (
+                        (_oracle_direction == "YES" and _medium_trend == "UP") or
+                        (_oracle_direction == "NO" and _medium_trend == "DOWN")
+                    )
+                    if not trend_consistent:
+                        self.log(
+                            f"[ORACLE LAG] Signal {_oracle_direction} blocked: "
+                            f"opposes 10-min trend {_medium_trend} (move={move_pct:.4%})",
+                            "debug",
+                        )
+                        _oracle_direction = None  # gate: don't fire against macro trend
+
+                if _oracle_direction:
+                    # Confidence tier based on move magnitude
+                    if abs(move_pct) > 0.002:     # >0.2% move
+                        _oracle_confidence = "HIGH"
+                    elif abs(move_pct) > 0.001:   # >0.1% move
+                        _oracle_confidence = "MEDIUM"
+                    else:
+                        _oracle_confidence = "LOW"
 
         for market in markets:
             if not market.active or market.closed:
@@ -216,7 +338,77 @@ class CryptoShortStrategy(BaseStrategy):
                                 "condition_id": market.condition_id,
                             },
                         ))
-                    continue  # don't also try snipe mode
+                    continue  # don't also try snipe or oracle lag mode
+
+            # ── Mode 3: Oracle lag dislocation ───────────────────────────
+            # Check before snipe: oracle lag fires earlier in the window;
+            # snipe fires only in the last SNIPE_WINDOW_SECONDS seconds.
+            # This avoids double-entering the same market.
+            if (
+                _oracle_lag_allowed
+                and _oracle_direction is not None
+                and seconds_left > SNIPE_WINDOW_SECONDS  # not in snipe zone
+                and seconds_left <= ORACLE_LAG_MAX_SECONDS_LEFT  # not too early
+            ):
+                # Only fire on BTC markets (oracle lag is Chainlink BTC/USD specific)
+                symbol = _extract_crypto_symbol(market.question)
+                if symbol == "BTC":
+                    if _oracle_direction == "YES":
+                        entry_price = yes_ask
+                        token = yes_token
+                        outcome = "YES"
+                    else:
+                        entry_price = no_ask
+                        token = no_token
+                        outcome = "NO"
+
+                    if entry_price is not None and entry_price < 1.0:
+                        raw_edge = (1.0 - entry_price) - TAKER_FEE
+                        fee_adj_edge = raw_edge - TAKER_FEE  # conservative: double taker fee
+
+                        if fee_adj_edge >= oracle_min_edge:
+                            arb_opportunities.labels(strategy="crypto_5m").inc()
+                            edge_detected.labels(strategy="crypto_5m").observe(fee_adj_edge)
+
+                            # Size using confidence tier: HIGH=full Kelly, MED=0.6x, LOW=0.3x
+                            confidence_scale = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}.get(
+                                _oracle_confidence, 0.5
+                            )
+                            raw_size = self.risk.size_position(edge=fee_adj_edge, base_size=max_spend)
+                            size_usdc = max(MIN_TRADE_USDC, raw_size * confidence_scale)
+
+                            if size_usdc >= MIN_TRADE_USDC:
+                                self._entered[market.condition_id] = time.time()
+                                self.log(
+                                    f"[ORACLE LAG] {outcome} @ {entry_price:.4f} | "
+                                    f"btc_move={_oracle_move_pct:.4%} edge={fee_adj_edge:.4f} "
+                                    f"conf={_oracle_confidence} trend={_medium_trend} | "
+                                    f"{seconds_left:.0f}s left | {market.question[:50]}"
+                                )
+                                signals.append(Signal(
+                                    strategy="crypto_5m",
+                                    token_id=token.token_id,
+                                    side="BUY",
+                                    price=entry_price,
+                                    size_usdc=size_usdc,
+                                    edge=fee_adj_edge,
+                                    notes=(
+                                        f"[ORACLE_LAG] {outcome} | "
+                                        f"btc_move={_oracle_move_pct:.4%} "
+                                        f"conf={_oracle_confidence}"
+                                    ),
+                                    metadata={
+                                        "outcome": outcome,
+                                        "arb_type": "oracle_lag",
+                                        "btc_move_pct": _oracle_move_pct,
+                                        "fee_adjusted_edge": fee_adj_edge,
+                                        "seconds_left": seconds_left,
+                                        "confidence": _oracle_confidence,
+                                        "medium_trend": _medium_trend,
+                                        "condition_id": market.condition_id,
+                                    },
+                                ))
+                    continue  # don't double-enter via snipe
 
             # ── Mode 2: End-of-window momentum snipe ─────────────────────
             if not _snipe_allowed:
