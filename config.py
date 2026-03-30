@@ -144,6 +144,13 @@ class StrategyConfig:
     crypto_5m_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_CRYPTO_5M", True))
     crypto_5m_max_spend: float = field(default_factory=lambda: float(os.getenv("CRYPTO_5M_MAX_SPEND", "100.0")))
     crypto_5m_coins: list = field(default_factory=lambda: ["btc", "eth", "sol"])
+    # Dual-side arb: buy when YES_ask + NO_ask < threshold (feasible edge). Slightly below 1.0.
+    crypto_5m_dual_arb_threshold: float = field(
+        default_factory=lambda: _float("CRYPTO_5M_DUAL_ARB_THRESHOLD", 0.995)
+    )
+    crypto_5m_min_net_edge: float = field(
+        default_factory=lambda: _float("CRYPTO_5M_MIN_NET_EDGE", 0.005)
+    )
 
     # Markets coverage
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))

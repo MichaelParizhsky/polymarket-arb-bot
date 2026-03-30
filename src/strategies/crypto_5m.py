@@ -337,11 +337,13 @@ class CryptoShortStrategy(BaseStrategy):
                 continue
 
             # ── Mode 1: Dual-side guaranteed arb ─────────────────────────
+            dual_thr = getattr(cfg, "crypto_5m_dual_arb_threshold", DUAL_ARB_THRESHOLD)
+            min_net = getattr(cfg, "crypto_5m_min_net_edge", MIN_NET_EDGE)
             combined_ask = yes_ask + no_ask
-            if combined_ask < DUAL_ARB_THRESHOLD:
+            if combined_ask < dual_thr:
                 gross_edge = 1.0 - combined_ask
                 net_edge   = gross_edge - (TAKER_FEE * 2)  # fee on both legs
-                if net_edge >= MIN_NET_EDGE:
+                if net_edge >= min_net:
                     # Signal for YES leg (we'll handle NO leg separately)
                     # For now, generate a YES signal; the bot places both orders
                     arb_opportunities.labels(strategy="crypto_5m").inc()
@@ -367,6 +369,7 @@ class CryptoShortStrategy(BaseStrategy):
                             metadata={
                                 "outcome": "YES",
                                 "arb_type": "dual_side",
+                                "pair_token_id": no_token.token_id,
                                 "combined_ask": combined_ask,
                                 "net_edge": net_edge,
                                 "seconds_left": seconds_left,
@@ -385,6 +388,7 @@ class CryptoShortStrategy(BaseStrategy):
                             metadata={
                                 "outcome": "NO",
                                 "arb_type": "dual_side",
+                                "pair_token_id": yes_token.token_id,
                                 "combined_ask": combined_ask,
                                 "net_edge": net_edge,
                                 "seconds_left": seconds_left,

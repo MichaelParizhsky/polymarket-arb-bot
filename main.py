@@ -533,9 +533,10 @@ class ArbBot:
         crypto_short_markets = []
         if getattr(self.config.strategies, 'crypto_5m_enabled', False):
             try:
-                crypto_short_markets = await self.poly.get_crypto_short_markets()
+                coins = list(getattr(self.config.strategies, "crypto_5m_coins", None) or ["btc", "eth", "sol"])
+                crypto_short_markets = await self.poly.get_crypto_short_markets(coins=coins)
             except Exception as exc:
-                logger.debug(f"get_crypto_short_markets failed: {exc}")
+                logger.warning(f"get_crypto_short_markets failed: {exc}")
 
         # O(1) token lookup for execution path — avoids scanning all markets per fill
         token_meta: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
@@ -619,8 +620,10 @@ class ArbBot:
         # A paired arb requires both YES and NO to fill — executing only one leg
         # creates an unhedged directional position instead of a risk-free arb.
         skipped_pairs: set[str] = set()
+        # Tokens already bought/sold this batch — lets dual-leg arbs (YES+NO) bypass
+        # min_trade_interval between legs without waiting MIN_TRADE_INTERVAL seconds.
+        executed_this_cycle: set[str] = set()
 
-        now = time.time()
         min_interval = self.config.risk.min_trade_interval
         token_cooldown = self.config.risk.token_cooldown
 
@@ -634,9 +637,11 @@ class ArbBot:
                 pair_groups.setdefault(key, []).append(sig)
 
         skip_token_ids: set[str] = set()
-        since_last = now - self._last_trade_time
+        # Use fresh timestamps — stale `now` makes (now - _last_trade_time) negative after
+        # the first leg of a dual BUY, falsely tripping min_trade_interval on the second leg.
+        since_last_pair = time.time() - self._last_trade_time
         for key, legs in pair_groups.items():
-            if len(legs) >= 2 and since_last < min_interval:
+            if len(legs) >= 2 and since_last_pair < min_interval:
                 # Not enough rate budget for even 1 trade — skip both legs
                 for leg in legs:
                     skip_token_ids.add(leg.token_id)
@@ -661,20 +666,23 @@ class ArbBot:
                 continue
 
             # Global rate limit: enforce minimum gap between any two trades
-            since_last = now - self._last_trade_time
-            if since_last < min_interval:
-                logger.debug(f"Rate limit: {since_last:.0f}s since last trade (need {min_interval}s)")
+            pair_id = (sig.metadata or {}).get("pair_token_id")
+            since_last = time.time() - self._last_trade_time
+            second_leg_dual = pair_id is not None and pair_id in executed_this_cycle
+            if since_last < min_interval and not second_leg_dual:
+                logger.debug(f"Rate limit: {since_last:.2f}s since last trade (need {min_interval}s)")
                 # Mark the paired leg as skipped too so we don't execute half the arb
-                pair_id = (sig.metadata or {}).get("pair_token_id")
                 if pair_id:
                     skipped_pairs.add(pair_id)
                 continue  # don't break — other unrelated signals may still be valid
 
             # Per-token cooldown: don't hammer the same market
             token_last = self._token_last_traded.get(sig.token_id, 0)
-            if now - token_last < token_cooldown:
-                logger.debug(f"Token cooldown: {sig.token_id[:16]} traded {now-token_last:.0f}s ago")
-                pair_id = (sig.metadata or {}).get("pair_token_id")
+            if (
+                time.time() - token_last < token_cooldown
+                and not (pair_id and pair_id in executed_this_cycle)
+            ):
+                logger.debug(f"Token cooldown: {sig.token_id[:16]} traded {time.time()-token_last:.0f}s ago")
                 if pair_id:
                     skipped_pairs.add(pair_id)
                 continue
@@ -684,7 +692,6 @@ class ArbBot:
             )
             if not ok:
                 logger.debug(f"Signal rejected [{sig.strategy}] {sig.side} {sig.token_id[:16]}: {reason}")
-                pair_id = (sig.metadata or {}).get("pair_token_id")
                 if pair_id:
                     skipped_pairs.add(pair_id)
                 continue
@@ -731,6 +738,7 @@ class ArbBot:
                         arb_executed.labels(strategy=sig.strategy).inc()
                         self._last_trade_time = time.time()
                         self._token_last_traded[sig.token_id] = time.time()
+                        executed_this_cycle.add(sig.token_id)
                         self.portfolio.save_to_json(STATE_PATH)
             elif sig.side == "BUY":
                 # Paper: simulate directly
@@ -761,6 +769,7 @@ class ArbBot:
                 arb_executed.labels(strategy=sig.strategy).inc()
                 self._last_trade_time = time.time()
                 self._token_last_traded[sig.token_id] = time.time()
+                executed_this_cycle.add(sig.token_id)
                 self.portfolio.save_to_json(STATE_PATH)
 
             if trade and sig.side == "BUY" and self._hedge_manager is not None:
