@@ -53,7 +53,15 @@ class KalshiConfig:
     email: str = field(default_factory=lambda: os.getenv("KALSHI_EMAIL", ""))
     password: str = field(default_factory=lambda: os.getenv("KALSHI_PASSWORD", ""))
     base_url: str = "https://trading-api.kalshi.com/trade-api/v2"
-    enabled: bool = field(default_factory=lambda: _bool("KALSHI_ENABLED", False))
+    # Auto-enable if any credentials are present; explicit KALSHI_ENABLED=false to disable
+    enabled: bool = field(default_factory=lambda: _bool(
+        "KALSHI_ENABLED",
+        bool(
+            os.getenv("KALSHI_API_KEY_ID") or
+            os.getenv("KALSHI_API_TOKEN") or
+            os.getenv("KALSHI_EMAIL")
+        )
+    ))
 
 
 @dataclass

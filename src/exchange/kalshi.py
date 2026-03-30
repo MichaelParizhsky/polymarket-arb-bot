@@ -129,6 +129,44 @@ class KalshiClient:
         # Last REST error (for dashboard / logs) — cleared on successful markets fetch
         self._last_error: str | None = None
 
+        # Startup validation — log exactly what auth mode will be used
+        self._log_auth_status()
+
+    def _log_auth_status(self) -> None:
+        """Log which auth method will be used, or exactly what's missing."""
+        if self._key_id and self._private_key:
+            # Validate the PEM key can actually be parsed
+            try:
+                from cryptography.hazmat.primitives import serialization
+                pem = self._private_key.replace("\\n", "\n").encode()
+                serialization.load_pem_private_key(pem, password=None)
+                logger.info(f"KalshiClient: RSA auth ready (key_id={self._key_id[:8]}...)")
+            except Exception as exc:
+                logger.error(
+                    f"KalshiClient: KALSHI_PRIVATE_KEY is set but failed to parse: {exc}. "
+                    "Ensure the key is a valid RSA PEM and that newlines are stored as literal \\n "
+                    "(two characters: backslash + n) in Railway env vars."
+                )
+        elif self._token:
+            logger.info("KalshiClient: bearer token auth ready (KALSHI_API_TOKEN)")
+        elif self._email and self._password:
+            logger.info(f"KalshiClient: email/password auth ready ({self._email})")
+        elif self._key_id and not self._private_key:
+            logger.error(
+                "KalshiClient: KALSHI_API_KEY_ID is set but KALSHI_PRIVATE_KEY is missing. "
+                "Both env vars are required for RSA auth."
+            )
+        elif self._private_key and not self._key_id:
+            logger.error(
+                "KalshiClient: KALSHI_PRIVATE_KEY is set but KALSHI_API_KEY_ID is missing. "
+                "Both env vars are required for RSA auth."
+            )
+        else:
+            logger.warning(
+                "KalshiClient: no credentials found. Set KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY "
+                "(RSA auth, recommended), KALSHI_API_TOKEN (bearer), or KALSHI_EMAIL + KALSHI_PASSWORD."
+            )
+
     # ------------------------------------------------------------------ #
     #  Context manager                                                     #
     # ------------------------------------------------------------------ #
