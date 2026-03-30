@@ -17,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
+from src.utils.logger import logger
+
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["*"])
 
@@ -102,7 +104,9 @@ def reset_portfolio():
             )
             _conn.execute(
                 "INSERT INTO portfolio_resets (timestamp, trade_count, final_pnl, notes) VALUES (?,?,?,?)",
-                (time.time(), len(_portfolio.trades), round(_portfolio.total_pnl(), 2),
+                (time.time(), len(_portfolio.trades), round(_portfolio.total_pnl(
+                    getattr(_portfolio, "last_mtm_prices", None) or None
+                ), 2),
                  "manual reset via dashboard"),
             )
     except Exception as _e:
@@ -117,6 +121,8 @@ def reset_portfolio():
     _portfolio.closed_positions.clear()
     _portfolio._trade_counter = 0
     _portfolio.pnl_history = [{"t": time.time(), "value": starting, "pnl": 0.0}]
+    if hasattr(_portfolio, "last_mtm_prices"):
+        _portfolio.last_mtm_prices = {}
     _bot_start_time = time.time()
 
     # Clear hard stop so the bot can trade again after reset
@@ -144,23 +150,26 @@ def status():
     uptime = int(time.time() - _bot_start_time)
     with _portfolio_lock:
         p = _portfolio
-        total_pnl = round(p.total_pnl(), 2)
+        _mtm = getattr(p, "last_mtm_prices", None) or None
+        total_pnl = round(p.total_pnl(_mtm), 2)
         realized = round(p.realized_closed_pnl(), 2)
         n_trades = len(p.trades)
         balance = round(p.usdc_balance, 2)
         starting_balance = round(p.starting_balance, 2)
-        total_value = round(p.total_value(), 2)
+        total_value = round(p.total_value(_mtm), 2)
         open_positions = len(p.positions)
         closed_positions = len(p.closed_positions)
         exposure = round(p.exposure(), 2)
         fees_paid = round(p.total_fees_paid(), 2)
         win_rate = p.win_rate()
+        mtm_count = len(getattr(p, "last_mtm_prices", {}) or {})
     trades_per_hour = round(n_trades / max(uptime / 3600, 0.01), 1)
     fresh_start = (n_trades == 0 and uptime < 300)
     return {
         "status": "running",
         "paper_trading": _config.paper_trading if _config else True,
         "polymarket_address": (_config.polymarket.funder_address if _config else ""),
+        "mtm_positions_priced": mtm_count,
         "uptime_seconds": uptime,
         "uptime": _fmt_uptime(uptime),
         "cycle_count": _cycle_count,
@@ -278,6 +287,8 @@ def trades(limit: int = 100):
             "trade_id": t.trade_id,
             "strategy": t.strategy,
             "side": t.side,
+            "token_id": (t.token_id[:12] + "…") if t.token_id and len(t.token_id) > 16 else (t.token_id or ""),
+            "token_id_full": t.token_id or "",
             "contracts": round(t.contracts, 4),
             "price": round(t.price, 4),
             "usdc_amount": round(t.usdc_amount, 2),
@@ -409,9 +420,22 @@ def system_status():
                 creds = _kalshi_ref._has_credentials()
             else:
                 creds = True
+            err = getattr(_kalshi_ref, "_last_error", None)
+            if not creds:
+                kalshi_detail = (
+                    "No credentials — use KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY "
+                    "(recommended), KALSHI_API_TOKEN, or KALSHI_EMAIL + KALSHI_PASSWORD"
+                )
+                kalshi_status_str = "error"
+            elif err:
+                kalshi_detail = err[:200] + ("…" if len(err) > 200 else "")
+                kalshi_status_str = "warn"
+            else:
+                kalshi_detail = "Connected — last /markets fetch succeeded"
+                kalshi_status_str = "ok"
             connections["kalshi"] = {
-                "status": "ok" if creds else "warn",
-                "detail": "Credentials loaded" if creds else "No credentials",
+                "status": kalshi_status_str,
+                "detail": kalshi_detail,
             }
         except Exception:
             connections["kalshi"] = {"status": "warn", "detail": "Status unknown"}
@@ -570,13 +594,14 @@ def kalshi_status():
     ]
 
     # Runtime state from the live client reference
-    runtime = {"client_loaded": False, "markets_cached": 0, "last_cache_age_s": None}
+    runtime = {"client_loaded": False, "markets_cached": 0, "last_cache_age_s": None, "last_error": None}
     if _kalshi_ref is not None:
         runtime["client_loaded"] = True
         try:
             runtime["markets_cached"] = len(_kalshi_ref._market_cache)
             age = time.time() - _kalshi_ref._cache_ts if _kalshi_ref._cache_ts else None
             runtime["last_cache_age_s"] = round(age, 1) if age else None
+            runtime["last_error"] = getattr(_kalshi_ref, "_last_error", None)
         except Exception:
             pass
 
@@ -832,7 +857,8 @@ async def balances():
     uptime_hours = round((now - _bot_start_time) / 3600, 2) if _bot_start_time else 0
     with _portfolio_lock:
         bot_trades = len(_portfolio.trades) if _portfolio else 0
-        bot_pnl = round(_portfolio.total_pnl(), 2) if _portfolio else 0.0
+        _mtm = getattr(_portfolio, "last_mtm_prices", None) or None
+        bot_pnl = round(_portfolio.total_pnl(_mtm), 2) if _portfolio else 0.0
 
     return {
         "billing_cycle": {
@@ -1560,7 +1586,8 @@ async def api_compare():
         with _portfolio_lock:
             p = _portfolio
             bal            = round(p.usdc_balance, 2) if p else 0
-            total_pnl      = round(p.total_pnl(), 2) if p else 0
+            _cmp_mtm = getattr(p, "last_mtm_prices", None) or None if p else None
+            total_pnl      = round(p.total_pnl(_cmp_mtm), 2) if p else 0
             starting_bal   = round(p.starting_balance, 2) if p else 0
             pnl_pct        = round((total_pnl / starting_bal) * 100, 3) if starting_bal else 0
             pos            = len(p.positions) if p else 0
@@ -2857,14 +2884,15 @@ function updateStatus(s){
   const livet=$('live-trades');
   if(livet) livet.textContent=s.total_trades;
 
-  // Update Polymarket links with wallet address if available
-  const addr=s.polymarket_address||'';
-  if(addr){
-    const profileUrl=`https://polymarket.com/profile/${addr}`;
-    const el=$('poly-profile-link');
-    if(el){el.href=profileUrl;el.title=`Wallet: ${addr}`;}
-    const el2=$('poly-portfolio-link');
-    if(el2){el2.href=`https://polymarket.com/portfolio`;}
+  // Polymarket public profile + activity (funder / proxy wallet from env)
+  const addr=(s.polymarket_address||'').trim();
+  const profileUrl=addr?`https://polymarket.com/profile/${addr}`:'https://polymarket.com/';
+  const el=$('poly-profile-link');
+  if(el){el.href=profileUrl;el.title=addr?`Wallet: ${addr}`:'Set POLYMARKET_FUNDER_ADDRESS for your profile link';}
+  const el2=$('poly-portfolio-link');
+  if(el2){
+    el2.href=addr?`https://polymarket.com/profile/${addr}`:'https://polymarket.com/portfolio';
+    el2.title=addr?'Open your Polymarket profile (positions & history)':'Log in at polymarket.com/portfolio';
   }
 }
 
@@ -2974,11 +3002,12 @@ function updateTrades(data,status){
   $('t-fees').textContent=fmt(status.fees_paid);
   if(!data.length){$('trades-table').innerHTML='<div class="no-data">No trades yet</div>';return;}
   $('trades-table').innerHTML=`<table>
-    <tr><th>ID</th><th>Time</th><th>Strategy</th><th>Side</th><th>Contracts</th><th>Price</th><th>Amount</th><th>Notes</th></tr>
+    <tr><th>ID</th><th>Time</th><th>Strategy</th><th>Token (CLOB)</th><th>Side</th><th>Contracts</th><th>Price</th><th>Amount</th><th>Notes</th></tr>
     ${data.map(t=>`<tr>
       <td>${t.trade_id}</td>
       <td class="ts-small">${ts(t.timestamp)}</td>
       <td>${badge(t.strategy)}</td>
+      <td class="mono" style="font-size:.65rem;max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${(t.token_id_full||'').replace(/"/g,'')}">${t.token_id||'—'}</td>
       <td class="${t.side.toLowerCase()}">${t.side}</td>
       <td>${t.contracts}</td>
       <td>${fmtN(t.price)}</td>

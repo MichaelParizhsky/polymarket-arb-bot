@@ -382,6 +382,7 @@ class ArbBot:
 
             try:
                 context = await self._build_context()
+                await self._refresh_position_mtm_prices(context)
 
                 if not context.get("markets"):
                     logger.warning("No markets loaded, retrying...")
@@ -430,6 +431,8 @@ class ArbBot:
                 now = time.time()
                 if now - last_summary_at > summary_interval:
                     price_map = self._build_price_map(context)
+                    for tid, px in self.portfolio.last_mtm_prices.items():
+                        price_map.setdefault(tid, px)
                     console.print(self.portfolio.summary(price_map))
                     self.portfolio.save_to_json(STATE_PATH)
                     last_summary_at = now
@@ -677,7 +680,7 @@ class ArbBot:
                     size=contracts,
                 )
                 if result and result.status == "FILLED":
-                    market_question, outcome = self._find_market_info(sig.token_id, context)
+                    mq, outcome, end_dt = self._find_market_info(sig.token_id, context)
                     fill_contracts = (
                         result.filled_size
                         if hasattr(result, "filled_size") and result.filled_size
@@ -693,9 +696,10 @@ class ArbBot:
                         contracts=fill_contracts,
                         price=fill_price,
                         strategy=sig.strategy,
-                        market_question=market_question,
+                        market_question=mq,
                         outcome=outcome,
                         notes=sig.notes,
+                        end_date_iso=end_dt,
                     )
                     if trade:
                         trades_total.labels(strategy=sig.strategy, side=sig.side).inc()
@@ -705,15 +709,16 @@ class ArbBot:
                         self.portfolio.save_to_json(STATE_PATH)
             elif sig.side == "BUY":
                 # Paper: simulate directly
-                market_question, outcome = self._find_market_info(sig.token_id, context)
+                mq, outcome, end_dt = self._find_market_info(sig.token_id, context)
                 trade = self.portfolio.buy(
                     token_id=sig.token_id,
                     contracts=contracts,
                     price=_price,
                     strategy=sig.strategy,
-                    market_question=market_question,
+                    market_question=mq,
                     outcome=outcome,
                     notes=sig.notes,
+                    end_date_iso=end_dt,
                 )
             else:
                 trade = self.portfolio.sell(
@@ -735,7 +740,7 @@ class ArbBot:
 
             if trade and sig.side == "BUY" and self._hedge_manager is not None:
                 # Auto-hedge crypto BUY positions via Binance perpetual futures
-                market_question, _ = self._find_market_info(sig.token_id, context)
+                market_question, _, _ = self._find_market_info(sig.token_id, context)
                 market_tags = self._find_market_tags(sig.token_id, context)
                 await self._hedge_manager.maybe_open_hedge(
                     token_id=sig.token_id,
@@ -747,21 +752,55 @@ class ArbBot:
 
     def _find_market_info(
         self, token_id: str, context: dict[str, Any]
-    ) -> tuple[str, str]:
-        for m in context.get("markets", []):
-            for t in m.tokens:
-                if t.token_id == token_id:
-                    return m.question, t.outcome
-        return "", ""
+    ) -> tuple[str, str, str]:
+        """Return (question, outcome label, end_date_iso) for dashboard + resolution UI."""
+        for coll in (context.get("markets") or [], context.get("crypto_short_markets") or []):
+            for m in coll:
+                for t in m.tokens:
+                    if t.token_id == token_id:
+                        end_dt = getattr(m, "end_date_iso", "") or ""
+                        return m.question, t.outcome, end_dt
+        return "", "", ""
 
     def _find_market_tags(
         self, token_id: str, context: dict[str, Any]
     ) -> list[str]:
-        for m in context.get("markets", []):
-            for t in m.tokens:
-                if t.token_id == token_id:
-                    return list(getattr(m, "tags", []))
+        for coll in (context.get("markets") or [], context.get("crypto_short_markets") or []):
+            for m in coll:
+                for t in m.tokens:
+                    if t.token_id == token_id:
+                        return list(getattr(m, "tags", []))
         return []
+
+    async def _refresh_position_mtm_prices(self, context: dict[str, Any]) -> None:
+        """Update last_mtm_prices from CLOB mids so dashboard P&L matches Polymarket."""
+        if not self.portfolio.positions:
+            self.portfolio.last_mtm_prices = {}
+            return
+        orderbooks = context.get("orderbooks") or {}
+        missing = [tid for tid in self.portfolio.positions if tid not in orderbooks]
+        batch_size = 30
+        for i in range(0, len(missing), batch_size):
+            batch = missing[i : i + batch_size]
+            tasks = [self.poly.get_orderbook(tid) for tid in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for tid, res in zip(batch, results):
+                if not isinstance(res, Exception):
+                    orderbooks[tid] = res
+        mtm: dict[str, float] = {}
+        for tid, pos in self.portfolio.positions.items():
+            ob = orderbooks.get(tid)
+            if ob is None:
+                continue
+            mid = ob.mid
+            if mid is None:
+                if ob.best_ask is not None:
+                    mid = ob.best_ask
+                elif ob.best_bid is not None:
+                    mid = ob.best_bid
+            if mid is not None:
+                mtm[tid] = mid
+        self.portfolio.last_mtm_prices = mtm
 
     def _build_price_map(self, context: dict[str, Any]) -> dict[str, float]:
         price_map: dict[str, float] = {}

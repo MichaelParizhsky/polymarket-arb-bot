@@ -614,7 +614,13 @@ class PolymarketClient:
             return None
         try:
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            order_args = MarketOrderArgs(token_id=token_id, amount=amount_usdc)
+            from py_clob_client.constants import BUY, SELL
+
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                amount=amount_usdc,
+                side=BUY if side.upper() == "BUY" else SELL,
+            )
             try:
                 signed = await asyncio.wait_for(
                     self._clob_client.create_market_order(order_args),

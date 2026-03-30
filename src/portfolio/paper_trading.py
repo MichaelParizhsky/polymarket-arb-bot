@@ -84,6 +84,8 @@ class PaperPortfolio:
         self.pnl_history: list[dict] = [{"t": time.time(), "value": starting_balance, "pnl": 0.0}]
         # Closed positions history for win-rate and realized P&L tracking
         self.closed_positions: list[dict] = []
+        # Last midpoint prices from CLOB (token_id -> mid); used for dashboard MTM P&L
+        self.last_mtm_prices: dict[str, float] = {}
         init_db()
 
     # ------------------------------------------------------------------ #
@@ -100,6 +102,7 @@ class PaperPortfolio:
         outcome: str = "",
         notes: str = "",
         market=None,
+        end_date_iso: str = "",
     ) -> Optional[Trade]:
         """Simulate buying outcome tokens."""
         volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
@@ -107,6 +110,7 @@ class PaperPortfolio:
         slippage = price * slippage_rate
         cost = contracts * (price + slippage)
         fee = cost * 0.002
+        all_in_per_contract = (cost + fee) / contracts if contracts > 0 else price
 
         if cost + fee > self.usdc_balance:
             logger.warning(
@@ -132,16 +136,19 @@ class PaperPortfolio:
         if token_id in self.positions:
             pos = self.positions[token_id]
             total_contracts = pos.contracts + contracts
-            pos.avg_cost = (pos.cost_basis + cost) / total_contracts
+            pos.avg_cost = (pos.contracts * pos.avg_cost + cost + fee) / total_contracts
             pos.contracts = total_contracts
+            if end_date_iso and not getattr(pos, "end_date_iso", ""):
+                pos.end_date_iso = end_date_iso
         else:
             self.positions[token_id] = Position(
                 token_id=token_id,
                 market_question=market_question,
                 outcome=outcome,
                 contracts=contracts,
-                avg_cost=price,
+                avg_cost=all_in_per_contract,
                 strategy=strategy,
+                end_date_iso=end_date_iso or "",
             )
 
         self._update_metrics()
@@ -340,12 +347,13 @@ class PaperPortfolio:
         recent_closed = self.closed_positions[-MAX_CLOSED:]
         recent_pnl = self.pnl_history[-MAX_PNL_HISTORY:]
 
+        _mtm = self.last_mtm_prices if self.last_mtm_prices else None
         data = {
             "snapshot_time": time.time(),
             "starting_balance": self.starting_balance,
             "usdc_balance": self.usdc_balance,
-            "total_value": self.total_value(),
-            "total_pnl": self.total_pnl(),
+            "total_value": self.total_value(_mtm),
+            "total_pnl": self.total_pnl(_mtm),
             "total_trades_all_time": len(self.trades),
             "fees_paid": self.total_fees_paid(),
             "open_positions": len(self.positions),
@@ -470,11 +478,16 @@ class PaperPortfolio:
             return False
 
     def _update_metrics(self) -> None:
+        mtm = self.last_mtm_prices if self.last_mtm_prices else None
         portfolio_balance.set(self.usdc_balance)
-        portfolio_pnl.set(self.total_pnl())
+        portfolio_pnl.set(self.total_pnl(mtm))
         open_positions.set(len(self.positions))
         total_exposure.set(self.exposure())
         # Record time-series point (max 2000 points)
-        self.pnl_history.append({"t": time.time(), "value": round(self.total_value(), 2), "pnl": round(self.total_pnl(), 2)})
+        self.pnl_history.append({
+            "t": time.time(),
+            "value": round(self.total_value(mtm), 2),
+            "pnl": round(self.total_pnl(mtm), 2),
+        })
         if len(self.pnl_history) > 500:
             self.pnl_history = self.pnl_history[-500:]

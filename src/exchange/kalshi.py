@@ -126,6 +126,8 @@ class KalshiClient:
         # Market cache
         self._market_cache: list[KalshiMarket] = []
         self._cache_ts: float = 0.0
+        # Last REST error (for dashboard / logs) — cleared on successful markets fetch
+        self._last_error: str | None = None
 
     # ------------------------------------------------------------------ #
     #  Context manager                                                     #
@@ -194,13 +196,21 @@ class KalshiClient:
         return {}
 
     def _has_credentials(self) -> bool:
-        return bool((self._key_id and self._private_key) or self._token)
+        """True if any auth method is configured (RSA, bearer token, or email/password)."""
+        if self._key_id and self._private_key:
+            return True
+        if self._token:
+            return True
+        if self._email and self._password:
+            return True
+        return False
 
     def _warn_no_creds(self) -> None:
         if not self._no_creds_warned:
             logger.warning(
-                "KalshiClient: no API credentials found "
-                "(set KALSHI_API_TOKEN or KALSHI_EMAIL+KALSHI_PASSWORD). "
+                "KalshiClient: no API credentials found — set one of: "
+                "KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY (recommended), "
+                "KALSHI_API_TOKEN, or KALSHI_EMAIL + KALSHI_PASSWORD. "
                 "Returning empty data."
             )
             self._no_creds_warned = True
@@ -223,6 +233,7 @@ class KalshiClient:
         """
         if not self._has_credentials():
             self._warn_no_creds()
+            self._last_error = "no_credentials"
             return []
 
         await self._ensure_http()
@@ -234,6 +245,7 @@ class KalshiClient:
                 headers=self._auth_headers("GET", "/trade-api/v2/markets"),
             )
             resp.raise_for_status()
+            self._last_error = None
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401 and self._email and self._password:
                 # Token expired — force re-login and retry once
@@ -247,13 +259,17 @@ class KalshiClient:
                         headers=self._auth_headers("GET", "/trade-api/v2/markets"),
                     )
                     resp.raise_for_status()
-                except Exception:
+                    self._last_error = None
+                except Exception as retry_exc:
+                    self._last_error = f"markets_retry: {retry_exc!s}"
                     logger.warning("KalshiClient: re-login retry also failed; returning []")
                     return []
             elif exc.response.status_code in (401, 403):
+                self._last_error = f"markets_http_{exc.response.status_code}: {exc!s}"
                 logger.warning(f"KalshiClient: auth error fetching markets ({exc}); returning []")
                 return []
             else:
+                self._last_error = f"markets_http_{exc.response.status_code}: {exc!s}"
                 raise
         finally:
             elapsed = time.perf_counter() - start
