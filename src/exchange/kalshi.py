@@ -104,12 +104,18 @@ class KalshiClient:
             markets = await client.get_markets_cached()
     """
 
-    API_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+    # Production vs demo — keys are environment-specific and not interchangeable.
+    # Set KALSHI_DEMO=true if your API key was created on demo-api.kalshi.co.
+    _PROD_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+    _DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
     _CACHE_TTL = 30.0  # seconds
 
     def __init__(self, config, paper_trading: bool = True) -> None:
         self.config = config
         self.paper_trading = paper_trading
+
+        _demo = os.getenv("KALSHI_DEMO", "").lower() in ("1", "true", "yes")
+        self.API_BASE = self._DEMO_BASE if _demo else self._PROD_BASE
 
         self._key_id: str | None = os.getenv("KALSHI_API_KEY_ID")
         self._private_key: str | None = os.getenv("KALSHI_PRIVATE_KEY")
@@ -227,10 +233,19 @@ class KalshiClient:
                     "Kalshi-Access-Signature": sig,
                 }
             except Exception as exc:
-                logger.warning(f"KalshiClient: RSA signing failed ({exc}), falling back to token auth")
+                logger.error(
+                    f"KalshiClient: RSA signing failed ({exc}) — request will be sent without auth and will 401. "
+                    "Check KALSHI_PRIVATE_KEY format."
+                )
         # Bearer token fallback
         if self._token:
             return {"Authorization": f"Bearer {self._token}"}
+        if self._key_id or self._private_key:
+            # Credentials are partially set but signing failed — log so it's visible
+            logger.error(
+                "KalshiClient: sending request with no auth headers — will get 401. "
+                "Ensure KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY are both set and valid."
+            )
         return {}
 
     def _has_credentials(self) -> bool:
@@ -304,7 +319,14 @@ class KalshiClient:
                     return []
             elif exc.response.status_code in (401, 403):
                 self._last_error = f"markets_http_{exc.response.status_code}: {exc!s}"
-                logger.warning(f"KalshiClient: auth error fetching markets ({exc}); returning []")
+                _body = exc.response.text[:300]
+                logger.error(
+                    f"KalshiClient: {exc.response.status_code} fetching markets. "
+                    f"Kalshi response: {_body}. "
+                    "Common causes: (1) demo key used against production — set KALSHI_DEMO=true if your key is from demo-api.kalshi.co; "
+                    "(2) KALSHI_PRIVATE_KEY newlines broken in env vars; "
+                    "(3) wrong KALSHI_API_KEY_ID."
+                )
                 return []
             else:
                 self._last_error = f"markets_http_{exc.response.status_code}: {exc!s}"
