@@ -404,6 +404,7 @@ class ArbBot:
         """Core scanning loop."""
         logger.info("Bot running. Press Ctrl+C to stop.")
         last_summary_at = time.time()
+        last_trade_alert_at: float = 0.0   # tracks when we last warned about no trades
         summary_interval = 60   # save state every 60s (was 300s — reduces data loss on Railway redeploy)
 
         while self._running:
@@ -431,11 +432,26 @@ class ArbBot:
                 )
 
                 all_signals = []
+                per_strategy: dict[str, int] = {}
                 for strategy, result in zip(self._strategies, results):
                     if isinstance(result, Exception):
                         logger.error(f"Strategy {strategy.__class__.__name__} scan failed: {result}")
                         continue
-                    all_signals.extend(result or [])
+                    sigs = result or []
+                    all_signals.extend(sigs)
+                    per_strategy[strategy.__class__.__name__] = len(sigs)
+
+                # Log signal pipeline state every cycle — essential for debugging a stalled bot.
+                n_markets = len(context.get("markets", []))
+                n_books = len(context.get("orderbooks", {}))
+                n_tokens = sum(len(m.tokens) for m in context.get("markets", []))
+                book_coverage = f"{n_books}/{n_tokens}" if n_tokens else "0/0"
+                sig_breakdown = ", ".join(f"{k}:{v}" for k, v in per_strategy.items() if v)
+                logger.info(
+                    f"[Cycle {self._cycle_count}] markets={n_markets} books={book_coverage} "
+                    f"signals={len(all_signals)}"
+                    + (f" [{sig_breakdown}]" if sig_breakdown else " [no signals]")
+                )
 
                 # Filter signals from strategies that have exceeded their loss budget.
                 # In paper trading, set PAPER_SKIP_BUDGETS=true to disable this check
@@ -461,6 +477,27 @@ class ArbBot:
                 # Execute signals through risk manager
                 if all_signals:
                     await self._execute_signals(all_signals, context)
+
+                # Stall detector: warn if no trade has executed in the last 10 minutes.
+                # Fires at most once per 10 min to avoid log spam.
+                now = time.time()
+                _stall_threshold = 600  # 10 minutes
+                _stall_alert_interval = 600
+                if (
+                    now - self._last_trade_time > _stall_threshold
+                    and now - last_trade_alert_at > _stall_alert_interval
+                    and self._cycle_count > 10  # allow warm-up
+                ):
+                    last_trade_alert_at = now
+                    mins_idle = (now - self._last_trade_time) / 60
+                    logger.warning(
+                        f"[STALL] No trades in {mins_idle:.0f} min | "
+                        f"risk stopped={self.risk.is_hard_stopped()} | "
+                        f"balance=${self.portfolio.usdc_balance:.0f} | "
+                        f"positions={len(self.portfolio.positions)} | "
+                        f"markets={len(context.get('markets', []))} | "
+                        f"books={len(context.get('orderbooks', {}))}"
+                    )
 
                 # Periodic summary + state save
                 now = time.time()
@@ -495,11 +532,12 @@ class ArbBot:
 
         from datetime import datetime, timezone, timedelta
 
-        # Daily-close-only mode: only trade markets that resolve today (UTC)
+        # Daily-close-only mode: only trade markets that resolve within 24 h from now.
+        # Uses a 24-hour rolling window (not EOD UTC) so late-night runs aren't starved
+        # of markets — e.g. at 23:00 UTC the old EOD logic only left 60 min of coverage.
         if self.config.strategies.daily_close_only:
             now_utc = datetime.now(timezone.utc)
-            # Window: now → end of today UTC (23:59:59)
-            today_end = now_utc.replace(hour=23, minute=59, second=59, microsecond=0)
+            today_end = now_utc + timedelta(hours=24)
             filtered = []
             for m in markets:
                 if not m.end_date_iso:
@@ -513,7 +551,7 @@ class ArbBot:
                 except ValueError:
                     continue
             markets = filtered
-            logger.debug(f"Daily-close filter: {len(markets)} markets resolving today (UTC)")
+            logger.info(f"Daily-close filter (24h window): {len(markets)} markets resolving within 24h")
         else:
             # Filter to markets resolving within MAX_DAYS_TO_RESOLUTION
             max_days = self.config.strategies.max_days_to_resolution
@@ -532,7 +570,7 @@ class ArbBot:
                     except ValueError:
                         continue
                 markets = filtered
-                logger.debug(f"Date filter ({max_days}d): {len(markets)} markets within window")
+                logger.info(f"Date filter ({max_days}d): {len(markets)} markets within window")
 
         # Limit to top N markets by volume, but always keep expiring markets at the front.
         # Expiring markets have low lifetime volume and would otherwise be sorted out.
@@ -616,6 +654,22 @@ class ArbBot:
             for tid, res in zip(batch, results):
                 if not isinstance(res, Exception):
                     orderbooks[tid] = res
+
+        # Log orderbook coverage so Railway logs show data pipeline health.
+        # Low coverage (< 50%) means the API is rate-limiting or timing out.
+        n_rest_ok = sum(1 for tid in missing if tid in orderbooks)
+        n_rest_fail = len(missing) - n_rest_ok
+        ws_count = len(orderbooks) - n_rest_ok
+        if missing:
+            logger.info(
+                f"Orderbooks: {len(orderbooks)}/{len(token_ids)} tokens "
+                f"(WS={ws_count}, REST ok={n_rest_ok}, REST fail={n_rest_fail})"
+            )
+        if n_rest_fail > len(missing) // 2:
+            logger.warning(
+                f"Orderbook fetch degraded: {n_rest_fail}/{len(missing)} REST fetches failed — "
+                f"strategies may see empty books and generate 0 signals"
+            )
 
         # Fetch Kalshi markets if enabled
         kalshi_markets = []

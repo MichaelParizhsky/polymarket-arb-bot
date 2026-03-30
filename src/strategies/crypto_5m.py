@@ -217,6 +217,7 @@ class CryptoShortStrategy(BaseStrategy):
         orderbooks: dict[str, Orderbook] = context.get("orderbooks", {})
 
         if not markets:
+            logger.debug("CryptoShort: no crypto_short_markets in context — skipping scan")
             return []
 
         now_utc = datetime.now(timezone.utc)
