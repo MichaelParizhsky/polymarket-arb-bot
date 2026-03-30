@@ -252,11 +252,46 @@ class ArbBot:
         logger.info(f"Starting Polymarket Arb Bot [{mode}]")
         logger.info(f"Starting balance: ${self.config.starting_balance:,.2f} USDC")
 
+        # ---------------------------------------------------------------
+        # Start dashboard FIRST so Railway can reach it immediately.
+        # All other init (Binance, news monitor, strategies) happens after.
+        # The dashboard serves partial/empty state until register() is called.
+        # ---------------------------------------------------------------
+        import threading as _threading_early
+        _railway_port_early = os.getenv("PORT")
+        if _railway_port_early:
+            dashboard_port = int(_railway_port_early)
+        else:
+            dashboard_port = 5000
+            for _port in range(5000, 5010):
+                import socket as _sock
+                with _sock.socket() as s:
+                    if s.connect_ex(("127.0.0.1", _port)) != 0:
+                        dashboard_port = _port
+                        break
+
+        def _run_dashboard(port: int) -> None:
+            import asyncio as _asyncio
+            import uvicorn as _uvi
+            try:
+                _loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(_loop)
+                _cfg = _uvi.Config(dashboard_app, host="0.0.0.0", port=port, log_level="warning")
+                _srv = _uvi.Server(_cfg)
+                _srv.install_signal_handlers = lambda: None  # signal handlers only work in main thread
+                _loop.run_until_complete(_srv.serve())
+            except Exception as _exc:
+                logger.error(f"Dashboard thread crashed on port {port}: {_exc}", exc_info=True)
+
+        logger.info(f"Railway PORT env var: {os.getenv('PORT', 'not set')} → dashboard binding to {dashboard_port}")
+        _dash_thread = _threading_early.Thread(target=_run_dashboard, args=(dashboard_port,), daemon=True)
+        _dash_thread.start()
+        logger.info(f"Dashboard: http://0.0.0.0:{dashboard_port}")
+
         if not self.paper:
             _warn_live_trading()
 
         # Start metrics server — skip if it would conflict with the dashboard port ($PORT)
-        _railway_port_early = os.getenv("PORT")
         _metrics_conflict = _railway_port_early and int(_railway_port_early) == self.config.metrics_port
         if _metrics_conflict:
             logger.warning(
@@ -320,42 +355,7 @@ class ArbBot:
                            hedge_manager=self._hedge_manager,
                            state_loaded_from_file=self._state_loaded)
 
-        # Start dashboard server in a dedicated thread with its own event loop.
-        # This isolates the dashboard from the trading bot's asyncio loop so that
-        # heavy scanning / API calls never starve the HTTP server.
-        import threading
-        # Railway sets $PORT; use it so the dashboard is accessible via the public URL.
-        # Fall back to 5000 for local dev, with port-scan to avoid conflicts.
-        _railway_port = os.getenv("PORT")
-        if _railway_port:
-            dashboard_port = int(_railway_port)
-        else:
-            dashboard_port = 5000
-            for _port in range(5000, 5010):
-                import socket as _sock
-                with _sock.socket() as s:
-                    if s.connect_ex(("127.0.0.1", _port)) != 0:
-                        dashboard_port = _port
-                        break
-
-        def _run_dashboard(port: int) -> None:
-            import asyncio as _asyncio
-            import uvicorn as _uvi
-            try:
-                _loop = _asyncio.new_event_loop()
-                _asyncio.set_event_loop(_loop)
-                _cfg = _uvi.Config(dashboard_app, host="0.0.0.0", port=port, log_level="warning")
-                _srv = _uvi.Server(_cfg)
-                _srv.install_signal_handlers = lambda: None  # signal handlers only work in main thread
-                _loop.run_until_complete(_srv.serve())
-            except Exception as _exc:
-                logger.error(f"Dashboard thread crashed on port {port}: {_exc}", exc_info=True)
-
-        # Log Railway PORT so we can diagnose mismatches
-        logger.info(f"Railway PORT env var: {os.getenv('PORT', 'not set')} → dashboard binding to {dashboard_port}")
-        _dash_thread = threading.Thread(target=_run_dashboard, args=(dashboard_port,), daemon=True)
-        _dash_thread.start()
-        logger.info(f"Dashboard: http://localhost:{dashboard_port}")
+        # Dashboard already started at top of run() — just register state now
 
         # Start Binance feed
         await self.binance.fetch_snapshot()   # initial REST snapshot
