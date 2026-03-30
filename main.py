@@ -81,6 +81,31 @@ class ArbBot:
             bal = self.portfolio.usdc_balance
             n_trades = len(self.portfolio.trades)
             logger.info(f"State restored: balance=${bal:,.2f}, {n_trades} trades in history")
+            # Paper mode: if accumulated losses would immediately trigger a hard stop on the
+            # first trade check, reset the drawdown baseline so trading can continue.
+            # The drawdown check uses BOTH mtm drawdown AND realized_pnl drawdown.
+            # Resetting starting_balance alone isn't enough — historical closed_positions
+            # keep realized_pnl negative, so we zero those out too. Trade history is kept.
+            if self.config.paper_trading:
+                current_tv = self.portfolio.total_value()
+                if current_tv > 0:
+                    realized = self.portfolio.realized_pnl()
+                    realized_dd = max(0.0, -realized / self.portfolio.starting_balance)
+                    mtm_dd = max(0.0, (self.portfolio.starting_balance - current_tv) / self.portfolio.starting_balance)
+                    paper_drawdown = max(realized_dd, mtm_dd)
+                    if paper_drawdown >= self.config.risk.max_drawdown_pct:
+                        logger.warning(
+                            f"[Startup] Paper mode: drawdown {paper_drawdown:.1%} >= hard stop limit "
+                            f"{self.config.risk.max_drawdown_pct:.1%} (realized={realized_dd:.1%}, "
+                            f"mtm={mtm_dd:.1%}) — resetting drawdown baseline to allow trading. "
+                            f"starting_balance ${self.portfolio.starting_balance:.2f} → ${current_tv:.2f}. "
+                            f"Set PAPER_SKIP_BUDGETS=true to also bypass strategy loss budgets."
+                        )
+                        self.portfolio.starting_balance = current_tv
+                        for pos in self.portfolio.positions.values():
+                            pos.realized_pnl = 0.0
+                        for entry in self.portfolio.closed_positions:
+                            entry["realized_pnl"] = 0.0
         else:
             logger.warning(
                 "No portfolio_state.json found — starting fresh. "
@@ -691,7 +716,7 @@ class ArbBot:
                 sig.token_id, sig.side, sig.size_usdc, sig.strategy
             )
             if not ok:
-                logger.debug(f"Signal rejected [{sig.strategy}] {sig.side} {sig.token_id[:16]}: {reason}")
+                logger.info(f"Signal rejected [{sig.strategy}] {sig.side} {sig.token_id[:16]}: {reason}")
                 if pair_id:
                     skipped_pairs.add(pair_id)
                 continue
