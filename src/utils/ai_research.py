@@ -45,10 +45,11 @@ class PerplexityClient:
 
     def __init__(self) -> None:
         self.api_key: str = os.getenv("PERPLEXITY_API_KEY", "")
+        self._auth_failed: bool = False  # set True on 401 — stops retrying bad keys
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) and not self._auth_failed
 
     async def search(self, query: str, model: str = "sonar") -> str:
         """
@@ -74,6 +75,13 @@ class PerplexityClient:
                 r.raise_for_status()
                 data = r.json()
                 return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                self._auth_failed = True
+                logger.warning("Perplexity API key is invalid (401) — disabling Perplexity for this session. Fix PERPLEXITY_API_KEY or remove it.")
+            else:
+                logger.warning(f"Perplexity search error: {exc}")
+            return ""
         except Exception as exc:
             logger.warning(f"Perplexity search error: {exc}")
             return ""
