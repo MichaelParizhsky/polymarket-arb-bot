@@ -12,11 +12,11 @@ COPY . .
 # Create logs directory
 RUN mkdir -p logs
 
-# Expose dashboard + metrics ports
-EXPOSE 5000 8000
+# Expose dashboard port. Railway routes $PORT here; metrics stay on 8000 (internal only).
+EXPOSE 5000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/metrics', timeout=5)" || exit 1
+# Health check on the dashboard (respects $PORT, falls back to 5000)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import httpx,os; httpx.get(f'http://localhost:{os.getenv(\"PORT\",\"5000\")}/', timeout=5)" || exit 1
 
 CMD ["python", "main.py"]
