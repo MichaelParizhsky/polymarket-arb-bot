@@ -537,14 +537,28 @@ class ArbBot:
             except Exception as exc:
                 logger.debug(f"get_crypto_short_markets failed: {exc}")
 
+        # O(1) token lookup for execution path — avoids scanning all markets per fill
+        token_meta: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
+        for coll in (markets_sorted, crypto_short_markets):
+            for m in coll:
+                q = m.question
+                tags = tuple(getattr(m, "tags", ()) or ())
+                end_dt = getattr(m, "end_date_iso", "") or ""
+                for t in m.tokens:
+                    token_meta[t.token_id] = (q, t.outcome, end_dt, tags)
+
         # Collect all token IDs (main markets + crypto short markets)
-        token_ids = []
+        token_ids: list[str] = []
+        _seen_tok: set[str] = set()
         for m in markets_sorted:
             for t in m.tokens:
-                token_ids.append(t.token_id)
+                if t.token_id not in _seen_tok:
+                    _seen_tok.add(t.token_id)
+                    token_ids.append(t.token_id)
         for m in crypto_short_markets:
             for t in m.tokens:
-                if t.token_id not in token_ids:
+                if t.token_id not in _seen_tok:
+                    _seen_tok.add(t.token_id)
                     token_ids.append(t.token_id)
 
         # Keep WS feed subscribed to current token set
@@ -591,6 +605,7 @@ class ArbBot:
             "binance_feed": self.binance,
             "kalshi_markets": kalshi_markets,
             "crypto_short_markets": crypto_short_markets,
+            "token_meta": token_meta,
             "timestamp": time.time(),
         }
 
@@ -764,6 +779,11 @@ class ArbBot:
         self, token_id: str, context: dict[str, Any]
     ) -> tuple[str, str, str]:
         """Return (question, outcome label, end_date_iso) for dashboard + resolution UI."""
+        tm = context.get("token_meta")
+        if isinstance(tm, dict):
+            hit = tm.get(token_id)
+            if hit:
+                return hit[0], hit[1], hit[2]
         for coll in (context.get("markets") or [], context.get("crypto_short_markets") or []):
             for m in coll:
                 for t in m.tokens:
@@ -775,6 +795,11 @@ class ArbBot:
     def _find_market_tags(
         self, token_id: str, context: dict[str, Any]
     ) -> list[str]:
+        tm = context.get("token_meta")
+        if isinstance(tm, dict):
+            hit = tm.get(token_id)
+            if hit:
+                return list(hit[3])
         for coll in (context.get("markets") or [], context.get("crypto_short_markets") or []):
             for m in coll:
                 for t in m.tokens:

@@ -298,6 +298,61 @@ class PolymarketClient:
         logger.info(f"get_expiring_markets: found {len(markets)} markets expiring within {max_hours}h")
         return markets
 
+    async def _fetch_markets_by_slug(self, slug: str) -> list[Market]:
+        """Single Gamma slug lookup; used in parallel by get_crypto_short_markets."""
+        out: list[Market] = []
+        if not self._http:
+            return out
+        try:
+            resp = await self._http.get(
+                f"{self.GAMMA_BASE}/markets/slug/{slug}",
+                timeout=httpx.Timeout(10.0),
+            )
+            if resp.status_code != 200:
+                return out
+            data = resp.json()
+            items = data if isinstance(data, list) else [data]
+            for raw in items:
+                try:
+                    market = self._parse_market(raw)
+                    if market:
+                        out.append(market)
+                except Exception as exc:
+                    logger.debug(f"crypto_short: parse error {slug}: {exc}")
+        except Exception as exc:
+            logger.debug(f"crypto_short: fetch error {slug}: {exc}")
+        return out
+
+    async def _fetch_sports_series_raw(
+        self,
+        sport: str,
+        series_id: int,
+        end_min: str,
+        end_max: str,
+    ) -> tuple[str, Any]:
+        """One series_id /events request; results merged in get_sports_markets."""
+        if not self._http:
+            return sport, None
+        try:
+            resp = await self._http.get(
+                f"{self.GAMMA_BASE}/events",
+                params={
+                    "series_id": series_id,
+                    "active": "true",
+                    "closed": "false",
+                    "limit": 200,
+                    "end_date_min": end_min,
+                    "end_date_max": end_max,
+                },
+                timeout=httpx.Timeout(10.0),
+            )
+            if resp.status_code != 200:
+                return sport, None
+            return sport, resp.json()
+        except Exception as exc:
+            logger.warning(f"sports_markets: fetch error {sport}: {exc}")
+            return sport, None
+
     async def get_expiring_markets_cached(self, max_hours: float = 48.0) -> list[Market]:
         """Cached version of get_expiring_markets with 60s TTL."""
         if time.time() - self._expiring_cache_ts < 60.0 and self._expiring_cache:
@@ -336,27 +391,24 @@ class PolymarketClient:
                 if include_next_window:
                     slugs.append(f"{coin}-updown-{duration}-{ts + window}")
 
+        # Parallel slug fetches on pooled HTTP — sequential loop + new client per run was
+        # multi-second latency; this keeps crypto windows competitive vs other bots.
+        if not self._http:
+            logger.warning("get_crypto_short_markets: HTTP client not initialised")
+            return []
+        results = await asyncio.gather(
+            *[self._fetch_markets_by_slug(s) for s in slugs],
+            return_exceptions=True,
+        )
+        seen: set[str] = set()
         markets: list[Market] = []
-        async with httpx.AsyncClient(timeout=10) as session:
-            for slug in slugs:
-                try:
-                    resp = await session.get(
-                        f"{self.GAMMA_BASE}/markets/slug/{slug}"
-                    )
-                    if resp.status_code != 200:
-                        continue
-                    data = resp.json()
-                    # May return a list or a single object
-                    items = data if isinstance(data, list) else [data]
-                    for raw in items:
-                        try:
-                            market = self._parse_market(raw)
-                            if market:
-                                markets.append(market)
-                        except Exception as exc:
-                            logger.debug(f"crypto_short: parse error {slug}: {exc}")
-                except Exception as exc:
-                    logger.debug(f"crypto_short: fetch error {slug}: {exc}")
+        for res in results:
+            if isinstance(res, Exception):
+                continue
+            for m in res:
+                if m.condition_id not in seen:
+                    seen.add(m.condition_id)
+                    markets.append(m)
 
         logger.info(f"crypto_short_markets: found {len(markets)} active crypto short markets")
         return markets
@@ -378,47 +430,41 @@ class PolymarketClient:
         end_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_max = (now + _dt.timedelta(hours=max_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        for sport, series_id in self.SPORTS_SERIES_IDS.items():
-            try:
-                resp = await self._http.get(
-                    f"{self.GAMMA_BASE}/events",
-                    params={
-                        "series_id": series_id,
-                        "active": "true",
-                        "closed": "false",
-                        "limit": 200,
-                        "end_date_min": end_min,
-                        "end_date_max": end_max,
-                    },
-                    timeout=10,
-                )
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                events = data if isinstance(data, list) else data.get("data", [])
-                for event in events:
-                    # Events contain child markets
-                    raw_markets = event.get("markets", [event]) if "markets" in event else [event]
-                    for raw in raw_markets:
-                        try:
-                            market = self._parse_market(raw)
-                            if market and market.condition_id not in seen:
-                                # Filter by time window
-                                s = market.end_date_iso.strip().rstrip("Z")
-                                if "T" not in s:
-                                    s += "T00:00:00"
-                                end_dt = _dt.datetime.fromisoformat(s).replace(
-                                    tzinfo=_dt.timezone.utc
-                                )
-                                hours_left = (end_dt - now).total_seconds() / 3600
-                                if 0 < hours_left <= max_hours:
-                                    market.category = sport
-                                    markets.append(market)
-                                    seen.add(market.condition_id)
-                        except Exception as exc:
-                            logger.debug(f"sports_markets: parse error {sport}: {exc}")
-            except Exception as exc:
-                logger.warning(f"sports_markets: fetch error {sport}: {exc}")
+        sports_items = list(self.SPORTS_SERIES_IDS.items())
+        raw_results = await asyncio.gather(
+            *[
+                self._fetch_sports_series_raw(sp, sid, end_min, end_max)
+                for sp, sid in sports_items
+            ],
+            return_exceptions=True,
+        )
+        for item in raw_results:
+            if isinstance(item, Exception):
+                logger.warning(f"sports_markets: fetch error: {item}")
+                continue
+            sport, data = item
+            if data is None:
+                continue
+            events = data if isinstance(data, list) else data.get("data", [])
+            for event in events:
+                raw_markets = event.get("markets", [event]) if "markets" in event else [event]
+                for raw in raw_markets:
+                    try:
+                        market = self._parse_market(raw)
+                        if market and market.condition_id not in seen:
+                            s = market.end_date_iso.strip().rstrip("Z")
+                            if "T" not in s:
+                                s += "T00:00:00"
+                            end_dt = _dt.datetime.fromisoformat(s).replace(
+                                tzinfo=_dt.timezone.utc
+                            )
+                            hours_left = (end_dt - now).total_seconds() / 3600
+                            if 0 < hours_left <= max_hours:
+                                market.category = sport
+                                markets.append(market)
+                                seen.add(market.condition_id)
+                    except Exception as exc:
+                        logger.debug(f"sports_markets: parse error {sport}: {exc}")
 
         logger.info(f"sports_markets: found {len(markets)} active sports markets within {max_hours}h")
         return markets
