@@ -316,13 +316,19 @@ class ArbBot:
         # This isolates the dashboard from the trading bot's asyncio loop so that
         # heavy scanning / API calls never starve the HTTP server.
         import threading
-        dashboard_port = 5000
-        for _port in range(5000, 5010):
-            import socket as _sock
-            with _sock.socket() as s:
-                if s.connect_ex(("127.0.0.1", _port)) != 0:
-                    dashboard_port = _port
-                    break
+        # Railway sets $PORT; use it so the dashboard is accessible via the public URL.
+        # Fall back to 5000 for local dev, with port-scan to avoid conflicts.
+        _railway_port = os.getenv("PORT")
+        if _railway_port:
+            dashboard_port = int(_railway_port)
+        else:
+            dashboard_port = 5000
+            for _port in range(5000, 5010):
+                import socket as _sock
+                with _sock.socket() as s:
+                    if s.connect_ex(("127.0.0.1", _port)) != 0:
+                        dashboard_port = _port
+                        break
 
         def _run_dashboard(port: int) -> None:
             import asyncio as _asyncio
