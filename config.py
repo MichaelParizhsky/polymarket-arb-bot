@@ -197,7 +197,7 @@ class BotConfig:
     market_poll_interval: int = field(default_factory=lambda: _int("MARKET_POLL_INTERVAL", 5))
     orderbook_poll_interval: int = field(default_factory=lambda: _int("ORDERBOOK_POLL_INTERVAL", 1))
     binance_ws_reconnect_delay: int = field(default_factory=lambda: _int("BINANCE_WS_RECONNECT_DELAY", 5))
-    metrics_port: int = 8000
+    metrics_port: int = field(default_factory=lambda: _int("METRICS_PORT", 8000))
 
     polymarket: PolymarketConfig = field(default_factory=PolymarketConfig)
     binance: BinanceConfig = field(default_factory=BinanceConfig)

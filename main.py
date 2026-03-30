@@ -255,12 +255,20 @@ class ArbBot:
         if not self.paper:
             _warn_live_trading()
 
-        # Start metrics server
-        try:
-            start_metrics_server(self.config.metrics_port)
-            logger.info(f"Metrics server: http://0.0.0.0:{self.config.metrics_port}")
-        except Exception as exc:
-            logger.warning(f"Metrics server failed to start: {exc}")
+        # Start metrics server — skip if it would conflict with the dashboard port ($PORT)
+        _railway_port_early = os.getenv("PORT")
+        _metrics_conflict = _railway_port_early and int(_railway_port_early) == self.config.metrics_port
+        if _metrics_conflict:
+            logger.warning(
+                f"Metrics server skipped: PORT={_railway_port_early} conflicts with metrics_port={self.config.metrics_port}. "
+                "Set METRICS_PORT env var to a different port (e.g. 9090) to enable Prometheus."
+            )
+        else:
+            try:
+                start_metrics_server(self.config.metrics_port)
+                logger.info(f"Metrics server: http://0.0.0.0:{self.config.metrics_port}")
+            except Exception as exc:
+                logger.warning(f"Metrics server failed to start: {exc}")
 
         # Initialise optional components
         if self.config.strategies.use_ws_orderbook:
@@ -333,13 +341,18 @@ class ArbBot:
         def _run_dashboard(port: int) -> None:
             import asyncio as _asyncio
             import uvicorn as _uvi
-            _loop = _asyncio.new_event_loop()
-            _asyncio.set_event_loop(_loop)
-            _cfg = _uvi.Config(dashboard_app, host="0.0.0.0", port=port, log_level="warning")
-            _srv = _uvi.Server(_cfg)
-            _srv.install_signal_handlers = lambda: None  # signal handlers only work in main thread
-            _loop.run_until_complete(_srv.serve())
+            try:
+                _loop = _asyncio.new_event_loop()
+                _asyncio.set_event_loop(_loop)
+                _cfg = _uvi.Config(dashboard_app, host="0.0.0.0", port=port, log_level="warning")
+                _srv = _uvi.Server(_cfg)
+                _srv.install_signal_handlers = lambda: None  # signal handlers only work in main thread
+                _loop.run_until_complete(_srv.serve())
+            except Exception as _exc:
+                logger.error(f"Dashboard thread crashed on port {port}: {_exc}", exc_info=True)
 
+        # Log Railway PORT so we can diagnose mismatches
+        logger.info(f"Railway PORT env var: {os.getenv('PORT', 'not set')} → dashboard binding to {dashboard_port}")
         _dash_thread = threading.Thread(target=_run_dashboard, args=(dashboard_port,), daemon=True)
         _dash_thread.start()
         logger.info(f"Dashboard: http://localhost:{dashboard_port}")
