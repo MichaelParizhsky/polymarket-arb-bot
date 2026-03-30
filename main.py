@@ -161,7 +161,7 @@ class ArbBot:
         else:
             logger.warning(
                 "Market making strategy DISABLED (adverse selection risk — "
-                "enable with STRATEGY_MARKET_MAKING_ENABLED=true)"
+                "enable with STRATEGY_MARKET_MAKING=true)"
             )
         if cfg.resolution_enabled:
             self._strategies.append(
@@ -345,6 +345,16 @@ class ArbBot:
 
             # Apply any previously auto-tuned config
             self._load_saved_config()
+
+            # Paper exploration: unfreeze risk locks on each deploy (Railway / Bot B)
+            if self.paper and os.getenv(
+                "PAPER_RESET_RISK_ON_START", ""
+            ).lower() in ("true", "1", "yes"):
+                self.risk.reset_permanent_lock()
+                logger.info(
+                    "PAPER_RESET_RISK_ON_START: cleared hard stop / permanent lock "
+                    "(disable this env var after the bot is healthy)"
+                )
 
             # Start background tasks — explicitly tracked to prevent silent cancellation
             # Tasks created via create_task() are cancelled if the parent scope finishes;

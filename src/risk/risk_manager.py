@@ -27,6 +27,48 @@ class RiskManager:
         # 1 = win (pnl > 0), 0 = loss. Regime changes are reflected within 50 trades.
         self._rolling_results: deque[int] = deque(maxlen=200)  # 200-trade window (research: <100 causes whipsaw)
 
+    def _paper_skip_hard_stop(self) -> bool:
+        """Paper exploration: set PAPER_SKIP_HARD_STOP=true to never trip drawdown hard stop."""
+        return self.config.paper_trading and os.getenv(
+            "PAPER_SKIP_HARD_STOP", "false"
+        ).lower() in ("true", "1", "yes")
+
+    def _check_drawdown_and_maybe_stop(self) -> None:
+        """Set hard stop / permanent lock if portfolio drawdown exceeds configured limit."""
+        _mtm = getattr(self.portfolio, "last_mtm_prices", None) or None
+        total = self.portfolio.total_value(_mtm)
+        realized_loss_drawdown = max(
+            0.0,
+            -self.portfolio.realized_pnl() / self.portfolio.starting_balance,
+        )
+        mtm_drawdown = max(
+            0.0,
+            (self.portfolio.starting_balance - total) / self.portfolio.starting_balance,
+        )
+        drawdown = max(realized_loss_drawdown, mtm_drawdown)
+        if drawdown < self.config.risk.max_drawdown_pct:
+            return
+
+        self._hard_stop = True
+        now = time.time()
+        self._hard_stop_timestamps.append(now)
+        window_seconds = self.config.risk.hard_stop_window_hours * 3600
+        self._hard_stop_timestamps = [
+            ts for ts in self._hard_stop_timestamps
+            if now - ts <= window_seconds
+        ]
+        self._hard_stop_count = len(self._hard_stop_timestamps)
+        logger.critical(
+            f"HARD STOP: drawdown {drawdown:.1%} >= limit {self.config.risk.max_drawdown_pct:.1%} "
+            f"(stop #{self._hard_stop_count} in {self.config.risk.hard_stop_window_hours}h window)"
+        )
+        if self._hard_stop_count >= self.config.risk.hard_stop_max_count:
+            self._permanent_lock = True
+            logger.critical(
+                f"PERMANENT LOCK: {self._hard_stop_count} hard stops within "
+                f"{self.config.risk.hard_stop_window_hours}h — manual reset required via reset_permanent_lock()"
+            )
+
     def check_trade(
         self,
         token_id: str,
@@ -45,41 +87,11 @@ class RiskManager:
         if self._hard_stop:
             return False, "Hard stop active"
 
-        # Drawdown check: use realized P&L to catch losses before open positions close.
-        # total_value() marks open positions at cost (no price feed), so unrealized losses
-        # are invisible until positions close. realized_pnl() reflects actual closed losses
-        # immediately and is always <= 0 when the bot is losing money.
-        realized_loss_drawdown = max(
-            0.0,
-            -self.portfolio.realized_pnl() / self.portfolio.starting_balance,
-        )
-        total = self.portfolio.total_value()
-        mtm_drawdown = max(
-            0.0,
-            (self.portfolio.starting_balance - total) / self.portfolio.starting_balance,
-        )
-        drawdown = max(realized_loss_drawdown, mtm_drawdown)
-        if drawdown >= self.config.risk.max_drawdown_pct:
-            self._hard_stop = True
-            now = time.time()
-            self._hard_stop_timestamps.append(now)
-            window_seconds = self.config.risk.hard_stop_window_hours * 3600
-            self._hard_stop_timestamps = [
-                ts for ts in self._hard_stop_timestamps
-                if now - ts <= window_seconds
-            ]
-            self._hard_stop_count = len(self._hard_stop_timestamps)
-            logger.critical(
-                f"HARD STOP: drawdown {drawdown:.1%} >= limit {self.config.risk.max_drawdown_pct:.1%} "
-                f"(stop #{self._hard_stop_count} in {self.config.risk.hard_stop_window_hours}h window)"
-            )
-            if self._hard_stop_count >= self.config.risk.hard_stop_max_count:
-                self._permanent_lock = True
-                logger.critical(
-                    f"PERMANENT LOCK: {self._hard_stop_count} hard stops within "
-                    f"{self.config.risk.hard_stop_window_hours}h — manual reset required via reset_permanent_lock()"
-                )
-            return False, f"Drawdown limit hit: {drawdown:.1%}"
+        # Drawdown check (skipped in paper when PAPER_SKIP_HARD_STOP=true for strategy research)
+        if not self._paper_skip_hard_stop():
+            self._check_drawdown_and_maybe_stop()
+        if self._hard_stop:
+            return False, "Hard stop active"
 
         # SELL trades liquidate positions and return USDC — skip buy-side checks
         if side.upper() == "SELL":
@@ -244,7 +256,8 @@ class RiskManager:
           - Liquidity: free USDC as % of total value
           - Activity: are we trading (not stalled)?
         """
-        total = self.portfolio.total_value()
+        _mtm = getattr(self.portfolio, "last_mtm_prices", None) or None
+        total = self.portfolio.total_value(_mtm)
         if total <= 0:
             return {"score": 0, "grade": "CRITICAL", "flags": ["zero portfolio value"]}
 
