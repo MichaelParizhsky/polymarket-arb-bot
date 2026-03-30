@@ -24,6 +24,9 @@ from src.strategies.base import BaseStrategy, Signal
 from src.utils.constants import FEE_RATE, SLIPPAGE_RATE
 from src.utils.metrics import arb_opportunities, edge_detected
 
+# Precompute round-trip fee floor for dominance / mutex checks (hot path)
+_FEE_ROUND_TRIP = 2 * (FEE_RATE + SLIPPAGE_RATE)
+
 
 # ------------------------------------------------------------------ #
 #  Keyword clusters to group related markets                           #
@@ -89,6 +92,13 @@ def _question_to_topic(question: str) -> str | None:
     return None
 
 
+def _assign_topic(q_lower: str, dynamic_topics: dict[str, list[str]]) -> str | None:
+    """First topic with a keyword hit wins (same order as dynamic_topics iteration)."""
+    for topic, kws in dynamic_topics.items():
+        for kw in kws:
+            if kw in q_lower:
+                return topic
+    return None
 
 
 class CombinatorialStrategy(BaseStrategy):
@@ -110,10 +120,7 @@ class CombinatorialStrategy(BaseStrategy):
             if not m.active or m.closed:
                 continue
             q_lower = m.question.lower()
-            topic = next(
-                (t for t, kws in dynamic_topics.items() if any(kw in q_lower for kw in kws)),
-                None,
-            )
+            topic = _assign_topic(q_lower, dynamic_topics)
             if topic:
                 clusters[topic].append(m)
 
@@ -137,14 +144,17 @@ class CombinatorialStrategy(BaseStrategy):
         # Build a list of (market, yes_token_id, no_token_id, yes_mid, no_mid, price_level)
         market_info = []
         for m in markets:
-            yes_tok = next(
-                (t for t in m.tokens if t.outcome.lower() == "yes"),
-                m.tokens[0] if m.tokens else None,
-            )
-            no_tok = next(
-                (t for t in m.tokens if t.outcome.lower() == "no"),
-                m.tokens[1] if len(m.tokens) > 1 else None,
-            )
+            yes_tok = no_tok = None
+            for t in m.tokens:
+                ol = t.outcome.lower()
+                if ol == "yes":
+                    yes_tok = t
+                elif ol == "no":
+                    no_tok = t
+            if not yes_tok and m.tokens:
+                yes_tok = m.tokens[0]
+            if not no_tok and len(m.tokens) > 1:
+                no_tok = m.tokens[1]
             if not yes_tok or not no_tok:
                 continue
             yes_book = orderbooks.get(yes_tok.token_id)
@@ -184,7 +194,7 @@ class CombinatorialStrategy(BaseStrategy):
 
             # Violation: P(above HIGH) > P(above LOW)
             if high_yes > low_yes + 0.01:
-                edge = high_yes - low_yes - 2 * (FEE_RATE + SLIPPAGE_RATE)
+                edge = high_yes - low_yes - _FEE_ROUND_TRIP
                 min_edge = self.config.strategies.combo_min_edge
                 if edge >= min_edge:
                     arb_opportunities.labels(strategy="combinatorial").inc()
@@ -197,6 +207,7 @@ class CombinatorialStrategy(BaseStrategy):
                         f"P(>{low_m['price_level']:,.0f})={low_yes:.3f} | "
                         f"edge={edge:.3f} | size=${size_usdc:.2f}"
                     )
+                    has_high_pos = high_m["yes_token_id"] in self.portfolio.positions
                     # Buy the underpriced "low" YES, sell the overpriced "high" YES
                     if low_m["yes_ask"]:
                         signals.append(Signal(
@@ -209,9 +220,7 @@ class CombinatorialStrategy(BaseStrategy):
                             notes=f"Dominance: buy LOW P(>{low_m['price_level']:,.0f})",
                             metadata={"topic": topic, "price_level": low_m["price_level"]},
                         ))
-                    if high_m["yes_bid"] and high_m["yes_token_id"] in [
-                        pos for pos in self.portfolio.positions
-                    ]:
+                    if high_m["yes_bid"] and has_high_pos:
                         signals.append(Signal(
                             strategy="combinatorial",
                             token_id=high_m["yes_token_id"],
@@ -242,9 +251,9 @@ class CombinatorialStrategy(BaseStrategy):
         signals = []
         total_prob = sum(m["yes_mid"] for m in market_info)
 
-        if total_prob > 1.0 + 2 * (FEE_RATE + SLIPPAGE_RATE):
+        if total_prob > 1.0 + _FEE_ROUND_TRIP:
             excess = total_prob - 1.0
-            edge = excess - 2 * len(market_info) * (FEE_RATE + SLIPPAGE_RATE)
+            edge = excess - len(market_info) * _FEE_ROUND_TRIP
             if edge < self.config.strategies.combo_min_edge:
                 return signals
 

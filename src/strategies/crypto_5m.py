@@ -32,9 +32,10 @@ from __future__ import annotations
 import re as _re
 import time
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
-from src.exchange.polymarket import Market, Orderbook
+from src.exchange.polymarket import Market, Orderbook, Token
 from src.strategies.base import BaseStrategy, Signal
 from src.utils.ai_research import grok
 from src.utils.constants import MIN_TRADE_USDC
@@ -82,15 +83,17 @@ def _extract_crypto_symbol(question: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
-def _seconds_to_window_close(end_date_iso: str) -> float | None:
+def _seconds_to_window_close(
+    end_date_iso: str, now_utc: datetime | None = None
+) -> float | None:
     """Return seconds until this market's window closes, or None if unparseable."""
     try:
-        from datetime import datetime, timezone
+        now = now_utc if now_utc is not None else datetime.now(timezone.utc)
         s = end_date_iso.strip().rstrip("Z")
         if "T" not in s:
             s += "T00:00:00"
         end = datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
-        return (end - datetime.now(timezone.utc)).total_seconds()
+        return (end - now).total_seconds()
     except Exception:
         return None
 
@@ -103,10 +106,14 @@ def _compute_move_pct(price_history: deque, window_s: float) -> float | None:
     now = time.time()
     cutoff = now - window_s
     old_ticks = [(p, t) for p, t in price_history if t >= cutoff]
-    if len(old_ticks) < 2:
+    return _move_pct_from_ticks(old_ticks)
+
+
+def _move_pct_from_ticks(ticks: list[tuple[float, float]]) -> float | None:
+    if len(ticks) < 2:
         return None
-    oldest_price = old_ticks[0][0]
-    newest_price = old_ticks[-1][0]
+    oldest_price = ticks[0][0]
+    newest_price = ticks[-1][0]
     if oldest_price <= 0:
         return None
     return (newest_price - oldest_price) / oldest_price
@@ -120,6 +127,10 @@ def _compute_medium_trend(price_history: deque, window_s: float = MEDIUM_TREND_W
     now = time.time()
     cutoff = now - window_s
     ticks = [(p, t) for p, t in price_history if t >= cutoff]
+    return _medium_trend_from_ticks(ticks)
+
+
+def _medium_trend_from_ticks(ticks: list[tuple[float, float]]) -> str | None:
     if len(ticks) < 10:
         return None
     n = len(ticks)
@@ -131,6 +142,47 @@ def _compute_medium_trend(price_history: deque, window_s: float = MEDIUM_TREND_W
     den = sum((xs[i] - x_mean) ** 2 for i in range(n)) or 1e-9
     slope = num / den
     return "UP" if slope > 0 else "DOWN"
+
+
+def _btc_ticks_for_oracle(
+    price_history: deque, now: float
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """
+    Single pass over BTC history: ticks for 30s move vs 600s trend windows.
+    Avoids duplicating full deque scans each scan cycle.
+    """
+    cu30 = now - ORACLE_LAG_LOOKBACK_S
+    cu600 = now - MEDIUM_TREND_WINDOW_S
+    t30: list[tuple[float, float]] = []
+    t600: list[tuple[float, float]] = []
+    for p, t in price_history:
+        if t < cu600:
+            continue
+        t600.append((p, t))
+        if t >= cu30:
+            t30.append((p, t))
+    return t30, t600
+
+
+def _resolve_yes_no_tokens(market: Market) -> tuple[Token | None, Token | None]:
+    """Match Polymarket crypto short token naming (yes/no/up/down) in ≤2 passes."""
+    yes_token = no_token = None
+    for t in market.tokens:
+        ol = t.outcome.lower()
+        if ol == "yes":
+            yes_token = t
+        elif ol in ("no", "down"):
+            no_token = t
+    if yes_token and no_token:
+        return yes_token, no_token
+    yes_token = no_token = None
+    for t in market.tokens:
+        ol = t.outcome.lower()
+        if ol in ("yes", "up") and not yes_token:
+            yes_token = t
+        elif ol in ("no", "down") and not no_token:
+            no_token = t
+    return yes_token, no_token
 
 
 class CryptoShortStrategy(BaseStrategy):
@@ -166,6 +218,8 @@ class CryptoShortStrategy(BaseStrategy):
 
         if not markets:
             return []
+
+        now_utc = datetime.now(timezone.utc)
 
         # Log Grok status once at startup
         if not self._grok_status_logged:
@@ -221,8 +275,10 @@ class CryptoShortStrategy(BaseStrategy):
         _medium_trend: str | None = None
 
         if _oracle_lag_allowed:
-            move_pct = _compute_move_pct(self._btc_price_history, ORACLE_LAG_LOOKBACK_S)
-            _medium_trend = _compute_medium_trend(self._btc_price_history)
+            _now_ts = time.time()
+            _ticks30, _ticks600 = _btc_ticks_for_oracle(self._btc_price_history, _now_ts)
+            move_pct = _move_pct_from_ticks(_ticks30)
+            _medium_trend = _medium_trend_from_ticks(_ticks600)
 
             if move_pct is not None and abs(move_pct) >= oracle_min_move:
                 _oracle_move_pct = move_pct
@@ -257,14 +313,11 @@ class CryptoShortStrategy(BaseStrategy):
             if market.condition_id in self._entered:
                 continue
 
-            yes_token = next((t for t in market.tokens if t.outcome.lower() == "yes"), None)
-            no_token  = next((t for t in market.tokens if t.outcome.lower() in ("no", "down")), None)
-            if not yes_token or not no_token:
-                # Try up/down naming
-                yes_token = next((t for t in market.tokens if t.outcome.lower() in ("yes", "up")), None)
-                no_token  = next((t for t in market.tokens if t.outcome.lower() in ("no", "down")), None)
+            yes_token, no_token = _resolve_yes_no_tokens(market)
             if not yes_token or not no_token:
                 continue
+
+            symbol_q = _extract_crypto_symbol(market.question)
 
             yes_book = orderbooks.get(yes_token.token_id)
             no_book  = orderbooks.get(no_token.token_id)
@@ -279,7 +332,7 @@ class CryptoShortStrategy(BaseStrategy):
             if yes_ask is None or no_ask is None:
                 continue
 
-            seconds_left = _seconds_to_window_close(market.end_date_iso)
+            seconds_left = _seconds_to_window_close(market.end_date_iso, now_utc)
             if seconds_left is None or seconds_left <= 0:
                 continue
 
@@ -351,8 +404,7 @@ class CryptoShortStrategy(BaseStrategy):
                 and seconds_left <= ORACLE_LAG_MAX_SECONDS_LEFT  # not too early
             ):
                 # Only fire on BTC markets (oracle lag is Chainlink BTC/USD specific)
-                symbol = _extract_crypto_symbol(market.question)
-                if symbol == "BTC":
+                if symbol_q == "BTC":
                     if _oracle_direction == "YES":
                         entry_price = yes_ask
                         token = yes_token
@@ -420,30 +472,29 @@ class CryptoShortStrategy(BaseStrategy):
                         # ── Grok sentiment gate (YES snipe) ──────────────
                         grok_direction: str | None = None
                         grok_strength: float | None = None
-                        symbol = _extract_crypto_symbol(market.question)
-                        if symbol and grok.enabled:
+                        if symbol_q and grok.enabled:
                             try:
-                                momentum = await grok.get_crypto_momentum(symbol)
+                                momentum = await grok.get_crypto_momentum(symbol_q)
                                 grok_direction = momentum.get("direction", "sideways")
                                 grok_strength = momentum.get("strength", 0.0)
 
                                 if grok_strength >= 0.5 and grok_direction == "up":
                                     # Grok confirms YES snipe direction
                                     self.log(
-                                        f"[GROK CONFIRM] {symbol} momentum={grok_direction} "
+                                        f"[GROK CONFIRM] {symbol_q} momentum={grok_direction} "
                                         f"strength={grok_strength:.2f}"
                                     )
                                 elif grok_strength >= 0.5 and grok_direction not in ("up", "sideways"):
                                     # Grok contradicts — skip this snipe
                                     self.log(
-                                        f"[GROK BLOCK] snipe skipped — {symbol} Grok says "
+                                        f"[GROK BLOCK] snipe skipped — {symbol_q} Grok says "
                                         f"{grok_direction} (strength={grok_strength:.2f})",
                                         "debug",
                                     )
                                     continue  # skip to next market
                                 # else: Grok unclear (strength < 0.5 or sideways) — proceed
                             except Exception as exc:
-                                self.log(f"[GROK WARN] get_crypto_momentum failed for {symbol}: {exc}", "warning")
+                                self.log(f"[GROK WARN] get_crypto_momentum failed for {symbol_q}: {exc}", "warning")
                                 # Do not block snipe on Grok error
                         # ─────────────────────────────────────────────────
 
@@ -471,8 +522,8 @@ class CryptoShortStrategy(BaseStrategy):
                                     "net_edge": net_edge,
                                     "seconds_left": seconds_left,
                                     "condition_id": market.condition_id,
-                                    "grok_direction": grok_direction if symbol else None,
-                                    "grok_strength": grok_strength if symbol else None,
+                                    "grok_direction": grok_direction if symbol_q else None,
+                                    "grok_strength": grok_strength if symbol_q else None,
                                 },
                             ))
 
@@ -482,30 +533,29 @@ class CryptoShortStrategy(BaseStrategy):
                         # ── Grok sentiment gate (NO snipe) ───────────────
                         grok_direction = None
                         grok_strength = None
-                        symbol = _extract_crypto_symbol(market.question)
-                        if symbol and grok.enabled:
+                        if symbol_q and grok.enabled:
                             try:
-                                momentum = await grok.get_crypto_momentum(symbol)
+                                momentum = await grok.get_crypto_momentum(symbol_q)
                                 grok_direction = momentum.get("direction", "sideways")
                                 grok_strength = momentum.get("strength", 0.0)
 
                                 if grok_strength >= 0.5 and grok_direction == "down":
                                     # Grok confirms NO snipe direction
                                     self.log(
-                                        f"[GROK CONFIRM] {symbol} momentum={grok_direction} "
+                                        f"[GROK CONFIRM] {symbol_q} momentum={grok_direction} "
                                         f"strength={grok_strength:.2f}"
                                     )
                                 elif grok_strength >= 0.5 and grok_direction not in ("down", "sideways"):
                                     # Grok contradicts — skip this snipe
                                     self.log(
-                                        f"[GROK BLOCK] snipe skipped — {symbol} Grok says "
+                                        f"[GROK BLOCK] snipe skipped — {symbol_q} Grok says "
                                         f"{grok_direction} (strength={grok_strength:.2f})",
                                         "debug",
                                     )
                                     continue  # skip to next market
                                 # else: Grok unclear (strength < 0.5 or sideways) — proceed
                             except Exception as exc:
-                                self.log(f"[GROK WARN] get_crypto_momentum failed for {symbol}: {exc}", "warning")
+                                self.log(f"[GROK WARN] get_crypto_momentum failed for {symbol_q}: {exc}", "warning")
                                 # Do not block snipe on Grok error
                         # ─────────────────────────────────────────────────
 
@@ -533,8 +583,8 @@ class CryptoShortStrategy(BaseStrategy):
                                     "net_edge": net_edge,
                                     "seconds_left": seconds_left,
                                     "condition_id": market.condition_id,
-                                    "grok_direction": grok_direction if symbol else None,
-                                    "grok_strength": grok_strength if symbol else None,
+                                    "grok_direction": grok_direction if symbol_q else None,
+                                    "grok_strength": grok_strength if symbol_q else None,
                                 },
                             ))
 
