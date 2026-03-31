@@ -13,6 +13,7 @@ COPY . .
 RUN mkdir -p logs
 
 # Expose dashboard port. Railway routes $PORT here; metrics stay on 8000 (internal only).
-EXPOSE 5000
+# PORT=8080 is set explicitly in Railway env vars.
+EXPOSE 8080
 
 CMD ["python", "main.py"]
