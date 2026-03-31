@@ -1440,11 +1440,13 @@ class ArbBot:
         try:
             with open(path) as f:
                 saved = json.load(f)
-            # Don't let saved meta-agent overrides disable strategies that are
-            # explicitly enabled via env vars — env vars always win for STRATEGY_* flags.
+            # Env vars always win — any key explicitly set in the environment
+            # cannot be overridden by the meta-agent's saved config.
+            # This prevents catastrophic values (e.g. MIN_TRADE_INTERVAL=345600,
+            # MAX_POSITION_SIZE=0.0001) from destroying trading after a restart.
             filtered = {
                 k: v for k, v in saved.items()
-                if not (k.startswith("STRATEGY_") and os.getenv(k, "") != "")
+                if os.getenv(k, "") == ""
             }
             if len(filtered) < len(saved):
                 skipped = [k for k in saved if k not in filtered]
