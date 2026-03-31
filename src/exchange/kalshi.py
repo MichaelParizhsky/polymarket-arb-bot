@@ -400,25 +400,33 @@ class KalshiClient:
 def _parse_market(raw: dict) -> KalshiMarket:
     """
     Convert a raw Kalshi market dict into a KalshiMarket dataclass.
-    Prices from the API are in cents; divide by 100 to get the 0-1 range.
-    """
-    result = raw.get("result", raw)  # some endpoints nest under "result"
 
-    def _cents(val) -> float:
-        return float(val or 0) / 100.0
+    The new api.elections.kalshi.com API returns prices as dollar strings
+    in the 0-1 range (e.g. "0.5500") via the *_dollars fields.
+    The old trading-api.kalshi.com API returned prices in cents (integers).
+    We support both: prefer *_dollars fields, fall back to cent fields.
+    """
+    def _price(dollars_val, cents_val=None) -> float:
+        # New API: *_dollars fields, already in 0-1 range as strings/floats
+        if dollars_val is not None:
+            return float(dollars_val or 0)
+        # Old API: integer cents
+        if cents_val is not None:
+            return float(cents_val or 0) / 100.0
+        return 0.0
 
     return KalshiMarket(
-        ticker=str(result.get("ticker", "")),
-        title=str(result.get("title", "")),
-        yes_bid=_cents(result.get("yes_bid")),
-        yes_ask=_cents(result.get("yes_ask")),
-        no_bid=_cents(result.get("no_bid")),
-        no_ask=_cents(result.get("no_ask")),
-        volume=float(result.get("volume", 0)),
-        open_interest=float(result.get("open_interest", 0)),
-        expiry_time=str(result.get("expiration_time") or result.get("close_time", "")),
-        category=str(result.get("category", "")),
-        status=str(result.get("status", "")),
+        ticker=str(raw.get("ticker", "")),
+        title=str(raw.get("title", "")),
+        yes_bid=_price(raw.get("yes_bid_dollars"), raw.get("yes_bid")),
+        yes_ask=_price(raw.get("yes_ask_dollars"), raw.get("yes_ask")),
+        no_bid=_price(raw.get("no_bid_dollars"), raw.get("no_bid")),
+        no_ask=_price(raw.get("no_ask_dollars"), raw.get("no_ask")),
+        volume=float(raw.get("volume_fp") or raw.get("volume") or 0),
+        open_interest=float(raw.get("open_interest_fp") or raw.get("open_interest") or 0),
+        expiry_time=str(raw.get("expiration_time") or raw.get("close_time", "")),
+        category=str(raw.get("category", "")),
+        status=str(raw.get("status", "")),
     )
 
 
