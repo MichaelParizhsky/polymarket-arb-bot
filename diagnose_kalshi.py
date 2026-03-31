@@ -17,7 +17,7 @@ key_id     = os.getenv("KALSHI_API_KEY_ID", "")
 priv_key   = os.getenv("KALSHI_PRIVATE_KEY", "")
 demo_mode  = os.getenv("KALSHI_DEMO", "").lower() in ("1", "true", "yes")
 
-BASE = "https://demo-api.kalshi.co/trade-api/v2" if demo_mode else "https://trading-api.kalshi.com/trade-api/v2"
+BASE = "https://demo-api.kalshi.co/trade-api/v2" if demo_mode else "https://api.elections.kalshi.com/trade-api/v2"
 
 print("=" * 60)
 print("KALSHI CREDENTIAL DIAGNOSTIC")

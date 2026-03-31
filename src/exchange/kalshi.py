@@ -105,8 +105,8 @@ class KalshiClient:
     """
 
     # Production vs demo — keys are environment-specific and not interchangeable.
-    # Set KALSHI_DEMO=true if your API key was created on demo-api.kalshi.co.
-    _PROD_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+    # Set KALSHI_DEMO=true if your API key was created on the demo environment.
+    _PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
     _DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
     _CACHE_TTL = 30.0  # seconds
 
