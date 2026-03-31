@@ -2,22 +2,27 @@
 AI Research utilities for the Polymarket arb bot.
 
 Provides:
-  - PerplexityClient: real-time web search (sonar / sonar-pro / sonar-reasoning-pro)
-    + Agent API for multi-step autonomous research (web_search + fetch_url tools)
+  - PerplexicaClient: locally-run web search via Vane (formerly Perplexica)
+    running on Docker + Ollama. Drop-in replacement for PerplexityClient.
+    Env vars:
+      VANE_URL            — base URL (default: http://localhost:3000)
+      VANE_CHAT_MODEL     — Ollama model key (default: llama3.1:8b)
+      VANE_EMBEDDING_MODEL — embedding model key (default: llama3.1:8b)
   - GrokClient: live X/Twitter intelligence via xAI API (OpenAI-compatible)
 
-Both clients degrade gracefully when API keys are absent.
+Both clients degrade gracefully when unavailable.
 Usage:
     from src.utils.ai_research import perplexity, grok
     text = await perplexity.search("NBA game 4 result tonight")
-    text = await perplexity.agent("Research everything about: Will BTC top $100k this week?")
+    text = await perplexity.research("Will BTC top $100k this week?")
     sentiment = await grok.search_x("BTC price move last 30 minutes")
 """
 from __future__ import annotations
 
 import json
 import os
-import time
+import re
+import uuid
 from typing import Any
 
 import httpx
@@ -25,100 +30,175 @@ import httpx
 from src.utils.logger import logger
 
 # ---------------------------------------------------------------------------
-# Perplexity Sonar client
+# Vane (Perplexica) local search client
 # ---------------------------------------------------------------------------
 
-class PerplexityClient:
+class PerplexicaClient:
     """
-    Thin async wrapper around Perplexity's OpenAI-compatible chat/completions
-    endpoint.  All models include live web search grounding.
+    Async wrapper around the locally-running Vane (Perplexica) search engine.
+    Vane runs via Docker on localhost:3000 and uses Ollama for LLM inference.
 
-    Models (2026 pricing):
-      sonar                — $1/1M in+out  + $5/1K searches  (fast polling)
-      sonar-pro            — $3/$15/1M     + $5/1K searches  (high factuality)
-      sonar-reasoning-pro  — $2/$8/1M      + $5/1K searches  (CoT + live web)
-      sonar-deep-research  — $2/$8/1M      + $5/1K + reasoning (exhaustive)
+    Uses the /api/search endpoint with stream=false for simplicity.
+    Provider IDs are auto-discovered from /api/providers on first use.
     """
 
-    BASE_URL = "https://api.perplexity.ai"
-    _DEFAULT_TIMEOUT = 30.0
+    # llama3.1:8b on CPU takes ~60s per response; full pipeline (classify + search + synthesize)
+    # takes 120-180s. Use VANE_TIMEOUT env var to tune for your hardware.
+    _DEFAULT_TIMEOUT = float(os.getenv("VANE_TIMEOUT", "180"))
+    _DEEP_TIMEOUT = float(os.getenv("VANE_DEEP_TIMEOUT", "300"))
 
     def __init__(self) -> None:
-        self.api_key: str = os.getenv("PERPLEXITY_API_KEY", "")
-        self._auth_failed: bool = False  # set True on 401 — stops retrying bad keys
+        self.base_url: str = os.getenv("VANE_URL", "http://localhost:3000").rstrip("/")
+        self.chat_model_key: str = os.getenv("VANE_CHAT_MODEL", "llama3.1:8b")
+        # Default embedding to Transformers (in-process WASM/ONNX, ~1s vs ~60s for Ollama)
+        self.embedding_model_key: str = os.getenv("VANE_EMBEDDING_MODEL", "Xenova/all-MiniLM-L6-v2")
+        self._chat_provider_id: str | None = None
+        self._embedding_provider_id: str | None = None
+        self._available: bool | None = None  # None = not yet checked
+
+    async def _discover_providers(self) -> bool:
+        """
+        Fetch /api/providers and cache the provider IDs for the configured models.
+        Returns True if discovery succeeded.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{self.base_url}/api/providers")
+                r.raise_for_status()
+                providers: list[dict] = r.json().get("providers", [])
+
+            for provider in providers:
+                pid = provider.get("id", "")
+                chat_keys = [m["key"] for m in provider.get("chatModels", [])]
+                # Match embedding by key OR by name (some providers use display name)
+                embed_models = provider.get("embeddingModels", [])
+                embed_keys = [m["key"] for m in embed_models]
+                embed_names = [m["name"] for m in embed_models]
+                if self.chat_model_key in chat_keys:
+                    self._chat_provider_id = pid
+                if (self.embedding_model_key in embed_keys
+                        or self.embedding_model_key in embed_names):
+                    self._embedding_provider_id = pid
+
+            if self._chat_provider_id and self._embedding_provider_id:
+                logger.info(
+                    f"Vane providers discovered — chat: {self._chat_provider_id[:8]}…, "
+                    f"embed: {self._embedding_provider_id[:8]}…"
+                )
+                return True
+
+            logger.warning(
+                f"Vane: model '{self.chat_model_key}' not found in any provider. "
+                "Run `ollama pull llama3.1:8b` and restart Vane."
+            )
+            return False
+        except Exception as exc:
+            logger.warning(f"Vane provider discovery failed: {exc}")
+            return False
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key) and not self._auth_failed
+        """True once providers have been discovered successfully."""
+        return self._available is True
+
+    async def _ensure_ready(self) -> bool:
+        """Discover providers on first use; cache the result."""
+        if self._available is None:
+            self._available = await self._discover_providers()
+        return self._available
+
+    def _build_payload(
+        self,
+        query: str,
+        mode: str = "balanced",
+        sources: list[str] | None = None,
+        system_instructions: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "query": query,
+            "optimizationMode": mode,
+            "sources": sources or ["web"],
+            "history": [],
+            "chatModel": {
+                "providerId": self._chat_provider_id,
+                "key": self.chat_model_key,
+            },
+            "embeddingModel": {
+                "providerId": self._embedding_provider_id,
+                "key": self.embedding_model_key,
+            },
+            "systemInstructions": system_instructions,
+        }
+
+    async def _query(
+        self,
+        query: str,
+        mode: str = "balanced",
+        sources: list[str] | None = None,
+        system_instructions: str = "",
+        timeout: float | None = None,
+    ) -> str:
+        if not await self._ensure_ready():
+            return ""
+        try:
+            payload = self._build_payload(query, mode, sources, system_instructions)
+            payload["stream"] = True  # use streaming to avoid non-streaming timeout
+
+            chunks: list[str] = []
+            effective_timeout = timeout or self._DEFAULT_TIMEOUT
+
+            async with httpx.AsyncClient(timeout=effective_timeout) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/api/search",
+                    json=payload,
+                ) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        event_type = event.get("type")
+                        if event_type == "response":
+                            chunks.append(event.get("data", ""))
+                        elif event_type == "done":
+                            break
+                        elif event_type == "error":
+                            logger.warning(f"Vane stream error: {event.get('data')}")
+                            break
+
+            return "".join(chunks)
+        except Exception as exc:
+            logger.warning(f"Vane search error: {exc}")
+            return ""
 
     async def search(self, query: str, model: str = "sonar") -> str:
         """
-        Single-turn grounded search.  Returns the answer text.
-        Cheapest option — use for high-frequency news polling.
+        Fast web search. `model` param is ignored (kept for API compatibility
+        with callers that passed a Perplexity model name).
+        Uses 'speed' optimization for lowest latency.
         """
-        if not self.enabled:
-            return ""
-        try:
-            async with httpx.AsyncClient(timeout=self._DEFAULT_TIMEOUT) as client:
-                r = await client.post(
-                    f"{self.BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": query}],
-                        "return_citations": True,
-                    },
-                )
-                r.raise_for_status()
-                data = r.json()
-                return data["choices"][0]["message"]["content"]
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
-                self._auth_failed = True
-                logger.warning("Perplexity API key is invalid (401) — disabling Perplexity for this session. Fix PERPLEXITY_API_KEY or remove it.")
-            else:
-                logger.warning(f"Perplexity search error: {exc}")
-            return ""
-        except Exception as exc:
-            logger.warning(f"Perplexity search error: {exc}")
-            return ""
+        return await self._query(query, mode="speed", sources=["web"])
 
     async def research(self, query: str) -> str:
-        """
-        Chain-of-thought reasoning + live web.  Use before high-stakes trades.
-        """
-        return await self.search(query, model="sonar-reasoning-pro")
+        """Deeper web search with balanced quality/speed."""
+        return await self._query(query, mode="balanced", sources=["web"])
 
     async def deep_research(self, query: str) -> str:
         """
-        Exhaustive multi-step research.  Slow (10-30s) but comprehensive.
-        Use sparingly — in meta-agent or pre-session analysis only.
+        Exhaustive research using quality mode. Slow but comprehensive.
+        Use sparingly — meta-agent or pre-session analysis only.
         """
-        if not self.enabled:
-            return ""
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                r = await client.post(
-                    f"{self.BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "sonar-deep-research",
-                        "messages": [{"role": "user", "content": query}],
-                        "reasoning_effort": "high",
-                    },
-                )
-                r.raise_for_status()
-                data = r.json()
-                return data["choices"][0]["message"]["content"]
-        except Exception as exc:
-            logger.warning(f"Perplexity deep_research error: {exc}")
-            return ""
+        return await self._query(
+            query,
+            mode="quality",
+            sources=["web"],
+            timeout=self._DEEP_TIMEOUT,
+        )
 
     async def search_structured(
         self,
@@ -127,36 +207,43 @@ class PerplexityClient:
         model: str = "sonar-reasoning-pro",
     ) -> dict:
         """
-        Return a JSON object matching *schema* (response_format JSON mode).
-        schema format: {"type": "json_schema", "json_schema": {...}}
+        Return a JSON object. Since Vane doesn't have native JSON-mode,
+        we append instructions to force JSON output and parse the response.
+        `schema` param is accepted for API compatibility but used only as
+        a hint in the system instructions.
         """
-        if not self.enabled:
-            return {}
-        try:
-            async with httpx.AsyncClient(timeout=self._DEFAULT_TIMEOUT) as client:
-                r = await client.post(
-                    f"{self.BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": query}],
-                        "response_format": schema,
-                    },
-                )
-                r.raise_for_status()
-                content = r.json()["choices"][0]["message"]["content"]
-                # Strip <think>...</think> reasoning tokens if present
-                if "<think>" in content:
-                    end = content.find("</think>")
-                    content = content[end + 8:].strip() if end != -1 else content
-                return json.loads(content)
-        except Exception as exc:
-            logger.warning(f"Perplexity structured search error: {exc}")
-            return {}
+        schema_hint = ""
+        if "json_schema" in schema:
+            inner = schema["json_schema"]
+            schema_hint = f"\nExpected JSON schema:\n{json.dumps(inner, indent=2)}"
 
+        system = (
+            "You are a research assistant. Return ONLY valid JSON with no markdown, "
+            "no code fences, no explanations. Output raw JSON only." + schema_hint
+        )
+        raw = await self._query(
+            query,
+            mode="balanced",
+            sources=["web"],
+            system_instructions=system,
+        )
+        if not raw:
+            return {}
+        # Strip any markdown fences or <think> blocks if model added them
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw).rstrip("` \n")
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Try to extract first JSON object from the response
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+            logger.warning(f"Vane structured response is not valid JSON: {raw[:200]}")
+            return {}
 
     async def agent(
         self,
@@ -164,12 +251,13 @@ class PerplexityClient:
         model: str = "sonar-pro",
         timeout: float = 60.0,
     ) -> str:
-        """
-        Deep research via sonar-pro (live web + chain-of-thought).
-        The /v1/agent endpoint requires special beta access; sonar-pro via
-        /chat/completions gives equivalent quality for standard accounts.
-        """
-        return await self.search(prompt, model=model)
+        """Multi-step research using quality mode. `model` param ignored."""
+        return await self._query(
+            prompt,
+            mode="quality",
+            sources=["web"],
+            timeout=timeout,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -298,5 +386,5 @@ class GrokClient:
 # Module-level singletons
 # ---------------------------------------------------------------------------
 
-perplexity = PerplexityClient()
+perplexity = PerplexicaClient()
 grok = GrokClient()

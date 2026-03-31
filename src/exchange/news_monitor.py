@@ -2,7 +2,7 @@
 NewsMonitor — background news polling for the event-driven strategy.
 
 Polls free news sources every 5 minutes (configurable):
-  - Perplexity Sonar (primary, when PERPLEXITY_API_KEY is set)
+  - Vane (Perplexica) local search (primary, when Docker container is running)
   - Google News RSS (free, no API key required; always runs as fallback)
   - CryptoPanic free endpoint (attempted without auth; skipped on failure)
 

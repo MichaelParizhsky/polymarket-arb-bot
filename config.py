@@ -66,8 +66,12 @@ class KalshiConfig:
 
 @dataclass
 class AIResearchConfig:
-    """API keys for real-time AI research integrations."""
-    perplexity_api_key: str = field(default_factory=lambda: os.getenv("PERPLEXITY_API_KEY", ""))
+    """API keys and URLs for real-time AI research integrations."""
+    # Vane (Perplexica) — local Docker + Ollama search engine
+    vane_url: str = field(default_factory=lambda: os.getenv("VANE_URL", "http://localhost:3000"))
+    vane_chat_model: str = field(default_factory=lambda: os.getenv("VANE_CHAT_MODEL", "llama3.1:8b"))
+    vane_embedding_model: str = field(default_factory=lambda: os.getenv("VANE_EMBEDDING_MODEL", "llama3.1:8b"))
+    # Optional cloud fallbacks
     grok_api_key: str = field(default_factory=lambda: os.getenv("GROK_API_KEY", ""))
     mirofish_url: str = field(default_factory=lambda: os.getenv("MIROFISH_URL", ""))
 
