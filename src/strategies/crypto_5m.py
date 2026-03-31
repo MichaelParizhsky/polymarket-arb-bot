@@ -420,25 +420,26 @@ class CryptoShortStrategy(BaseStrategy):
                         outcome = "NO"
 
                     if entry_price is not None and entry_price < 1.0:
-                        raw_edge = (1.0 - entry_price) - TAKER_FEE
-                        fee_adj_edge = raw_edge - TAKER_FEE  # conservative: double taker fee
+                        # net_edge: gross payout (1.0 - entry) minus single taker fee on entry.
+                        # Resolution pays $1.00 with no exit fee, so only one fee applies.
+                        net_edge = (1.0 - entry_price) - TAKER_FEE
 
-                        if fee_adj_edge >= oracle_min_edge:
+                        if net_edge >= oracle_min_edge:
                             arb_opportunities.labels(strategy="crypto_5m").inc()
-                            edge_detected.labels(strategy="crypto_5m").observe(fee_adj_edge)
+                            edge_detected.labels(strategy="crypto_5m").observe(net_edge)
 
                             # Size using confidence tier: HIGH=full Kelly, MED=0.6x, LOW=0.3x
                             confidence_scale = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}.get(
                                 _oracle_confidence, 0.5
                             )
-                            raw_size = self.risk.size_position(edge=fee_adj_edge, base_size=max_spend)
+                            raw_size = self.risk.size_position(edge=net_edge, base_size=max_spend)
                             size_usdc = max(MIN_TRADE_USDC, raw_size * confidence_scale)
 
                             if size_usdc >= MIN_TRADE_USDC:
                                 self._entered[market.condition_id] = time.time()
                                 self.log(
                                     f"[ORACLE LAG] {outcome} @ {entry_price:.4f} | "
-                                    f"btc_move={_oracle_move_pct:.4%} edge={fee_adj_edge:.4f} "
+                                    f"btc_move={_oracle_move_pct:.4%} edge={net_edge:.4f} "
                                     f"conf={_oracle_confidence} trend={_medium_trend} | "
                                     f"{seconds_left:.0f}s left | {market.question[:50]}"
                                 )
@@ -448,7 +449,7 @@ class CryptoShortStrategy(BaseStrategy):
                                     side="BUY",
                                     price=entry_price,
                                     size_usdc=size_usdc,
-                                    edge=fee_adj_edge,
+                                    edge=net_edge,
                                     notes=(
                                         f"[ORACLE_LAG] {outcome} | "
                                         f"btc_move={_oracle_move_pct:.4%} "
@@ -458,7 +459,7 @@ class CryptoShortStrategy(BaseStrategy):
                                         "outcome": outcome,
                                         "arb_type": "oracle_lag",
                                         "btc_move_pct": _oracle_move_pct,
-                                        "fee_adjusted_edge": fee_adj_edge,
+                                        "fee_adjusted_edge": net_edge,
                                         "seconds_left": seconds_left,
                                         "confidence": _oracle_confidence,
                                         "medium_trend": _medium_trend,

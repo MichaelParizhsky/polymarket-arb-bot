@@ -317,13 +317,19 @@ class MarketMakingStrategy(BaseStrategy):
             self.log(f"MM ask blocked: {reason_ask}", "debug")
         else:
             ask_contracts = order_size / ask_price
+            # Cap sell size at actual inventory to avoid "Cannot sell N: position=M" failures.
+            # In paper mode we simulate both sides but must respect what we actually hold.
+            if inventory > 0:
+                ask_usdc = min(order_size, inventory * ask_price)
+            else:
+                ask_usdc = order_size  # paper-only: no inventory yet, simulate full size
             if inventory >= ask_contracts or self.config.paper_trading:
                 signals.append(Signal(
                     strategy="market_making",
                     token_id=token_id,
                     side="SELL",
                     price=ask_price,
-                    size_usdc=order_size,
+                    size_usdc=ask_usdc,
                     edge=half_spread,
                     notes=f"MM ask | spread={spread_bps}bps | inv={inventory:.1f}",
                     metadata={

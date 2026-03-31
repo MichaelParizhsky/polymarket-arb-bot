@@ -853,6 +853,7 @@ class ArbBot:
                     end_date_iso=end_dt,
                 )
             else:
+                n_closed_before = len(self.portfolio.closed_positions)
                 trade = self.portfolio.sell(
                     token_id=sig.token_id,
                     contracts=contracts,
@@ -860,6 +861,11 @@ class ArbBot:
                     strategy=sig.strategy,
                     notes=sig.notes,
                 )
+                # Update Kelly rolling win rate when a sell fully closes a position.
+                # Without this, win_rate stays at bootstrap 0.5 forever in paper mode.
+                if trade and len(self.portfolio.closed_positions) > n_closed_before:
+                    closed = self.portfolio.closed_positions[-1]
+                    self.risk.record_trade_result(closed["strategy"], closed["realized_pnl"])
 
             if trade and not (not self.paper and sig.side == "BUY"):
                 # For paper BUY and all SELL paths: increment metrics here

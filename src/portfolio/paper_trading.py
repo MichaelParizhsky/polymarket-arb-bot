@@ -300,10 +300,22 @@ class PaperPortfolio:
         return round(wins / len(self.closed_positions) * 100, 1)
 
     def strategy_pnl(self) -> dict[str, float]:
+        """
+        Realized P&L per strategy.
+
+        Uses actual position-level PnL (entry vs exit price, fee-adjusted) rather
+        than raw cash flow. Cash flow overstates 'losses' when capital is deployed
+        in open positions, which would incorrectly trigger loss-budget disabling.
+        """
         pnl: dict[str, float] = {}
-        for t in self.trades:
-            amt = t.usdc_amount if t.side == "SELL" else -t.usdc_amount
-            pnl[t.strategy] = pnl.get(t.strategy, 0.0) + amt - t.fee
+        # Fully-closed positions
+        for p in self.closed_positions:
+            strat = p.get("strategy", "unknown")
+            pnl[strat] = pnl.get(strat, 0.0) + p["realized_pnl"]
+        # Partial realized PnL from still-open positions (partial sells)
+        for pos in self.positions.values():
+            if pos.realized_pnl != 0.0:
+                pnl[pos.strategy] = pnl.get(pos.strategy, 0.0) + pos.realized_pnl
         return pnl
 
     def summary(self, price_map: dict[str, float] | None = None) -> str:
