@@ -173,6 +173,7 @@ class ArbBot:
         _gc.freeze()     # mark all current objects as permanent; GC ignores them forever
 
     def _build_strategies(self) -> None:
+        self._strategies = []  # clear before rebuild to avoid duplicates on hot-reload
         cfg = self.config.strategies
         if cfg.combinatorial_enabled:
             self._strategies.append(
@@ -1439,7 +1440,16 @@ class ArbBot:
         try:
             with open(path) as f:
                 saved = json.load(f)
-            applied = self._apply_config_overrides(saved)
+            # Don't let saved meta-agent overrides disable strategies that are
+            # explicitly enabled via env vars — env vars always win for STRATEGY_* flags.
+            filtered = {
+                k: v for k, v in saved.items()
+                if not (k.startswith("STRATEGY_") and os.getenv(k, "") != "")
+            }
+            if len(filtered) < len(saved):
+                skipped = [k for k in saved if k not in filtered]
+                logger.info(f"[Config] Skipping {len(skipped)} meta-agent override(s) overridden by env vars: {skipped}")
+            applied = self._apply_config_overrides(filtered)
             if applied:
                 logger.info(f"[Config] Restored {len(applied)} auto-tuned parameter(s) from disk: {applied}")
         except Exception as exc:
