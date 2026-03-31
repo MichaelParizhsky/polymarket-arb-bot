@@ -339,10 +339,10 @@ class KalshiClient:
         for raw in resp.json().get("markets", []):
             try:
                 markets.append(_parse_market(raw))
-            except (KeyError, TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
                 logger.debug(f"KalshiClient: skipping malformed market entry: {exc}")
 
-        logger.debug(f"KalshiClient: fetched {len(markets)} markets")
+        logger.info(f"KalshiClient: fetched {len(markets)} markets")
         return markets
 
     async def get_markets_cached(self) -> list[KalshiMarket]:
