@@ -29,7 +29,7 @@ from typing import Any
 
 import httpx
 
-from src.utils.ai_research import perplexity
+from src.utils.ai_research import embeddings, perplexity
 from src.utils.logger import logger
 
 try:
@@ -176,8 +176,9 @@ class NewsMonitor:
 
     def get_relevant_news(self, question: str, max_results: int = 5) -> list[dict]:
         """
-        Return up to max_results headlines from the last 6 hours that are
-        most relevant to the given market question.
+        Return up to max_results headlines most relevant to the market question.
+        Uses keyword overlap scoring (sync, always available).
+        For semantic ranking, use get_relevant_news_semantic() from async context.
 
         Each item: {"title", "published", "source", "url", "sentiment"}
         """
@@ -190,16 +191,53 @@ class NewsMonitor:
 
         keywords = self._extract_keywords(question)
         if not keywords:
-            return []  # no keywords = can't determine relevance; return nothing
+            return []
 
         scored = [
             (self._keyword_score(h["title"], keywords), h)
             for h in recent
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
-
-        # Only return headlines with at least one keyword hit
         return [h for score, h in scored if score > 0][:max_results]
+
+    async def get_relevant_news_semantic(
+        self, question: str, max_results: int = 5
+    ) -> list[dict]:
+        """
+        Semantic version of get_relevant_news using nomic-embed-text via Ollama.
+        Falls back to keyword scoring when Ollama is unavailable.
+
+        Cosine similarity against pre-embedded headline titles catches synonyms
+        and phrasing variations that keyword overlap misses (e.g. "Fed cuts"
+        matches "central bank lowers rates").
+        """
+        now = time.time()
+        cutoff = now - _CACHE_MAX_AGE_SECONDS
+        recent = [h for h in self._cache if h.get("_ts", 0) >= cutoff]
+
+        if not recent or not question:
+            return []
+
+        # Try semantic ranking if embeddings available and headlines are pre-embedded
+        if embeddings.enabled:
+            query_vec = await embeddings.embed(question)
+            if query_vec:
+                scored = []
+                for h in recent:
+                    h_vec = h.get("_emb")
+                    if h_vec:
+                        sim = embeddings.cosine(query_vec, h_vec)
+                    else:
+                        # Headline not yet embedded — fall back to keyword for this one
+                        kw = self._extract_keywords(question)
+                        sim = self._keyword_score(h["title"], kw) / max(len(kw), 1) * 0.5
+                    scored.append((sim, h))
+                scored.sort(key=lambda x: x[0], reverse=True)
+                # Minimum similarity threshold — avoids returning completely unrelated news
+                return [h for sim, h in scored if sim > 0.25][:max_results]
+
+        # Fallback: keyword scoring
+        return self.get_relevant_news(question, max_results)
 
     async def get_perplexity_context(self, question: str) -> str:
         """
@@ -286,6 +324,31 @@ class NewsMonitor:
                 f"[NewsMonitor] Cache updated: {len(self._cache)} headlines "
                 f"({len(new_items)} new)"
             )
+
+            # Background-embed new headline titles for semantic ranking.
+            # Fire-and-forget: failures are silently ignored; keyword fallback always works.
+            if new_items and embeddings.enabled:
+                asyncio.create_task(
+                    self._embed_new_headlines(new_items),
+                    name="news_embed",
+                )
+
+    async def _embed_new_headlines(self, headlines: list[dict]) -> None:
+        """
+        Embed headline titles via Ollama and store the vector in-place as '_emb'.
+        Runs as a background task after each cache update.
+        Throttled to avoid blocking the event loop: one embed call at a time.
+        """
+        for h in headlines:
+            title = h.get("title", "")
+            if not title or "_emb" in h:
+                continue
+            try:
+                vec = await embeddings.embed(title)
+                if vec:
+                    h["_emb"] = vec
+            except Exception:
+                pass  # never crash the poll loop
 
     # ------------------------------------------------------------------
     # Perplexity polling

@@ -383,8 +383,101 @@ class GrokClient:
 
 
 # ---------------------------------------------------------------------------
+# Ollama local embedding client
+# ---------------------------------------------------------------------------
+
+class OllamaEmbeddingClient:
+    """
+    Async wrapper for Ollama's local embedding API using nomic-embed-text.
+    ~274 MB model, ~200ms per embedding on CPU.
+
+    Requires: ollama pull nomic-embed-text
+
+    Used by NewsMonitor for semantic headline ranking — replaces keyword
+    overlap scoring with cosine similarity, catching synonyms and phrasing
+    variations that keyword matching misses.
+
+    Env vars:
+      OLLAMA_URL          — base URL (default: http://localhost:11434)
+      OLLAMA_EMBED_MODEL  — model name (default: nomic-embed-text)
+    """
+
+    _DEFAULT_TIMEOUT = 30.0
+
+    def __init__(self) -> None:
+        self.base_url: str = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+        self.model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        self._available: bool | None = None
+        # LRU-style text → vector cache (bounded at 2000 entries)
+        self._cache: dict[str, list[float]] = {}
+        self._cache_max: int = 2000
+
+    async def _check_available(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{self.base_url}/api/tags")
+                r.raise_for_status()
+                models = [m["name"] for m in r.json().get("models", [])]
+                base = self.model.split(":")[0]
+                found = any(base in m for m in models)
+                if not found:
+                    logger.warning(
+                        f"Ollama: '{self.model}' not found. "
+                        f"Run `ollama pull {self.model}` for semantic news ranking."
+                    )
+                return found
+        except Exception as exc:
+            logger.debug(f"Ollama embedding unavailable: {exc}")
+            return False
+
+    @property
+    def enabled(self) -> bool:
+        return self._available is True
+
+    async def _ensure_ready(self) -> bool:
+        if self._available is None:
+            self._available = await self._check_available()
+        return self._available
+
+    async def embed(self, text: str) -> list[float]:
+        """Return embedding vector for text. Returns [] on failure."""
+        if not await self._ensure_ready():
+            return []
+        if text in self._cache:
+            return self._cache[text]
+        try:
+            async with httpx.AsyncClient(timeout=self._DEFAULT_TIMEOUT) as client:
+                r = await client.post(
+                    f"{self.base_url}/api/embeddings",
+                    json={"model": self.model, "prompt": text},
+                )
+                r.raise_for_status()
+                vec: list[float] = r.json().get("embedding", [])
+        except Exception as exc:
+            logger.debug(f"Ollama embed error: {exc}")
+            return []
+        if len(self._cache) >= self._cache_max:
+            del self._cache[next(iter(self._cache))]
+        self._cache[text] = vec
+        return vec
+
+    @staticmethod
+    def cosine(a: list[float], b: list[float]) -> float:
+        """Cosine similarity in [0, 1]. Returns 0.0 if either vector is empty."""
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x * x for x in a) ** 0.5
+        norm_b = sum(x * x for x in b) ** 0.5
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+
+# ---------------------------------------------------------------------------
 # Module-level singletons
 # ---------------------------------------------------------------------------
 
 perplexity = PerplexicaClient()
 grok = GrokClient()
+embeddings = OllamaEmbeddingClient()

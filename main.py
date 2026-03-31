@@ -1209,7 +1209,53 @@ class ArbBot:
                 # --- Now set running=True: Claude call is about to happen ---
                 _dash_mod._meta_agent_running = True
                 _dash_mod._meta_agent_last_error = ""
-                logger.info("Meta-agent: calling Claude for performance analysis...")
+
+                # --- Sonnet triage: decide if Opus reasoning is warranted ---
+                # Sonnet reads health + ROI, outputs confidence score (0-1).
+                # Opus is only called when action_needed=True AND confidence >= threshold.
+                # Routine healthy cycles run on Sonnet alone — saves ~70% Opus cost.
+                _OPUS_THRESHOLD = float(os.getenv("OPUS_CONFIDENCE_THRESHOLD", "0.65"))
+                _triage_system = (
+                    "You are a portfolio health triage agent for a prediction market trading bot. "
+                    "Given health metrics and per-strategy ROI, decide if the situation requires "
+                    "deep reasoning (Opus) or is routine.\n\n"
+                    "Output ONLY valid JSON, no other text:\n"
+                    '{"action_needed": true/false, "confidence": 0.0-1.0, '
+                    '"severity": "routine|moderate|critical", "key_concern": "one line or null"}\n\n'
+                    "action_needed=true if ANY of: health CRITICAL/WEAK, win_rate<40% with >=20 closed, "
+                    "any strategy ROI<-1% with >=10 trades, fee_drag>1.5%, bootstrap=false and proposed changes exist.\n"
+                    "confidence = how clearly the data supports your conclusion (0.9+ = obvious, 0.5 = ambiguous)."
+                )
+                _triage_payload = {
+                    "health": analysis_data.get("health", {}),
+                    "strategy_roi_pct": analysis_data.get("strategy_roi_pct", {}),
+                    "portfolio": analysis_data.get("portfolio", {}),
+                }
+
+                _triage_client = anthropic.AsyncAnthropic(api_key=api_key)
+                _triage_result: dict = {"action_needed": True, "confidence": 1.0, "severity": "routine"}
+                try:
+                    _tr = await _triage_client.messages.create(
+                        model="claude-sonnet-4-6",
+                        max_tokens=120,
+                        system=_triage_system,
+                        messages=[{"role": "user", "content": json.dumps(_triage_payload)}],
+                    )
+                    _triage_result = json.loads(next(
+                        (b.text for b in _tr.content if hasattr(b, "text")), "{}"
+                    ))
+                except Exception as _te:
+                    logger.debug(f"Meta-agent triage failed (defaulting to Opus): {_te}")
+
+                _action_needed = _triage_result.get("action_needed", True)
+                _confidence = float(_triage_result.get("confidence", 1.0))
+                _use_opus = _action_needed and _confidence >= _OPUS_THRESHOLD
+                _model = "claude-opus-4-6" if _use_opus else "claude-sonnet-4-6"
+                logger.info(
+                    f"Meta-agent: triage → action_needed={_action_needed}, "
+                    f"confidence={_confidence:.2f}, severity={_triage_result.get('severity','?')} "
+                    f"→ using {_model}"
+                )
 
                 try:
                     client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -1284,13 +1330,15 @@ class ArbBot:
                         "and suggest only evidence-backed parameter changes."
                     )
 
-                    response = await client.messages.create(
-                        model="claude-opus-4-6",
-                        max_tokens=8000,  # was 1500 — too low for adaptive thinking
-                        thinking={"type": "adaptive"},
-                        system=system,
-                        messages=[{"role": "user", "content": user_msg}],
-                    )
+                    _create_kwargs: dict = {
+                        "model": _model,
+                        "max_tokens": 8000 if _use_opus else 3000,
+                        "system": system,
+                        "messages": [{"role": "user", "content": user_msg}],
+                    }
+                    if _use_opus:
+                        _create_kwargs["thinking"] = {"type": "adaptive"}
+                    response = await client.messages.create(**_create_kwargs)
                     text = next((b.text for b in response.content if hasattr(b, "text")), "")
 
                     if not text:
@@ -1341,6 +1389,8 @@ class ArbBot:
                         "health": analysis_data.get("health", {}),
                         "strategy_roi_pct": analysis_data.get("strategy_roi_pct", {}),
                         "portfolio_summary": analysis_data.get("portfolio", {}),
+                        "model_used": _model,
+                        "triage": _triage_result,
                     }
                     os.makedirs("logs", exist_ok=True)
                     log_path = f"logs/meta_agent_{int(time.time())}.json"
