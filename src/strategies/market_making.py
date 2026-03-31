@@ -14,6 +14,7 @@ Key mechanics:
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
@@ -202,6 +203,15 @@ class MarketMakingStrategy(BaseStrategy):
         for m in markets:
             if not m.active or m.closed:
                 continue
+            # Skip markets whose end date has already passed — Polymarket sometimes
+            # keeps them "active" while awaiting official resolution.
+            if m.end_date_iso:
+                try:
+                    end_dt = datetime.fromisoformat(m.end_date_iso.rstrip("Z")).replace(tzinfo=timezone.utc)
+                    if end_dt < datetime.now(timezone.utc):
+                        continue
+                except ValueError:
+                    pass
             if m.volume < MIN_VOLUME_FOR_MM:
                 continue
             yes_tok = next(
