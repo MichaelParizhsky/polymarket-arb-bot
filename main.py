@@ -23,7 +23,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from config import CONFIG
-from src.dashboard.app import app as dashboard_app, register as dashboard_register
+from src.dashboard.app import app as dashboard_app, register as dashboard_register, update_market_status as _dashboard_update_market_status
 from src.exchange.polymarket import PolymarketClient
 from src.exchange.binance import BinanceFeed
 from src.portfolio.paper_trading import PaperPortfolio
@@ -549,6 +549,10 @@ class ArbBot:
         # Deduplicate by condition_id; expiring entries take priority.
         seen_ids = {m.condition_id for m in expiring}
         markets = list(expiring) + [m for m in markets if m.condition_id not in seen_ids]
+        # Full unfiltered list — used for dashboard status refresh so positions in
+        # markets that are past end_date (and filtered out of strategy scan) still get
+        # accurate active/closed status from the Gamma API response.
+        _all_markets_unfiltered = markets
 
         from datetime import datetime, timezone, timedelta
 
@@ -630,6 +634,20 @@ class ArbBot:
                 end_dt = getattr(m, "end_date_iso", "") or ""
                 for t in m.tokens:
                     token_meta[t.token_id] = (q, t.outcome, end_dt, tags)
+
+        # Refresh live market status for open positions in the dashboard.
+        # Uses the full unfiltered market list so positions for markets that were
+        # date-filtered out of the strategy scan (e.g. past end_date but still active
+        # on Polymarket) still receive accurate active/closed status.
+        if self.portfolio.positions:
+            open_tids = set(self.portfolio.positions.keys())
+            for coll in (_all_markets_unfiltered, crypto_short_markets):
+                for m in coll:
+                    for t in m.tokens:
+                        if t.token_id in open_tids:
+                            _dashboard_update_market_status(
+                                t.token_id, m.active, m.closed, m.end_date_iso
+                            )
 
         # Collect all token IDs (main markets + crypto short markets)
         token_ids: list[str] = []

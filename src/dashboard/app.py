@@ -52,6 +52,21 @@ _state_loaded_from_file: bool = False
 # Lock protecting reads of the portfolio object from the dashboard thread
 _portfolio_lock = _threading.RLock()
 
+# Live market status cache: token_id -> {active, closed, end_date_iso}
+# Updated by main.py after each market scan; used to enrich /api/positions.
+_market_status: dict[str, dict] = {}
+_market_status_lock = _threading.Lock()
+
+
+def update_market_status(token_id: str, active: bool, closed: bool, end_date_iso: str) -> None:
+    """Called by main.py to keep live market status for open positions."""
+    with _market_status_lock:
+        _market_status[token_id] = {
+            "active": active,
+            "closed": closed,
+            "end_date_iso": end_date_iso,
+        }
+
 # Ring buffer for cross-exchange signal decisions (last 100)
 _cross_exchange_log: collections.deque = collections.deque(maxlen=100)
 _cross_exchange_log_lock = _threading.Lock()
@@ -207,8 +222,16 @@ def positions():
         return []
     with _portfolio_lock:
         items = list(_portfolio.positions.items())
-    return [
-        {
+    with _market_status_lock:
+        status_snapshot = dict(_market_status)
+    result = []
+    for tid, pos in items:
+        ms = status_snapshot.get(tid, {})
+        end_date = ms.get("end_date_iso") or getattr(pos, "end_date_iso", "")
+        # market_active: True when Polymarket reports the market is still active.
+        # Defaults True (unknown = assume still live) to avoid false "overdue" alerts.
+        market_active = ms.get("active", True) if ms else True
+        result.append({
             "token_id": tid[:16] + "...",
             "token_id_full": tid,
             "question": pos.market_question[:70],
@@ -218,10 +241,10 @@ def positions():
             "cost_basis": round(pos.cost_basis, 2),
             "strategy": pos.strategy,
             "opened_at": int(pos.opened_at),
-            "end_date_iso": getattr(pos, "end_date_iso", ""),
-        }
-        for tid, pos in items
-    ]
+            "end_date_iso": end_date,
+            "market_active": market_active,
+        })
+    return result
 
 
 @app.post("/api/positions/close")
@@ -2944,6 +2967,9 @@ function updatePositions(open,closed){
             const rem=dSec-now;
             const remDays=rem/86400;
             estClose=remDays>=1?Math.floor(remDays)+'d '+Math.floor((rem%86400)/3600)+'h':Math.floor(rem/3600)+'h '+Math.floor((rem%3600)/60)+'m';
+          } else if(p.market_active!==false){
+            // end_date passed but Polymarket still marks the market active — game in progress
+            estClose='<span style="color:var(--green)">live</span>';
           } else {
             estClose='<span style="color:var(--red)">overdue</span>';
           }
