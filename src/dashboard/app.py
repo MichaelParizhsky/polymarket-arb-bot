@@ -128,6 +128,72 @@ def _extract_teams(question: str) -> tuple[str, str] | None:
     return None
 
 
+# Team nickname/city → sport lookup.
+# Used when Polymarket category is generic ("Sports", "") and question has no league keyword.
+_TEAM_SPORT: dict[str, str] = {
+    # NBA
+    "magic": "nba", "suns": "nba", "lakers": "nba", "celtics": "nba",
+    "warriors": "nba", "bulls": "nba", "heat": "nba", "nets": "nba",
+    "knicks": "nba", "sixers": "nba", "76ers": "nba", "bucks": "nba",
+    "raptors": "nba", "nuggets": "nba", "thunder": "nba", "clippers": "nba",
+    "mavericks": "nba", "mavs": "nba", "rockets": "nba", "spurs": "nba",
+    "grizzlies": "nba", "pelicans": "nba", "hawks": "nba", "hornets": "nba",
+    "pistons": "nba", "pacers": "nba", "cavaliers": "nba", "cavs": "nba",
+    "wizards": "nba", "blazers": "nba", "timberwolves": "nba", "wolves": "nba",
+    "jazz": "nba", "kings": "nba",
+    # NFL
+    "chiefs": "nfl", "eagles": "nfl", "patriots": "nfl", "cowboys": "nfl",
+    "ravens": "nfl", "49ers": "nfl", "niners": "nfl", "rams": "nfl",
+    "seahawks": "nfl", "bills": "nfl", "bengals": "nfl", "browns": "nfl",
+    "steelers": "nfl", "broncos": "nfl", "raiders": "nfl", "chargers": "nfl",
+    "packers": "nfl", "bears": "nfl", "lions": "nfl", "vikings": "nfl",
+    "buccaneers": "nfl", "bucs": "nfl", "saints": "nfl", "falcons": "nfl",
+    "panthers": "nfl", "texans": "nfl", "colts": "nfl", "jaguars": "nfl",
+    "titans": "nfl", "cardinals": "nfl", "giants": "nfl", "commanders": "nfl",
+    "dolphins": "nfl",
+    # NHL
+    "bruins": "nhl", "canadiens": "nhl", "habs": "nhl", "maple leafs": "nhl",
+    "leafs": "nhl", "rangers": "nhl", "penguins": "nhl", "pens": "nhl",
+    "flyers": "nhl", "capitals": "nhl", "caps": "nhl", "hurricanes": "nhl",
+    "canes": "nhl", "lightning": "nhl", "bolts": "nhl",
+    "blues": "nhl", "blackhawks": "nhl", "red wings": "nhl", "wild": "nhl",
+    "avalanche": "nhl", "avs": "nhl", "oilers": "nhl", "flames": "nhl",
+    "canucks": "nhl", "jets": "nhl", "predators": "nhl", "preds": "nhl",
+    "stars": "nhl", "ducks": "nhl", "sharks": "nhl", "golden knights": "nhl",
+    "kraken": "nhl", "senators": "nhl", "sabres": "nhl", "coyotes": "nhl",
+    "blue jackets": "nhl",
+    # MLB
+    "yankees": "mlb", "red sox": "mlb", "dodgers": "mlb", "cubs": "mlb",
+    "astros": "mlb", "braves": "mlb", "mets": "mlb", "phillies": "mlb",
+    "mariners": "mlb", "padres": "mlb", "angels": "mlb", "athletics": "mlb",
+    "tigers": "mlb", "royals": "mlb", "white sox": "mlb", "twins": "mlb",
+    "brewers": "mlb", "reds": "mlb", "pirates": "mlb", "nationals": "mlb",
+    "marlins": "mlb", "orioles": "mlb", "rays": "mlb", "blue jays": "mlb",
+    "rockies": "mlb", "diamondbacks": "mlb",
+}
+
+_ALL_SPORT_KEYS = ["nba", "nfl", "nhl", "mlb", "mls"]  # fetch all when sport unknown
+
+
+def _detect_sport(question: str, category: str) -> str:
+    """Return an ESPN sport key from category string or market question keywords."""
+    cat = category.lower().strip()
+    key = _SPORT_ALIASES.get(cat, "")
+    if key:
+        return key
+    # Category is generic ("sports", "") — scan question
+    q = question.lower()
+    # Check explicit league abbreviations first
+    for kw in ["nba", "nfl", "nhl", "mlb", "mls", "bundesliga", "ncaab", "ncaaf", "cfb"]:
+        if kw in q:
+            return _SPORT_ALIASES.get(kw, kw)
+    # Fall back to team nickname lookup
+    for nickname, sport in _TEAM_SPORT.items():
+        if nickname in q:
+            return sport
+    return ""
+
+
 def _team_matches(extracted: str, espn_name: str, espn_abbr: str) -> bool:
     """True if `extracted` is a reasonable match for an ESPN team."""
     ex = extracted.lower().strip()
@@ -1924,20 +1990,21 @@ async def sports_scores():
     # Determine which ESPN sport feeds we need
     sports_needed: set[str] = set()
     pos_sport: dict[str, str] = {}   # token_id -> sport_key
+    unresolved: list[str] = []       # token_ids with unknown sport — try all feeds
     for tid, pos in positions_items:
         ms = status_snapshot.get(tid, {})
-        cat = ms.get("category", "").lower()
-        # Fallback: scan question for sport keywords
-        if not cat:
-            q = pos.market_question.lower()
-            for kw in ["nba", "nfl", "nhl", "mlb", "mls", "bundesliga", "ncaab", "ncaaf"]:
-                if kw in q:
-                    cat = kw
-                    break
-        sport_key = _SPORT_ALIASES.get(cat, "")
+        cat = ms.get("category", "")
+        sport_key = _detect_sport(pos.market_question, cat)
         if sport_key:
             sports_needed.add(sport_key)
             pos_sport[tid] = sport_key
+        else:
+            unresolved.append(tid)
+
+    # For unresolved positions, try all main sport feeds and match by team name
+    if unresolved:
+        for sk in _ALL_SPORT_KEYS:
+            sports_needed.add(sk)
 
     if not sports_needed:
         return []
@@ -1955,28 +2022,39 @@ async def sports_scores():
     results = []
     for tid, pos in positions_items:
         sport_key = pos_sport.get(tid)
-        if not sport_key:
-            continue
-        events = sport_events.get(sport_key, [])
         teams = _extract_teams(pos.market_question)
         matched = None
-        if teams and events:
+        matched_sport = sport_key or ""
+
+        if teams:
             t1, t2 = teams
-            for ev in events:
-                ev_teams = ev.get("teams", [])
-                names = [t["name"] for t in ev_teams]
-                abbrs = [t["abbr"] for t in ev_teams]
-                if any(_team_matches(t1, n, a) for n, a in zip(names, abbrs)) or \
-                   any(_team_matches(t2, n, a) for n, a in zip(names, abbrs)):
-                    matched = ev
+            # Search specific sport first, then all loaded sports
+            search_order = ([sport_key] if sport_key else []) + [
+                sk for sk in sport_events if sk != sport_key
+            ]
+            for sk in search_order:
+                for ev in sport_events.get(sk, []):
+                    ev_teams = ev.get("teams", [])
+                    names = [t["name"] for t in ev_teams]
+                    abbrs = [t["abbr"] for t in ev_teams]
+                    if any(_team_matches(t1, n, a) for n, a in zip(names, abbrs)) or \
+                       any(_team_matches(t2, n, a) for n, a in zip(names, abbrs)):
+                        matched = ev
+                        matched_sport = sk
+                        break
+                if matched:
                     break
+
+        # Only include if we detected a sport (known category OR matched a game)
+        if not sport_key and not matched:
+            continue
         results.append({
             "token_id": tid,
             "question": pos.market_question[:80],
             "outcome": pos.outcome,
             "strategy": pos.strategy,
             "cost_basis": round(pos.cost_basis, 2),
-            "sport": sport_key.upper(),
+            "sport": matched_sport.upper(),
             "game": matched,
         })
 
