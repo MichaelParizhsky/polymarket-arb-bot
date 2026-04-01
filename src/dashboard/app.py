@@ -75,6 +75,72 @@ def update_market_status(token_id: str, active: bool, closed: bool, end_date_iso
 # Endpoint pattern: https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard
 import re as _re
 
+# Master sports keyword regex — shared by sports_stats and sports_live endpoints.
+# Keyword approach: any market whose question matches is treated as a sports bet.
+# Covers: major US leagues, European soccer leagues, team names, and bet-type terms.
+_SPORTS_KW_MASTER = _re.compile(
+    r"\b("
+    # ── US leagues ───────────────────────────────────────────────────────────
+    r"nba|nfl|nhl|mlb|mls|ncaa|cbb|ncaab|ncaaf|cfb|ufc|boxing|pga|nascar|wnba|"
+    # ── European soccer competitions ─────────────────────────────────────────
+    r"premier league|champions league|europa league|conference league|"
+    r"la liga|bundesliga|serie a|ligue 1|eredivisie|primeira liga|"
+    r"fa cup|copa del rey|dfb.?pokal|coppa italia|coupe de france|"
+    r"epl|ucl|uel|uecl|"
+    # ── Soccer generic ────────────────────────────────────────────────────────
+    r"soccer|football club|futbol|"
+    # ── Premier League clubs ──────────────────────────────────────────────────
+    r"arsenal|chelsea|liverpool|tottenham|spurs|everton|leicester|"
+    r"west ham|newcastle|wolves|wolverhampton|crystal palace|brentford|"
+    r"aston villa|brighton|southampton|nottingham|fulham|burnley|"
+    r"manchester city|manchester united|man city|man united|man utd|"
+    # ── La Liga ───────────────────────────────────────────────────────────────
+    r"real madrid|barcelona|atletico|atletico madrid|sevilla|valencia|villarreal|"
+    r"real sociedad|athletic bilbao|betis|mallorca|"
+    # ── Bundesliga ────────────────────────────────────────────────────────────
+    r"bayern munich|borussia dortmund|bvb|rb leipzig|bayer leverkusen|"
+    r"eintracht frankfurt|wolfsburg|freiburg|union berlin|"
+    # ── Serie A ───────────────────────────────────────────────────────────────
+    r"juventus|ac milan|inter milan|napoli|roma|lazio|atalanta|fiorentina|"
+    # ── Ligue 1 ───────────────────────────────────────────────────────────────
+    r"psg|paris saint.germain|olympique lyonnais|marseille|monaco|"
+    # ── Other European ────────────────────────────────────────────────────────
+    r"ajax|porto|benfica|sporting cp|celtic|rangers fc|psv|"
+    # ── MLS clubs ─────────────────────────────────────────────────────────────
+    r"inter miami|lafc|la galaxy|seattle sounders|portland timbers|"
+    r"atlanta united|nycfc|new york red bulls|new england revolution|"
+    r"toronto fc|vancouver whitecaps|"
+    # ── NBA team nicknames ────────────────────────────────────────────────────
+    r"celtics|lakers|warriors|bulls|heat|nets|knicks|sixers|bucks|raptors|"
+    r"nuggets|thunder|clippers|mavericks|mavs|rockets|grizzlies|pelicans|"
+    r"hawks|hornets|pistons|pacers|cavaliers|cavs|wizards|blazers|jazz|kings|"
+    r"timberwolves|wolves|magic|suns|"
+    # ── NFL team nicknames ────────────────────────────────────────────────────
+    r"chiefs|eagles|patriots|cowboys|ravens|49ers|niners|seahawks|bills|"
+    r"bengals|steelers|broncos|packers|bears|lions|vikings|buccaneers|bucs|"
+    r"saints|falcons|texans|colts|jaguars|titans|commanders|dolphins|raiders|"
+    r"chargers|giants|rams|cardinals|panthers|"
+    # ── NHL team nicknames ────────────────────────────────────────────────────
+    r"bruins|canadiens|maple leafs|penguins|flyers|capitals|hurricanes|"
+    r"lightning|avalanche|oilers|flames|canucks|predators|blackhawks|"
+    r"red wings|golden knights|kraken|"
+    # ── MLB team nicknames ────────────────────────────────────────────────────
+    r"yankees|red sox|dodgers|astros|braves|phillies|mariners|padres|"
+    r"cubs|mets|orioles|rays|blue jays|rockies|"
+    # ── Generic sports terms ──────────────────────────────────────────────────
+    r"basketball|baseball|hockey|tennis|golf|rugby|cricket|"
+    r"super bowl|stanley cup|world series|march madness|playoffs|"
+    r"touchdown|strikeout|slam dunk|hat trick|clean sheet|penalty kick|"
+    r"spread|over.under|moneyline|point spread"
+    r")\b",
+    _re.IGNORECASE,
+)
+
+# Strategies that can produce sports trades
+_SPORTS_STRATEGIES = frozenset({
+    "quick_resolution", "event_driven", "live_game", "resolution", "swarm_prediction",
+})
+
 _ESPN_URLS: dict[str, str] = {
     "nba":        "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
     "nfl":        "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
@@ -85,7 +151,12 @@ _ESPN_URLS: dict[str, str] = {
     "ncaab":      "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard",
     "cbb":        "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard",
     "mls":        "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard",
+    "epl":        "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard",
     "bundesliga": "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard",
+    "laliga":     "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard",
+    "seriea":     "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard",
+    "ligue1":     "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard",
+    "ucl":        "https://site.api.espn.com/apis/site/v2/sports/soccer/UEFA.CHAMPIONS/scoreboard",
 }
 
 # Category strings from Polymarket → ESPN sport key
@@ -94,10 +165,15 @@ _SPORT_ALIASES: dict[str, str] = {
     "ncaaf": "ncaaf", "cfb": "ncaaf",
     "ncaab": "ncaab", "cbb": "ncaab",
     "mls": "mls",
+    "epl": "epl", "premier league": "epl",
     "bundesliga": "bundesliga",
-    "soccer": "mls",
+    "la liga": "laliga", "laliga": "laliga",
+    "serie a": "seriea", "seriea": "seriea",
+    "ligue 1": "ligue1", "ligue1": "ligue1",
+    "champions league": "ucl", "ucl": "ucl",
+    "soccer": "epl",         # default soccer → check EPL first
+    "football": "nfl",       # American football default
     "basketball": "nba",
-    "football": "nfl",
     "hockey": "nhl",
     "baseball": "mlb",
 }
@@ -171,6 +247,34 @@ _TEAM_SPORT: dict[str, str] = {
     "brewers": "mlb", "reds": "mlb", "pirates": "mlb", "nationals": "mlb",
     "marlins": "mlb", "orioles": "mlb", "rays": "mlb", "blue jays": "mlb",
     "rockies": "mlb", "diamondbacks": "mlb",
+    # Premier League
+    "arsenal": "epl", "chelsea": "epl", "liverpool": "epl",
+    "tottenham": "epl", "everton": "epl", "leicester": "epl",
+    "west ham": "epl", "newcastle": "epl", "aston villa": "epl",
+    "man city": "epl", "man united": "epl", "man utd": "epl",
+    "manchester city": "epl", "manchester united": "epl",
+    "wolves": "epl", "crystal palace": "epl", "brentford": "epl",
+    "brighton": "epl", "southampton": "epl", "nottingham": "epl",
+    "fulham": "epl", "burnley": "epl",
+    # La Liga
+    "real madrid": "laliga", "barcelona": "laliga", "atletico madrid": "laliga",
+    "sevilla": "laliga", "valencia": "laliga", "villarreal": "laliga",
+    "real sociedad": "laliga", "athletic bilbao": "laliga", "betis": "laliga",
+    # Bundesliga
+    "bayern munich": "bundesliga", "borussia dortmund": "bundesliga",
+    "bvb": "bundesliga", "rb leipzig": "bundesliga", "leverkusen": "bundesliga",
+    "eintracht frankfurt": "bundesliga", "wolfsburg": "bundesliga",
+    # Serie A
+    "juventus": "seriea", "ac milan": "seriea", "inter milan": "seriea",
+    "napoli": "seriea", "roma": "seriea", "lazio": "seriea",
+    "atalanta": "seriea", "fiorentina": "seriea",
+    # Ligue 1
+    "psg": "ligue1", "paris saint-germain": "ligue1", "marseille": "ligue1",
+    "lyon": "ligue1", "monaco": "ligue1",
+    # MLS
+    "inter miami": "mls", "la galaxy": "mls", "lafc": "mls",
+    "seattle sounders": "mls", "portland timbers": "mls",
+    "atlanta united": "mls", "nycfc": "mls", "toronto fc": "mls",
 }
 
 _ALL_SPORT_KEYS = ["nba", "nfl", "nhl", "mlb", "mls"]  # fetch all when sport unknown
@@ -1916,16 +2020,9 @@ def sports_stats(api_key: str = Depends(_check_api_key)):
         closed = list(_portfolio.closed_positions)
         last_mtm = dict(getattr(_portfolio, "last_mtm_prices", {}) or {})
 
-    # Classify each sports trade by bet type
-    _SPORTS_STRATS = {"quick_resolution", "event_driven", "weather"}  # strategies that may be sports
-    _SPORTS_KW = re.compile(
-        r"\b(nba|nfl|nhl|mlb|mls|ncaa|cbb|ufc|boxing|super bowl|stanley cup|world series|"
-        r"basketball|football|baseball|hockey|soccer|tennis|march madness|playoffs)\b",
-        re.IGNORECASE,
-    )
-
+    # Classify each sports trade by bet type — use master keyword set
     def _is_sports(question: str) -> bool:
-        return bool(_SPORTS_KW.search(question))
+        return bool(_SPORTS_KW_MASTER.search(question))
 
     sports_trades = [
         t for t in trades
@@ -2065,14 +2162,10 @@ async def sports_live():
         all_games = []
 
     # Get open sports positions to find relevant players
-    _SPORTS_KW_RE = re.compile(
-        r"\b(nba|nfl|nhl|mlb|mls|ncaa|cbb|basketball|football|baseball|hockey|soccer)\b",
-        re.IGNORECASE,
-    )
     with _portfolio_lock:
         open_positions = [
             pos for pos in (_portfolio.positions.values() if _portfolio else [])
-            if _SPORTS_KW_RE.search(pos.market_question)
+            if _SPORTS_KW_MASTER.search(pos.market_question)
         ]
 
     # For each open sports position, try to find the live game and fetch player stats

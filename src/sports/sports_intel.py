@@ -30,26 +30,42 @@ from src.utils.logger import logger
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
 _ESPN_SCOREBOARDS: dict[str, str] = {
-    "nba":  f"{_ESPN_BASE}/basketball/nba/scoreboard",
-    "nfl":  f"{_ESPN_BASE}/football/nfl/scoreboard",
-    "nhl":  f"{_ESPN_BASE}/hockey/nhl/scoreboard",
-    "mlb":  f"{_ESPN_BASE}/baseball/mlb/scoreboard",
-    "cbb":  f"{_ESPN_BASE}/basketball/mens-college-basketball/scoreboard",
-    "mls":  f"{_ESPN_BASE}/soccer/usa.1/scoreboard",
-    "ncaaf": f"{_ESPN_BASE}/football/college-football/scoreboard",
+    "nba":        f"{_ESPN_BASE}/basketball/nba/scoreboard",
+    "nfl":        f"{_ESPN_BASE}/football/nfl/scoreboard",
+    "nhl":        f"{_ESPN_BASE}/hockey/nhl/scoreboard",
+    "mlb":        f"{_ESPN_BASE}/baseball/mlb/scoreboard",
+    "cbb":        f"{_ESPN_BASE}/basketball/mens-college-basketball/scoreboard",
+    "ncaab":      f"{_ESPN_BASE}/basketball/mens-college-basketball/scoreboard",
+    "mls":        f"{_ESPN_BASE}/soccer/usa.1/scoreboard",
+    "ncaaf":      f"{_ESPN_BASE}/football/college-football/scoreboard",
+    # European soccer
+    "epl":        f"{_ESPN_BASE}/soccer/eng.1/scoreboard",
+    "bundesliga": f"{_ESPN_BASE}/soccer/ger.1/scoreboard",
+    "laliga":     f"{_ESPN_BASE}/soccer/esp.1/scoreboard",
+    "seriea":     f"{_ESPN_BASE}/soccer/ita.1/scoreboard",
+    "ligue1":     f"{_ESPN_BASE}/soccer/fra.1/scoreboard",
+    "ucl":        f"{_ESPN_BASE}/soccer/UEFA.CHAMPIONS/scoreboard",
 }
 
 _ESPN_SUMMARY_TPL = "{base}/{sport}/summary?event={event_id}"
 
 # sport path per league (for summary endpoint)
 _LEAGUE_SPORT_PATH: dict[str, str] = {
-    "nba":   "basketball/nba",
-    "nfl":   "football/nfl",
-    "nhl":   "hockey/nhl",
-    "mlb":   "baseball/mlb",
-    "cbb":   "basketball/mens-college-basketball",
-    "mls":   "soccer/usa.1",
-    "ncaaf": "football/college-football",
+    "nba":        "basketball/nba",
+    "nfl":        "football/nfl",
+    "nhl":        "hockey/nhl",
+    "mlb":        "baseball/mlb",
+    "cbb":        "basketball/mens-college-basketball",
+    "ncaab":      "basketball/mens-college-basketball",
+    "mls":        "soccer/usa.1",
+    "ncaaf":      "football/college-football",
+    # European soccer
+    "epl":        "soccer/eng.1",
+    "bundesliga": "soccer/ger.1",
+    "laliga":     "soccer/esp.1",
+    "seriea":     "soccer/ita.1",
+    "ligue1":     "soccer/fra.1",
+    "ucl":        "soccer/UEFA.CHAMPIONS",
 }
 
 # ---------------------------------------------------------------------------
@@ -180,18 +196,74 @@ def _extract_teams(question: str) -> tuple[str, str]:
 
 def _detect_league(question: str) -> str:
     q = question.lower()
-    if any(k in q for k in ["nba", "basketball", "lakers", "celtics", "warriors", "bucks", "heat", "nuggets", "thunder", "pistons", "maple leafs" if False else "sixers"]):
+    # NBA
+    if any(k in q for k in [
+        "nba", "lakers", "celtics", "warriors", "bucks", "heat", "nuggets",
+        "thunder", "pistons", "sixers", "knicks", "nets", "raptors", "clippers",
+        "mavericks", "rockets", "grizzlies", "pelicans", "hawks", "hornets",
+        "pacers", "cavaliers", "wizards", "blazers", "jazz", "kings",
+    ]):
         return "nba"
-    if any(k in q for k in ["nfl", "super bowl", "quarterback", "touchdown", "chiefs", "eagles", "cowboys", "patriots"]):
+    if "basketball" in q and not any(k in q for k in ["college", "ncaa", "cbb", "march"]):
+        return "nba"
+    # NFL
+    if any(k in q for k in [
+        "nfl", "super bowl", "quarterback", "touchdown", "chiefs", "eagles",
+        "cowboys", "patriots", "ravens", "49ers", "seahawks", "bills",
+        "bengals", "steelers", "broncos", "packers", "bears", "lions",
+        "vikings", "buccaneers", "saints", "falcons", "texans", "colts",
+        "jaguars", "titans", "cardinals", "giants", "commanders", "dolphins",
+    ]):
         return "nfl"
-    if any(k in q for k in ["nhl", "hockey", "stanley cup", "maple leafs", "bruins", "penguins", "capitals"]):
+    # NHL
+    if any(k in q for k in [
+        "nhl", "hockey", "stanley cup", "maple leafs", "bruins", "penguins",
+        "capitals", "hurricanes", "lightning", "avalanche", "oilers", "flames",
+        "canucks", "jets", "predators", "stars", "ducks", "sharks",
+    ]):
         return "nhl"
-    if any(k in q for k in ["mlb", "baseball", "world series", "innings", "strikeout", "yankees", "dodgers", "red sox"]):
+    # MLB
+    if any(k in q for k in [
+        "mlb", "baseball", "world series", "innings", "strikeout",
+        "yankees", "dodgers", "red sox", "astros", "braves", "mets",
+        "phillies", "padres", "mariners",
+    ]):
         return "mlb"
-    if any(k in q for k in ["ncaa", "college basketball", "march madness", "cbb", "kenpom"]):
+    # College basketball
+    if any(k in q for k in ["ncaa", "college basketball", "march madness", "cbb", "kenpom", "ncaab"]):
         return "cbb"
-    if any(k in q for k in ["mls", "soccer", "fifa", "premier league", "la galaxy", "inter miami"]):
+    # Soccer — check specific leagues/teams before generic "soccer" to get right league
+    if any(k in q for k in [
+        "premier league", "epl", "arsenal", "chelsea", "liverpool", "tottenham",
+        "man city", "man united", "manchester city", "manchester united",
+        "everton", "leicester", "newcastle", "west ham", "aston villa", "spurs",
+    ]):
+        return "epl"
+    if any(k in q for k in [
+        "bundesliga", "bayern", "borussia dortmund", "bvb", "rb leipzig",
+        "leverkusen", "eintracht", "wolfsburg",
+    ]):
+        return "bundesliga"
+    if any(k in q for k in [
+        "la liga", "real madrid", "barcelona", "atletico", "sevilla",
+        "valencia", "villarreal", "real sociedad",
+    ]):
+        return "laliga"
+    if any(k in q for k in [
+        "serie a", "juventus", "ac milan", "inter milan", "napoli",
+        "roma", "lazio", "atalanta", "fiorentina",
+    ]):
+        return "seriea"
+    if any(k in q for k in ["ligue 1", "psg", "paris saint", "marseille", "lyon", "monaco"]):
+        return "ligue1"
+    if any(k in q for k in [
+        "champions league", "ucl", "europa league", "uel", "conference league",
+    ]):
+        return "ucl"
+    if any(k in q for k in ["mls", "la galaxy", "inter miami", "lafc", "seattle sounders"]):
         return "mls"
+    if any(k in q for k in ["soccer", "futbol", "football club", "fc ", " fc", "hat trick", "clean sheet"]):
+        return "mls"  # fallback soccer league
     return ""
 
 
@@ -372,7 +444,7 @@ class SportsIntel:
 
     async def get_all_live_games(self) -> list[dict]:
         """Fetch live games for all major leagues in parallel."""
-        leagues = ["nba", "nfl", "nhl", "mlb", "cbb", "mls"]
+        leagues = ["nba", "nfl", "nhl", "mlb", "cbb", "mls", "epl", "bundesliga", "laliga", "seriea", "ligue1"]
         results = await asyncio.gather(
             *[self.get_live_games(lg) for lg in leagues],
             return_exceptions=True,
