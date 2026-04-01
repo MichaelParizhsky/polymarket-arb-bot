@@ -252,6 +252,12 @@ class MarketMakingStrategy(BaseStrategy):
         spread_bps = max(cfg.mm_spread_bps, getattr(cfg, "mm_min_spread_bps", 10))
         half_spread = (spread_bps / 10000) / 2
 
+        # Orderbook Imbalance gate: skip the side getting hit by informed flow.
+        # obi > threshold → heavy buy pressure (lift asks) → skip our ask (adverse selection).
+        # obi < 1-threshold → heavy sell pressure (hit bids) → skip our bid.
+        obi = self._compute_obi(book)
+        obi_threshold = getattr(cfg, 'mm_obi_threshold', 0.75)
+
         # Inventory skew: if we hold a lot of YES, widen bid, tighten ask
         pos = self.portfolio.positions.get(token_id)
         inventory = pos.contracts if pos else 0.0
@@ -282,6 +288,12 @@ class MarketMakingStrategy(BaseStrategy):
             # Already long too much YES — skip bid to reduce inventory risk
             self.log(
                 f"MM bid skipped — inventory skew {inv_ratio:.2f} > {skew_limit:.2f}",
+                "debug",
+            )
+        elif obi is not None and obi < (1.0 - obi_threshold):
+            # Heavy sell flow — informed sellers hitting bids, don't take their side
+            self.log(
+                f"MM bid skipped — OBI {obi:.2f} < {1.0-obi_threshold:.2f} (sell flow) | {market.question[:40]}",
                 "debug",
             )
         else:
@@ -315,6 +327,12 @@ class MarketMakingStrategy(BaseStrategy):
         ok_ask, reason_ask = self.risk.check_trade(token_id, "SELL", order_size, "market_making")
         if not ok_ask:
             self.log(f"MM ask blocked: {reason_ask}", "debug")
+        elif obi is not None and obi > obi_threshold:
+            # Heavy buy flow — informed buyers lifting asks, don't give them liquidity
+            self.log(
+                f"MM ask skipped — OBI {obi:.2f} > {obi_threshold:.2f} (buy flow) | {market.question[:40]}",
+                "debug",
+            )
         else:
             ask_contracts = order_size / ask_price
             # Cap sell size at actual inventory to avoid "Cannot sell N: position=M" failures.
@@ -355,6 +373,21 @@ class MarketMakingStrategy(BaseStrategy):
         ))
 
         return signals
+
+    def _compute_obi(self, book: Orderbook) -> float | None:
+        """
+        Orderbook Imbalance = bid_vol / (bid_vol + ask_vol) using top-5 levels.
+        Returns None if book is empty.
+        Range: 0.0 (pure ask) → 1.0 (pure bid).
+        """
+        if not (hasattr(book, 'bids') and hasattr(book, 'asks')):
+            return None
+        bid_vol = sum(getattr(lv, 'size', 0) for lv in (book.bids or [])[:5])
+        ask_vol = sum(getattr(lv, 'size', 0) for lv in (book.asks or [])[:5])
+        total = bid_vol + ask_vol
+        if total <= 0:
+            return None
+        return bid_vol / total
 
     def _cancel_stale_quotes(
         self, token_id: str, book: Orderbook

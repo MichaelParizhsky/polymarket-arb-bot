@@ -3377,13 +3377,6 @@ function showTab(name){
     if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
   }
 
-  if(name==='sports'){
-    loadSports();
-    if(_sportsInterval)clearInterval(_sportsInterval);
-    _sportsInterval=setInterval(loadSports,30000);
-  } else {
-    if(_sportsInterval){clearInterval(_sportsInterval);_sportsInterval=null;}
-  }
 }
 
 function loadWeather(){
@@ -3427,94 +3420,6 @@ function loadWeather(){
     }
   }).catch(e=>console.error('weather stats error',e));
 }
-
-// ── Sports live scores ──────────────────────────────────────────────
-async function loadSports(){
-  const grid=$('sports-grid');
-  if(!grid)return;
-  let data=[];
-  try{
-    const r=await fetch('/api/sports-scores');
-    data=await r.json();
-  }catch(e){
-    grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;padding:32px;text-align:center;grid-column:1/-1">Failed to load sports data</div>';
-    return;
-  }
-  if(!data.length){
-    grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;padding:32px;text-align:center;grid-column:1/-1">No open sports positions</div>';
-    return;
-  }
-  // Deduplicate by game id — multiple positions can share a game
-  const seen=new Map(); // game_id -> card data
-  const noGame=[];
-  for(const p of data){
-    const g=p.game;
-    if(!g){noGame.push(p);continue;}
-    const key=g.id||g.name;
-    if(!seen.has(key)){seen.set(key,{game:g,sport:p.sport,positions:[]});}
-    seen.get(key).positions.push(p);
-  }
-  const cards=[...seen.values()];
-
-  function gameCard(c){
-    const g=c.game;
-    const teams=g.teams||[];
-    const away=teams.find(t=>t.home_away==='away')||teams[0]||{};
-    const home=teams.find(t=>t.home_away==='home')||teams[1]||{};
-    const state=g.state; // pre/in/post
-    const isLive=state==='in';
-    const isFinal=state==='post';
-    const stateColor=isLive?'#00e676':isFinal?'#64748b':'#ffd740';
-    const stateLabel=isLive?'● LIVE':isFinal?'FINAL':'PREGAME';
-    const scoreStyle='font-size:1.5rem;font-weight:700;color:var(--text);min-width:36px;text-align:center';
-    const nameStyle='font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:2px';
-    const abbrStyle='font-size:1rem;font-weight:700;color:var(--text)';
-
-    // Which positions bet on which side?
-    const posHtml=c.positions.map(p=>{
-      const teamGuess=p.outcome==='Yes'?'YES win':'NO win';
-      return`<span style="font-size:.62rem;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 6px;color:var(--accent2)" title="${p.question}">${p.sport} · ${p.strategy} · ${teamGuess} · $${p.cost_basis}</span>`;
-    }).join(' ');
-
-    return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:.6rem;font-weight:700;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--muted);letter-spacing:.06em">${c.sport}</span>
-        <span style="font-size:.65rem;font-weight:700;color:${stateColor}">${stateLabel}</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;justify-content:center">
-        <div style="text-align:center;flex:1">
-          <div class="${abbrStyle}">${away.abbr||away.name||'—'}</div>
-          <div class="${nameStyle}">${(away.name||'').replace(away.abbr||'','').trim()||away.abbr||''}</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:6px">
-          <span style="${scoreStyle}">${isLive||isFinal?away.score||'0':'—'}</span>
-          <span style="color:var(--muted);font-size:.8rem">:</span>
-          <span style="${scoreStyle}">${isLive||isFinal?home.score||'0':'—'}</span>
-        </div>
-        <div style="text-align:center;flex:1">
-          <div class="${abbrStyle}">${home.abbr||home.name||'—'}</div>
-          <div class="${nameStyle}">${(home.name||'').replace(home.abbr||'','').trim()||home.abbr||''}</div>
-        </div>
-      </div>
-      <div style="text-align:center;font-size:.65rem;color:var(--muted)">${g.detail||g.short_detail||''}</div>
-      <div style="display:flex;flex-wrap:wrap;gap:4px">${posHtml}</div>
-    </div>`;
-  }
-
-  function noGameCard(p){
-    return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;opacity:.6">
-      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-        <span style="font-size:.6rem;font-weight:700;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--muted)">${p.sport}</span>
-        <span style="font-size:.62rem;color:var(--muted)">score unavailable</span>
-      </div>
-      <div style="font-size:.72rem;color:var(--text);margin-bottom:6px" title="${p.question}">${p.question}</div>
-      <div style="font-size:.62rem;color:var(--muted)">${p.strategy} · ${p.outcome} · $${p.cost_basis}</div>
-    </div>`;
-  }
-
-  grid.innerHTML=cards.map(gameCard).join('')+noGame.map(noGameCard).join('');
-}
-// ── End sports ──────────────────────────────────────────────────────
 
 const chartDefaults={responsive:true,maintainAspectRatio:true,plugins:{legend:{display:false}},scales:{x:{display:false,grid:{color:'#1a1a1a'}},y:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}}}};
 
