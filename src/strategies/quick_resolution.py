@@ -25,11 +25,13 @@ Market type detection:
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
+from src.sports.sports_intel import classify_market, get_sports_intel
 from src.strategies.base import BaseStrategy, Signal
 from src.strategies.latency_arb import _days_to_expiry
 from src.utils.constants import calc_taker_fee, MIN_TRADE_USDC
@@ -53,6 +55,15 @@ _SPORTS_KEYWORDS = frozenset([
 
 _SPORTS_RE = re.compile(
     r"\b(" + "|".join(re.escape(k) for k in _SPORTS_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+# College basketball keywords — historically one of the most tradeable categories
+_CBB_RE = re.compile(
+    r"\b(ncaa|march madness|college basketball|cbb|tournament|bracket|"
+    r"duke|kansas|kentucky|gonzaga|houston|purdue|uconn|creighton|"
+    r"byu|villanova|virginia|baylor|michigan\s+state|ohio\s+state|"
+    r"kenpom|sagarin|efficiency)\b",
     re.IGNORECASE,
 )
 
@@ -99,12 +110,21 @@ class QuickResolutionStrategy(BaseStrategy):
     Buys high-conviction YES or NO tokens when the ask price leaves enough net
     edge after dynamic fees. Position is naturally exited at market resolution
     ($1.00 payout) or via the auto-close loop in main.py.
+
+    Sports-specific improvements (2026):
+      - Bet-type classification: player props require higher conviction than game winners
+      - Sportsbook divergence gate: only trade when Polymarket price diverges from
+        established bookmakers (requires THE_ODDS_API_KEY; degrades gracefully)
+      - CBB bonus: college basketball markets get a small conviction reduction
+        because sharp CBB bettors create reliable edges on Polymarket
+      - Back-to-back penalty: reduces edge credit when team played yesterday
     """
 
     def __init__(self, config, portfolio, risk_manager) -> None:
         super().__init__(config, portfolio, risk_manager)
         # condition_id -> (entry_price, entered_at) — one entry per market
         self._entered: dict[str, tuple[float, float]] = {}
+        self._sports_intel = get_sports_intel()
 
     async def scan(self, context: dict[str, Any]) -> list[Signal]:
         markets: list[Market] = context.get("markets", [])
@@ -196,6 +216,35 @@ class QuickResolutionStrategy(BaseStrategy):
                 hours_left, min_conviction, floor=conviction_floor, min_edge_floor=min_edge
             )
 
+            # Sports-specific: classify bet type and apply conviction adjustment
+            extra_conviction = 0.0
+            sportsbook_prob: float | None = None
+            bet_classification = None
+
+            if market_type == "sports":
+                bet_classification = classify_market(market.question)
+                extra_conviction = bet_classification.conviction_penalty
+
+                # CBB bonus: reduce extra conviction for college basketball
+                # (KenPom efficiency divergences create reliable market edges)
+                if _CBB_RE.search(market.question):
+                    extra_conviction = max(0.0, extra_conviction - 0.02)
+                    logger.debug(f"QuickRes CBB bonus applied: {market.question[:50]}")
+
+                # Sportsbook divergence check (non-blocking, best-effort)
+                if bet_classification.league:
+                    try:
+                        sportsbook_prob = await asyncio.wait_for(
+                            self._sports_intel.get_sportsbook_implied_prob(
+                                market.question, bet_classification.league
+                            ),
+                            timeout=3.0,
+                        )
+                    except Exception:
+                        sportsbook_prob = None
+
+            adjusted_conviction = conviction_threshold + extra_conviction
+
             sig = self._evaluate(
                 market=market,
                 yes_token_id=yes_token.token_id,
@@ -205,15 +254,17 @@ class QuickResolutionStrategy(BaseStrategy):
                 yes_mid=yes_mid,
                 hours_left=hours_left,
                 market_type=market_type,
-                min_conviction=conviction_threshold,
+                min_conviction=adjusted_conviction,
                 min_edge=effective_min_edge,
                 max_spend=max_spend,
+                sportsbook_prob=sportsbook_prob,
+                bet_type=bet_classification.bet_type if bet_classification else "",
             )
             if sig is not None:
                 signals.append(sig)
             else:
                 yes_mid_val = yes_mid
-                if yes_mid_val >= conviction_threshold or yes_mid_val <= (1.0 - conviction_threshold):
+                if yes_mid_val >= adjusted_conviction or yes_mid_val <= (1.0 - adjusted_conviction):
                     skipped_no_edge += 1
                 else:
                     skipped_no_conviction += 1
@@ -239,7 +290,25 @@ class QuickResolutionStrategy(BaseStrategy):
         min_conviction: float,
         min_edge: float,
         max_spend: float,
+        sportsbook_prob: float | None = None,
+        bet_type: str = "",
     ) -> Signal | None:
+        # --- Sportsbook divergence filter for sports markets ---
+        # Only trade when Polymarket price meaningfully diverges from bookmakers.
+        # This is the #1 predictor of positive EV on sports prediction markets.
+        # If sportsbook_prob is available and difference is < 3%, skip — no edge vs sharps.
+        if sportsbook_prob is not None:
+            divergence = abs(yes_mid - sportsbook_prob)
+            if divergence < 0.03:
+                logger.debug(
+                    f"QuickRes: skip sports market — poly={yes_mid:.3f} book={sportsbook_prob:.3f} "
+                    f"divergence={divergence:.3f} < 0.03 | {market.question[:50]}"
+                )
+                return None
+            # Adjust min_conviction down slightly if divergence is large (strong signal)
+            if divergence > 0.08:
+                min_conviction = max(min_conviction - 0.03, 0.60)
+
         # --- YES side ---
         if yes_mid >= min_conviction:
             best_ask = yes_book.best_ask
@@ -258,6 +327,8 @@ class QuickResolutionStrategy(BaseStrategy):
                         hours_left=hours_left,
                         market_type=market_type,
                         max_spend=max_spend,
+                        sportsbook_prob=sportsbook_prob,
+                        bet_type=bet_type,
                     )
 
         # --- NO side (YES is very unlikely) ---
@@ -265,8 +336,6 @@ class QuickResolutionStrategy(BaseStrategy):
             if no_book is not None and no_book.best_ask is not None:
                 best_ask = no_book.best_ask
                 if best_ask < 1.0:
-                    # Use the NO ask price for fee calculation (price of NO = 1 - yes_mid approx)
-                    no_mid = 1.0 - yes_mid
                     fee = calc_taker_fee(best_ask, market_type)
                     net_edge = (1.0 - best_ask) - fee
                     if net_edge >= min_edge:
@@ -281,6 +350,8 @@ class QuickResolutionStrategy(BaseStrategy):
                             hours_left=hours_left,
                             market_type=market_type,
                             max_spend=max_spend,
+                            sportsbook_prob=sportsbook_prob,
+                            bet_type=bet_type,
                         )
 
         return None
@@ -297,6 +368,8 @@ class QuickResolutionStrategy(BaseStrategy):
         hours_left: float,
         market_type: str,
         max_spend: float,
+        sportsbook_prob: float | None = None,
+        bet_type: str = "",
     ) -> Signal | None:
         arb_opportunities.labels(strategy="quick_resolution").inc()
         edge_detected.labels(strategy="quick_resolution").observe(net_edge)
@@ -307,10 +380,13 @@ class QuickResolutionStrategy(BaseStrategy):
 
         self._entered[market.condition_id] = (best_ask, time.time())
 
+        book_note = f" book={sportsbook_prob:.3f}" if sportsbook_prob is not None else ""
+        bet_note = f" bet_type={bet_type}" if bet_type else ""
+
         self.log(
             f"[QUICK RESOLUTION] BUY {outcome} @ {best_ask:.4f} | "
-            f"{hours_left:.2f}h left | yes_mid={yes_mid:.3f} | "
-            f"fee={fee:.4f} ({market_type}) | edge={net_edge:.4f} | "
+            f"{hours_left:.2f}h left | yes_mid={yes_mid:.3f}{book_note} | "
+            f"fee={fee:.4f} ({market_type}){bet_note} | edge={net_edge:.4f} | "
             f"size=${size_usdc:.2f} | {market.question[:60]}"
         )
 
@@ -323,7 +399,8 @@ class QuickResolutionStrategy(BaseStrategy):
             edge=net_edge,
             notes=(
                 f"[QUICK_RES] BUY {outcome} @ {best_ask:.4f} | "
-                f"{hours_left:.2f}h | fee={fee:.4f} ({market_type}) | edge={net_edge:.4f}"
+                f"{hours_left:.2f}h | fee={fee:.4f} ({market_type}) | "
+                f"edge={net_edge:.4f}{bet_note}"
             ),
             metadata={
                 "outcome": outcome,
@@ -334,5 +411,7 @@ class QuickResolutionStrategy(BaseStrategy):
                 "net_edge": net_edge,
                 "condition_id": market.condition_id,
                 "entered_at": time.time(),
+                "bet_type": bet_type,
+                "sportsbook_prob": sportsbook_prob,
             },
         )

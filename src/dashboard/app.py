@@ -9,6 +9,7 @@ import collections
 import glob
 import json
 import os
+import re
 import time
 import threading as _threading
 
@@ -1899,10 +1900,235 @@ async def api_compare():
 #  Weather stats endpoint                                              #
 # ------------------------------------------------------------------ #
 
+@app.get("/api/sports/stats")
+def sports_stats(api_key: str = Depends(_check_api_key)):
+    """Sports-specific trade analytics: per-bet-type breakdown, league breakdown, recent trades."""
+    from src.sports.sports_intel import classify_market, _detect_league
+
+    if not _portfolio:
+        return {"total_trades": 0, "wins": 0, "win_rate": 0, "total_pnl": 0,
+                "open_count": 0, "open_positions": [], "bet_type_breakdown": [],
+                "league_breakdown": [], "recent_trades": []}
+
+    with _portfolio_lock:
+        trades = list(_portfolio.trades)
+        positions = list(_portfolio.positions.values())
+        closed = list(_portfolio.closed_positions)
+        last_mtm = dict(getattr(_portfolio, "last_mtm_prices", {}) or {})
+
+    # Classify each sports trade by bet type
+    _SPORTS_STRATS = {"quick_resolution", "event_driven", "weather"}  # strategies that may be sports
+    _SPORTS_KW = re.compile(
+        r"\b(nba|nfl|nhl|mlb|mls|ncaa|cbb|ufc|boxing|super bowl|stanley cup|world series|"
+        r"basketball|football|baseball|hockey|soccer|tennis|march madness|playoffs)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_sports(question: str) -> bool:
+        return bool(_SPORTS_KW.search(question))
+
+    sports_trades = [
+        t for t in trades
+        if _is_sports(getattr(t, "notes", "") + " " + getattr(_portfolio.positions.get(t.token_id, None) if _portfolio else None or {}, "market_question", ""))
+    ]
+    # Also include trades linked to sports positions
+    sports_pos_tokens = {
+        pos.token_id
+        for pos in positions
+        if _is_sports(pos.market_question)
+    }
+    sports_closed = [
+        p for p in closed
+        if _is_sports(p.get("market_question", ""))
+    ]
+
+    # Per-bet-type stats from closed positions
+    bet_type_stats: dict[str, dict] = {}
+    league_stats: dict[str, dict] = {}
+
+    for pos in sports_closed:
+        q = pos.get("market_question", "")
+        pnl = pos.get("realized_pnl", 0.0)
+        won = pnl > 0
+
+        clf = classify_market(q)
+        bt = clf.bet_type
+        league = clf.league or _detect_league(q) or "unknown"
+
+        for key, stats_dict in [(bt, bet_type_stats), (league, league_stats)]:
+            if key not in stats_dict:
+                stats_dict[key] = {"trades": 0, "wins": 0, "pnl": 0.0}
+            stats_dict[key]["trades"] += 1
+            stats_dict[key]["wins"] += int(won)
+            stats_dict[key]["pnl"] += pnl
+
+    # Current open sports positions with classification
+    open_sports = []
+    for pos in positions:
+        if not _is_sports(pos.market_question):
+            continue
+        clf = classify_market(pos.market_question)
+        mtm_price = last_mtm.get(pos.token_id, pos.avg_cost)
+        unrealized = pos.unrealized_pnl(mtm_price)
+        open_sports.append({
+            "token_id": pos.token_id,
+            "market_question": pos.market_question,
+            "outcome": pos.outcome,
+            "contracts": round(pos.contracts, 2),
+            "avg_cost": round(pos.avg_cost, 4),
+            "current_price": round(mtm_price, 4),
+            "unrealized_pnl": round(unrealized, 2),
+            "realized_pnl": round(pos.realized_pnl, 2),
+            "strategy": pos.strategy,
+            "bet_type": clf.bet_type,
+            "player_name": clf.player_name,
+            "team_a": clf.team_a,
+            "team_b": clf.team_b,
+            "prop_line": clf.prop_line,
+            "over_under": clf.over_under,
+            "league": clf.league,
+            "opened_at": round(pos.opened_at),
+        })
+
+    total_closed = len(sports_closed)
+    wins = sum(1 for p in sports_closed if p.get("realized_pnl", 0) > 0)
+    total_pnl = sum(p.get("realized_pnl", 0.0) for p in sports_closed)
+
+    bet_type_list = [
+        {
+            "bet_type": k,
+            "trades": v["trades"],
+            "wins": v["wins"],
+            "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+            "pnl": round(v["pnl"], 2),
+        }
+        for k, v in sorted(bet_type_stats.items(), key=lambda x: -x[1]["trades"])
+    ]
+
+    league_list = [
+        {
+            "league": k.upper(),
+            "trades": v["trades"],
+            "wins": v["wins"],
+            "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+            "pnl": round(v["pnl"], 2),
+        }
+        for k, v in sorted(league_stats.items(), key=lambda x: -x[1]["trades"])
+    ]
+
+    # Recent sports trades (last 30)
+    recent: list[dict] = []
+    for pos in reversed(sports_closed[-30:]):
+        q = pos.get("market_question", "")
+        clf = classify_market(q)
+        recent.append({
+            "market_question": q[:80],
+            "outcome": pos.get("outcome", ""),
+            "pnl": round(pos.get("realized_pnl", 0.0), 2),
+            "won": pos.get("realized_pnl", 0) > 0,
+            "bet_type": clf.bet_type,
+            "player_name": clf.player_name,
+            "league": clf.league,
+            "strategy": pos.get("strategy", ""),
+            "closed_at": pos.get("closed_at", 0),
+        })
+    recent.reverse()
+
+    return {
+        "total_trades": total_closed,
+        "wins": wins,
+        "win_rate": round(wins / total_closed * 100, 1) if total_closed else 0,
+        "total_pnl": round(total_pnl, 2),
+        "open_count": len(open_sports),
+        "open_positions": open_sports,
+        "bet_type_breakdown": bet_type_list,
+        "league_breakdown": league_list,
+        "recent_trades": recent,
+    }
+
+
+@app.get("/api/sports/live")
+async def sports_live():
+    """
+    Fetch live game data from ESPN for all major leagues.
+    Returns live scores, game status, and for open positions with player names,
+    fetches live boxscore player stats.
+    """
+    from src.sports.sports_intel import classify_market, get_sports_intel, _detect_league
+
+    intel = get_sports_intel()
+
+    # Fetch live games for all major leagues
+    try:
+        all_games = await intel.get_all_live_games()
+    except Exception as exc:
+        all_games = []
+
+    # Get open sports positions to find relevant players
+    _SPORTS_KW_RE = re.compile(
+        r"\b(nba|nfl|nhl|mlb|mls|ncaa|cbb|basketball|football|baseball|hockey|soccer)\b",
+        re.IGNORECASE,
+    )
+    with _portfolio_lock:
+        open_positions = [
+            pos for pos in (_portfolio.positions.values() if _portfolio else [])
+            if _SPORTS_KW_RE.search(pos.market_question)
+        ]
+
+    # For each open sports position, try to find the live game and fetch player stats
+    position_game_data: list[dict] = []
+    for pos in open_positions:
+        clf = classify_market(pos.market_question)
+        league = clf.league or _detect_league(pos.market_question) or "nba"
+
+        game = await intel.find_live_game_for_question(pos.market_question, league)
+        player_stats: list[dict] = []
+
+        if game and clf.player_name:
+            try:
+                boxscore = await asyncio.wait_for(
+                    intel.get_game_boxscore(game["id"], league),
+                    timeout=5.0,
+                )
+                # Find matching player
+                for p in boxscore.get("players", []):
+                    p_lower = p["name"].lower()
+                    name_lower = clf.player_name.lower()
+                    if name_lower in p_lower or p_lower in name_lower:
+                        player_stats.append(p)
+                        break
+            except Exception:
+                pass
+
+        position_game_data.append({
+            "token_id": pos.token_id,
+            "market_question": pos.market_question[:80],
+            "bet_type": clf.bet_type,
+            "player_name": clf.player_name,
+            "league": league,
+            "game": game,
+            "player_stats": player_stats,
+        })
+
+    # Filter to only live and today's games for display
+    live_games = [g for g in all_games if g.get("is_live")]
+    recent_games = [g for g in all_games if not g.get("is_live")][:20]
+
+    return {
+        "live_games": live_games,
+        "recent_games": recent_games,
+        "position_intel": position_game_data,
+        "timestamp": time.time(),
+    }
+
+
 @app.get("/api/weather/stats")
 def weather_stats(api_key: str = Depends(_check_api_key)):
     import re as _re
-    trades = list(portfolio.trades)
+    if not _portfolio:
+        return {"total_trades": 0, "wins": 0, "win_rate": 0, "total_pnl": 0, "cities": [], "recent_signals": []}
+    with _portfolio_lock:
+        trades = list(_portfolio.trades)
     weather_trades = [t for t in trades if getattr(t, 'strategy', '') == 'weather']
 
     # Parse NOAA notes: "NOAA {city} {date}: model={prob:.1%} market={YES/NO}@{price:.2f} edge={edge:.1%} ..."
@@ -2972,18 +3198,94 @@ tr:hover td{background:var(--surface2)}
 
 </div>
 
-<!-- TAB 9: SPORTS                                              -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB: SPORTS                                                -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page" id="tab-sports">
 
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
     <h2 style="font-size:.9rem;font-weight:700;color:var(--text);margin:0">Live Sports</h2>
     <span style="font-size:.65rem;color:var(--muted)">ESPN scores · refreshes every 30s · no API cost</span>
-    <button onclick="loadSports()" style="margin-left:auto;font-size:.65rem;padding:4px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer">Refresh</button>
+    <button onclick="loadSports();loadSportsLive();" style="margin-left:auto;font-size:.65rem;padding:4px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer">Refresh</button>
   </div>
 
-  <div id="sports-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">
-    <div style="color:var(--muted);font-size:.8rem;padding:32px;text-align:center;grid-column:1/-1">Loading sports data...</div>
+  <!-- KPI row -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+    <div class="kpi-card"><div class="kpi-label">Sports Bets</div><div class="kpi-value" id="sp-total">--</div></div>
+    <div class="kpi-card">
+      <div class="kpi-label">Win Rate</div>
+      <div class="kpi-value" id="sp-winrate">--</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Total PnL</div>
+      <div class="kpi-value" id="sp-pnl">--</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Open Positions</div>
+      <div class="kpi-value" id="sp-open">--</div>
+    </div>
+  </div>
+
+  <!-- Live games (ESPN) -->
+  <div class="section">
+    <h3>Live Games <span id="sp-live-badge" style="font-size:.7rem;background:var(--red);color:#fff;padding:2px 8px;border-radius:4px;vertical-align:middle;display:none">LIVE</span></h3>
+    <div id="sp-live-games"><div class="no-data" style="color:var(--muted)">Loading live games...</div></div>
+  </div>
+
+  <!-- Open positions with player stats -->
+  <div class="section">
+    <h3>Open Sports Positions</h3>
+    <div id="sp-open-positions"><div class="no-data" style="color:var(--muted)">No open sports positions</div></div>
+  </div>
+
+  <!-- Bet type breakdown -->
+  <div class="section">
+    <h3>Performance by Bet Type</h3>
+    <table class="trade-table">
+      <thead><tr>
+        <th>Bet Type</th>
+        <th style="text-align:right">Trades</th>
+        <th style="text-align:right">Win Rate</th>
+        <th style="text-align:right">PnL</th>
+      </tr></thead>
+      <tbody id="sp-bettype-tbody">
+        <tr><td colspan="4" style="color:var(--muted);text-align:center">No data yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- League breakdown -->
+  <div class="section">
+    <h3>Performance by League</h3>
+    <table class="trade-table">
+      <thead><tr>
+        <th>League</th>
+        <th style="text-align:right">Trades</th>
+        <th style="text-align:right">Win Rate</th>
+        <th style="text-align:right">PnL</th>
+      </tr></thead>
+      <tbody id="sp-league-tbody">
+        <tr><td colspan="4" style="color:var(--muted);text-align:center">No data yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Recent sports trades -->
+  <div class="section">
+    <h3>Recent Sports Trades</h3>
+    <table class="trade-table">
+      <thead><tr>
+        <th>Market</th>
+        <th>Type</th>
+        <th>League</th>
+        <th>Outcome</th>
+        <th style="text-align:right">PnL</th>
+        <th>Result</th>
+      </tr></thead>
+      <tbody id="sp-recent-tbody">
+        <tr><td colspan="6" style="color:var(--muted);text-align:center">No trades yet</td></tr>
+      </tbody>
+    </table>
   </div>
 
 </div>
@@ -3047,6 +3349,15 @@ function showTab(name){
 
   if(name==='weather'){
     loadWeather();
+  }
+
+  if(name==='sports'){
+    loadSports();
+    loadSportsLive();
+    if(window._sportsInterval) clearInterval(window._sportsInterval);
+    window._sportsInterval=setInterval(()=>{loadSports();loadSportsLive();},30000);
+  } else {
+    if(window._sportsInterval){clearInterval(window._sportsInterval);window._sportsInterval=null;}
   }
 
   if(name==='ai-intel'){
@@ -4922,6 +5233,173 @@ async function fetchCompare(){
     const warn=$('compare-b-warning');
     if(warn){warn.style.display='block';warn.textContent='Fetch error: '+e.message;}
   }
+}
+
+// ── Sports tab ──────────────────────────────────────────────────────────── //
+
+const BET_TYPE_LABELS = {
+  game_winner:'Game Winner', over_under:'Over/Under', player_points:'Player Points',
+  player_rebounds:'Player Rebounds', player_assists:'Player Assists',
+  player_threes:'3-Pointers', player_double_double:'Double-Double',
+  player_triple_double:'Triple-Double', player_other:'Player Prop',
+  championship:'Championship', futures:'Futures', unknown:'Unknown',
+};
+
+const STATUS_ICON = {
+  active: '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#00e676;margin-right:5px" title="In game"></span>',
+  bench:  '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#ffd740;margin-right:5px" title="On bench"></span>',
+  injured:'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#ff5252;margin-right:5px" title="Injured/Out"></span>',
+  unknown:'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#555;margin-right:5px" title="Status unknown"></span>',
+};
+
+function loadSports(){
+  fetch('/api/sports/stats').then(r=>r.json()).then(d=>{
+    $('sp-total').textContent = d.total_trades ?? '--';
+    const wrEl = $('sp-winrate');
+    wrEl.textContent = (d.win_rate ?? '--') + (d.win_rate != null ? '%' : '');
+    wrEl.style.color = d.win_rate >= 50 ? 'var(--green)' : 'var(--red)';
+    const pEl = $('sp-pnl');
+    pEl.textContent = fmtPnl(d.total_pnl);
+    pEl.className = 'kpi-value ' + (d.total_pnl >= 0 ? 'green' : 'red');
+    $('sp-open').textContent = d.open_count ?? '--';
+
+    // Bet type table
+    const btb = $('sp-bettype-tbody');
+    if(d.bet_type_breakdown && d.bet_type_breakdown.length){
+      btb.innerHTML = d.bet_type_breakdown.map(r=>`
+        <tr>
+          <td>${BET_TYPE_LABELS[r.bet_type]||r.bet_type}</td>
+          <td style="text-align:right">${r.trades}</td>
+          <td style="text-align:right;color:${r.win_rate>=50?'var(--green)':'var(--red)'}">${r.win_rate}%</td>
+          <td style="text-align:right;color:${r.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(r.pnl)}</td>
+        </tr>`).join('');
+    } else {
+      btb.innerHTML='<tr><td colspan="4" style="color:var(--muted);text-align:center">No closed sports trades yet</td></tr>';
+    }
+
+    // League table
+    const ltb = $('sp-league-tbody');
+    if(d.league_breakdown && d.league_breakdown.length){
+      ltb.innerHTML = d.league_breakdown.map(r=>`
+        <tr>
+          <td><span class="badge" style="background:var(--surface2)">${r.league}</span></td>
+          <td style="text-align:right">${r.trades}</td>
+          <td style="text-align:right;color:${r.win_rate>=50?'var(--green)':'var(--red)'}">${r.win_rate}%</td>
+          <td style="text-align:right;color:${r.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(r.pnl)}</td>
+        </tr>`).join('');
+    } else {
+      ltb.innerHTML='<tr><td colspan="4" style="color:var(--muted);text-align:center">No data</td></tr>';
+    }
+
+    // Recent trades table
+    const rtb = $('sp-recent-tbody');
+    if(d.recent_trades && d.recent_trades.length){
+      rtb.innerHTML = d.recent_trades.map(t=>`
+        <tr>
+          <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.market_question}">${t.market_question}</td>
+          <td><span class="badge" style="background:var(--surface2);color:var(--muted)">${BET_TYPE_LABELS[t.bet_type]||t.bet_type}</span></td>
+          <td>${t.league?t.league.toUpperCase():'--'}</td>
+          <td>${t.outcome||'--'}</td>
+          <td style="text-align:right;color:${t.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(t.pnl)}</td>
+          <td><span class="badge ${t.won?'green':'red'}">${t.won?'WIN':'LOSS'}</span></td>
+        </tr>`).join('');
+    } else {
+      rtb.innerHTML='<tr><td colspan="6" style="color:var(--muted);text-align:center">No closed sports trades yet</td></tr>';
+    }
+
+    // Open positions with player detail (no live data yet — will be overlaid by loadSportsLive)
+    const opDiv = $('sp-open-positions');
+    if(d.open_positions && d.open_positions.length){
+      opDiv.innerHTML = `<table class="trade-table">
+        <thead><tr>
+          <th>Market</th><th>Type</th><th>Outcome</th>
+          <th style="text-align:right">Entry</th><th style="text-align:right">Current</th>
+          <th style="text-align:right">Unr. PnL</th><th>Player Stats</th>
+        </tr></thead>
+        <tbody id="sp-open-tbody">` +
+        d.open_positions.map(p=>`
+          <tr id="sp-pos-${p.token_id.slice(-8)}">
+            <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.market_question}">${p.market_question}</td>
+            <td><span class="badge" style="background:var(--surface2);color:var(--muted)">${BET_TYPE_LABELS[p.bet_type]||p.bet_type}</span></td>
+            <td>${p.outcome}</td>
+            <td style="text-align:right">${(p.avg_cost*100).toFixed(1)}¢</td>
+            <td style="text-align:right">${(p.current_price*100).toFixed(1)}¢</td>
+            <td style="text-align:right;color:${p.unrealized_pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(p.unrealized_pnl)}</td>
+            <td id="sp-player-${p.token_id.slice(-8)}" style="color:var(--muted);font-size:.75rem">${p.player_name||'--'}</td>
+          </tr>`).join('') +
+        `</tbody></table>`;
+    } else {
+      opDiv.innerHTML = '<div class="no-data" style="color:var(--muted)">No open sports positions</div>';
+    }
+  }).catch(e=>console.error('sports stats error',e));
+}
+
+function loadSportsLive(){
+  fetch('/api/sports/live').then(r=>r.json()).then(d=>{
+    // Live games section
+    const lgDiv = $('sp-live-games');
+    const badge = $('sp-live-badge');
+    const liveGames = d.live_games || [];
+    const recentGames = d.recent_games || [];
+    const allDisplay = [...liveGames, ...recentGames.slice(0,10)];
+
+    if(liveGames.length > 0){
+      badge.style.display = 'inline';
+    } else {
+      badge.style.display = 'none';
+    }
+
+    if(allDisplay.length){
+      lgDiv.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px">` +
+        allDisplay.map(g=>{
+          const isLive = g.is_live;
+          const isFinal = g.is_final;
+          const statusColor = isLive ? 'var(--red)' : isFinal ? 'var(--muted)' : 'var(--yellow)';
+          const statusText = isLive ? (g.status_detail||'LIVE') : isFinal ? 'FINAL' : (g.status_detail||'SCHEDULED');
+          return `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:.65rem;font-weight:700;color:${statusColor}">${statusText}</span>
+              <span style="font-size:.65rem;color:var(--muted)">${g.league}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <div style="text-align:center;flex:1">
+                <div style="font-size:.75rem;color:var(--text);font-weight:600">${g.away_abbr||g.away_team}</div>
+                <div style="font-size:1.3rem;font-weight:700;color:${g.away_score>g.home_score?'var(--green)':'var(--text)'}">${g.away_score}</div>
+              </div>
+              <div style="color:var(--muted);font-size:.8rem;padding:0 8px">@</div>
+              <div style="text-align:center;flex:1">
+                <div style="font-size:.75rem;color:var(--text);font-weight:600">${g.home_abbr||g.home_team}</div>
+                <div style="font-size:1.3rem;font-weight:700;color:${g.home_score>g.away_score?'var(--green)':'var(--text)'}">${g.home_score}</div>
+              </div>
+            </div>
+          </div>`;
+        }).join('') + `</div>`;
+    } else {
+      lgDiv.innerHTML = '<div class="no-data" style="color:var(--muted)">No live games right now</div>';
+    }
+
+    // Overlay player stats onto open positions
+    const posIntel = d.position_intel || [];
+    posIntel.forEach(pi=>{
+      const tid = pi.token_id ? pi.token_id.slice(-8) : '';
+      const cell = $('sp-player-'+tid);
+      if(!cell) return;
+
+      if(pi.player_stats && pi.player_stats.length){
+        const ps = pi.player_stats[0];
+        const icon = STATUS_ICON[ps.status] || STATUS_ICON.unknown;
+        const inGame = ps.status === 'active';
+        cell.innerHTML = `${icon}<strong style="color:${inGame?'var(--green)':'var(--muted)'}">${ps.name}</strong>
+          <span style="color:var(--muted);font-size:.7rem;margin-left:6px">${ps.pts}pts ${ps.reb}reb ${ps.ast}ast (${ps.min})</span>`;
+      } else if(pi.game){
+        const g = pi.game;
+        cell.innerHTML = `<span style="color:var(--muted);font-size:.75rem">${g.away_abbr} ${g.away_score}–${g.home_score} ${g.home_abbr} (${g.status_detail||g.status})</span>`;
+      } else if(pi.player_name){
+        cell.innerHTML = `<span style="color:var(--muted);">${pi.player_name} — no live data</span>`;
+      }
+    });
+
+  }).catch(e=>console.error('sports live error',e));
 }
 
 fetchAll();
