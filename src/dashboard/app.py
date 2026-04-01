@@ -824,9 +824,9 @@ def kalshi_status():
         except Exception:
             pass
 
-    # Recent cross-exchange decisions
+    # Recent cross-exchange decisions (deque doesn't support slicing — convert first)
     with _cross_exchange_log_lock:
-        recent = list(reversed(_cross_exchange_log[-20:]))
+        recent = list(reversed(list(_cross_exchange_log)[-20:]))
 
     all_ok = all(c["ok"] for c in checklist)
     return {
@@ -3760,15 +3760,21 @@ function updateTrades(data,status){
 //  Status tab                                                          //
 // ------------------------------------------------------------------ //
 async function fetchSystemStatus(){
-  try{
-    const [d,k]=await Promise.all([
-      fetch('/api/system').then(r=>r.json()),
-      fetch('/api/kalshi/status').then(r=>r.json()),
-    ]);
-    renderSystemStatus(d);
-    renderKalshiDiag(k);
-  }catch(e){
-    $('status-connections').innerHTML='<div class="no-data">Failed to load system status</div>';
+  const [sysRes,kalshiRes]=await Promise.allSettled([
+    fetch('/api/system').then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}),
+    fetch('/api/kalshi/status').then(r=>{if(!r.ok)throw new Error(r.status);return r.json();}),
+  ]);
+  if(sysRes.status==='fulfilled'){
+    try{renderSystemStatus(sysRes.value);}catch(e){console.error('renderSystemStatus error',e);}
+  }else{
+    const el=$('status-connections');
+    if(el) el.innerHTML='<div class="no-data">Failed to load system status: '+sysRes.reason+'</div>';
+  }
+  if(kalshiRes.status==='fulfilled'){
+    try{renderKalshiDiag(kalshiRes.value);}catch(e){console.error('renderKalshiDiag error',e);}
+  }else{
+    const el=$('kalshi-diag');
+    if(el) el.innerHTML='<div class="no-data" style="color:var(--muted)">Kalshi status unavailable: '+kalshiRes.reason+'</div>';
   }
 }
 
