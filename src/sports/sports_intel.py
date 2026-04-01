@@ -298,6 +298,7 @@ class SportsIntel:
 
     def __init__(self) -> None:
         self._live_cache = _TTLCache(ttl_seconds=45.0)    # live scores refresh fast
+        self._wp_cache = _TTLCache(ttl_seconds=30.0)       # win probability updates per play
         self._player_cache = _TTLCache(ttl_seconds=120.0)  # injury status changes slower
         self._odds_cache = _TTLCache(ttl_seconds=300.0)    # sportsbook lines refresh slowly
         self._odds_api_key = os.getenv("THE_ODDS_API_KEY", "")
@@ -660,6 +661,52 @@ class SportsIntel:
                 return game
 
         return None
+
+    # -----------------------------------------------------------------------
+    # Live win probability from ESPN /summary endpoint
+    # -----------------------------------------------------------------------
+    async def get_live_win_prob(self, event_id: str, league: str = "nba") -> float | None:
+        """
+        Return ESPN's current home-team win probability for a live game.
+        Uses the /summary endpoint which includes a 'winprobability' array —
+        each entry has homeWinPercentage (float 0.0–1.0) per play.
+        Returns the LAST entry (most recent play) or None on failure.
+
+        Result is the HOME team win probability. Callers must invert for away.
+
+        Cache TTL: 30s (live games update every few seconds).
+        """
+        cache_key = f"wp:{league}:{event_id}"
+        cached = self._wp_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        sport_path = _LEAGUE_SPORT_PATH.get(league, "basketball/nba")
+        # The /summary endpoint (site.web.api.espn.com) includes win probability data
+        url = f"https://site.web.api.espn.com/apis/site/v2/sports/{sport_path}/summary?event={event_id}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.debug(f"SportsIntel win_prob {league}/{event_id}: {exc}")
+            return None
+
+        wp_arr = data.get("winprobability", [])
+        if not wp_arr:
+            return None
+
+        # Last entry = most recent play's probability
+        last_wp = wp_arr[-1]
+        home_prob = last_wp.get("homeWinPercentage")
+        if home_prob is None:
+            return None
+
+        result = float(home_prob)
+        self._wp_cache.set(cache_key, result)
+        return result
 
     # -----------------------------------------------------------------------
     # Back-to-back detection

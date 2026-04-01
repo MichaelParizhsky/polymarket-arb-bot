@@ -100,6 +100,7 @@ class RiskConfig:
         "swarm_prediction": 300.0,  # crowd simulation strategy budget
         "auto_close": 9999.0,  # auto-close is resolution, not a strategy — no budget cap
         "weather": 150.0,      # Kalshi weather markets — tight budget while calibrating NOAA model
+        "live_game": 200.0,    # In-play momentum — conservative budget until calibrated
     })
 
 
@@ -189,6 +190,21 @@ class StrategyConfig:
     swarm_min_volume: float = field(default_factory=lambda: _float("SWARM_MIN_VOLUME", 5000.0))
     swarm_agent_count: int = field(default_factory=lambda: _int("SWARM_AGENT_COUNT", 12))
     swarm_cooldown_hours: float = field(default_factory=lambda: _float("SWARM_COOLDOWN_HOURS", 4.0))
+
+    # Live game: in-play momentum betting on game_winner markets during live games
+    # Uses ESPN's real-time win probability from /summary endpoint.
+    # Buys the leading team when Polymarket price lags ESPN model by >= min_divergence.
+    live_game_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_LIVE_GAME", False))
+    live_game_min_game_pct: float = field(default_factory=lambda: _float("LIVE_GAME_MIN_GAME_PCT", 0.40))
+    live_game_max_game_pct: float = field(default_factory=lambda: _float("LIVE_GAME_MAX_GAME_PCT", 0.90))
+    live_game_min_divergence: float = field(default_factory=lambda: _float("LIVE_GAME_MIN_DIVERGENCE", 0.06))
+    live_game_min_score_diff: int = field(default_factory=lambda: _int("LIVE_GAME_MIN_SCORE_DIFF", 5))
+    live_game_min_poly_price: float = field(default_factory=lambda: _float("LIVE_GAME_MIN_POLY_PRICE", 0.55))
+    live_game_max_poly_price: float = field(default_factory=lambda: _float("LIVE_GAME_MAX_POLY_PRICE", 0.88))
+    live_game_min_net_edge: float = field(default_factory=lambda: _float("LIVE_GAME_MIN_NET_EDGE", 0.005))
+    live_game_max_spend: float = field(default_factory=lambda: _float("LIVE_GAME_MAX_SPEND", 75.0))
+    live_game_min_volume: float = field(default_factory=lambda: _float("LIVE_GAME_MIN_VOLUME", 500.0))
+    live_game_cooldown_hours: float = field(default_factory=lambda: _float("LIVE_GAME_COOLDOWN_HOURS", 2.0))
 
     # Kalshi weather markets — trades temperature and precipitation markets using NOAA forecasts.
     # Requires KALSHI_ENABLED=true and valid Kalshi credentials.

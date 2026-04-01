@@ -38,6 +38,7 @@ from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
 from src.strategies.quick_resolution import QuickResolutionStrategy
 from src.strategies.crypto_5m import CryptoShortStrategy
+from src.strategies.live_game import LiveGameStrategy
 try:
     from src.strategies.swarm_prediction import SwarmPredictionStrategy
     _SWARM_AVAILABLE = True
@@ -229,6 +230,11 @@ class ArbBot:
                 logger.warning("WeatherStrategy requires Kalshi credentials (KALSHI_ENABLED=true)")
             else:
                 logger.warning("WeatherStrategy not available — check src/strategies/weather.py")
+        if getattr(cfg, 'live_game_enabled', False):
+            self._strategies.append(
+                LiveGameStrategy(self.config, self.portfolio, self.risk)
+            )
+            logger.info("LiveGameStrategy (in-play momentum via ESPN win probability) ENABLED")
         strategy_names = [s.name for s in self._strategies]
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture

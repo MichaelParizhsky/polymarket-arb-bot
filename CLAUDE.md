@@ -143,6 +143,7 @@ When adding new strategies or changing logic, always:
 | `quick_resolution` | High-conviction near-expiry extremes (>88% or <12%) | `QUICK_RESOLUTION_MIN_CONVICTION` |
 | `crypto_5m` | 5-min BTC/ETH/SOL binary markets, dual-arb + snipe | `STRATEGY_CRYPTO_5M` |
 | `swarm_prediction` | Multi-persona crowd simulation via Perplexity Agent API | `STRATEGY_SWARM` |
+| `live_game` | In-play momentum: buy leading team when Poly lags ESPN win prob | `STRATEGY_LIVE_GAME` |
 
 ## AI Integrations
 
