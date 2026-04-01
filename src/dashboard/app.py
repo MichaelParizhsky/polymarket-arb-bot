@@ -52,20 +52,149 @@ _state_loaded_from_file: bool = False
 # Lock protecting reads of the portfolio object from the dashboard thread
 _portfolio_lock = _threading.RLock()
 
-# Live market status cache: token_id -> {active, closed, end_date_iso}
+# Live market status cache: token_id -> {active, closed, end_date_iso, category}
 # Updated by main.py after each market scan; used to enrich /api/positions.
 _market_status: dict[str, dict] = {}
 _market_status_lock = _threading.Lock()
 
 
-def update_market_status(token_id: str, active: bool, closed: bool, end_date_iso: str) -> None:
+def update_market_status(token_id: str, active: bool, closed: bool, end_date_iso: str, category: str = "") -> None:
     """Called by main.py to keep live market status for open positions."""
     with _market_status_lock:
         _market_status[token_id] = {
             "active": active,
             "closed": closed,
             "end_date_iso": end_date_iso,
+            "category": category,
         }
+
+
+# ── Sports live scores ──────────────────────────────────────────────────────
+# ESPN's unofficial scoreboard API — free, no auth, ~30s latency during games.
+# Endpoint pattern: https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard
+import re as _re
+
+_ESPN_URLS: dict[str, str] = {
+    "nba":        "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+    "nfl":        "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+    "nhl":        "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard",
+    "mlb":        "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
+    "ncaaf":      "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard",
+    "cfb":        "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard",
+    "ncaab":      "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard",
+    "cbb":        "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard",
+    "mls":        "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard",
+    "bundesliga": "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard",
+}
+
+# Category strings from Polymarket → ESPN sport key
+_SPORT_ALIASES: dict[str, str] = {
+    "nba": "nba", "nfl": "nfl", "nhl": "nhl", "mlb": "mlb",
+    "ncaaf": "ncaaf", "cfb": "ncaaf",
+    "ncaab": "ncaab", "cbb": "ncaab",
+    "mls": "mls",
+    "bundesliga": "bundesliga",
+    "soccer": "mls",
+    "basketball": "nba",
+    "football": "nfl",
+    "hockey": "nhl",
+    "baseball": "mlb",
+}
+
+_SCORE_CACHE: dict[str, dict] = {}   # sport_key -> {ts: float, events: list}
+_SCORE_CACHE_TTL = 30.0              # seconds
+
+_TEAM_PAT = [
+    _re.compile(r"Will (?:the )?(.+?) (?:beat|defeat|win(?:\s+(?:against|vs\.?))?|cover|top|upset) (?:the )?(.+?)[\?\.,$]", _re.I),
+    _re.compile(r"^(.+?) (?:vs\.?|versus|@|at) (.+?)[\?\.,$]", _re.I),
+    _re.compile(r"^(.+?) (?:vs\.?|versus|@|at) (.+?)$", _re.I),
+]
+
+
+def _extract_teams(question: str) -> tuple[str, str] | None:
+    """Parse two team names out of a Polymarket question string."""
+    q = question.strip()
+    for pat in _TEAM_PAT:
+        m = pat.search(q)
+        if m:
+            t1 = m.group(1).strip().strip("?.,")
+            t2 = m.group(2).strip().strip("?.,")
+            # Drop trailing noise like "Game 1", "- winner", etc.
+            for noise in [" Game 1", " Game 2", " Game 3", " - winner", " winner", " tonight"]:
+                t1 = t1.replace(noise, "").strip()
+                t2 = t2.replace(noise, "").strip()
+            if t1 and t2:
+                return t1, t2
+    return None
+
+
+def _team_matches(extracted: str, espn_name: str, espn_abbr: str) -> bool:
+    """True if `extracted` is a reasonable match for an ESPN team."""
+    ex = extracted.lower().strip()
+    nm = espn_name.lower()
+    ab = espn_abbr.lower()
+    if ex == ab or ex in nm or nm.endswith(" " + ex):
+        return True
+    # city/nickname split: "Orlando Magic" → "magic" matches "Magic"
+    words = nm.split()
+    return bool(words) and (ex == words[-1] or ex == words[0])
+
+
+async def _fetch_espn(sport_key: str) -> list[dict]:
+    """Fetch today's scoreboard from ESPN. Returns parsed game dicts."""
+    url = _ESPN_URLS.get(sport_key)
+    if not url:
+        return []
+    now = time.time()
+    cached = _SCORE_CACHE.get(sport_key)
+    if cached and now - cached["ts"] < _SCORE_CACHE_TTL:
+        return cached["events"]
+
+    import httpx as _hx
+    try:
+        async with _hx.AsyncClient(timeout=6.0) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            raw = r.json()
+    except Exception as exc:
+        logger.debug(f"ESPN {sport_key} fetch failed: {exc}")
+        return cached["events"] if cached else []
+
+    events: list[dict] = []
+    for ev in raw.get("events", []):
+        comps = ev.get("competitions", [])
+        if not comps:
+            continue
+        comp = comps[0]
+        competitors = comp.get("competitors", [])
+        if len(competitors) < 2:
+            continue
+        status = ev.get("status", {})
+        stype = status.get("type", {})
+        teams = []
+        for c in competitors:
+            tm = c.get("team", {})
+            teams.append({
+                "name": tm.get("displayName", ""),
+                "abbr": tm.get("abbreviation", ""),
+                "score": c.get("score", "0"),
+                "home_away": c.get("homeAway", "away"),
+            })
+        events.append({
+            "id": ev.get("id", ""),
+            "name": ev.get("name", ""),
+            "short_name": ev.get("shortName", ""),
+            "date": ev.get("date", ""),
+            "state": stype.get("state", "pre"),   # pre / in / post
+            "detail": stype.get("detail", ""),
+            "short_detail": stype.get("shortDetail", ""),
+            "period": status.get("period", 0),
+            "clock": status.get("displayClock", ""),
+            "teams": teams,
+        })
+
+    _SCORE_CACHE[sport_key] = {"ts": now, "events": events}
+    return events
 
 # Ring buffer for cross-exchange signal decisions (last 100)
 _cross_exchange_log: collections.deque = collections.deque(maxlen=100)
@@ -1774,6 +1903,87 @@ def weather_stats(api_key: str = Depends(_check_api_key)):
 
 
 # ------------------------------------------------------------------ #
+#  Sports live-scores endpoint                                         #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/sports-scores")
+async def sports_scores():
+    """
+    Live game scores for open sports positions.
+    Uses ESPN's free unofficial scoreboard API — no API key, no cost.
+    Cached 30 s server-side so rapid dashboard refreshes are free.
+    """
+    if not _portfolio:
+        return []
+
+    with _portfolio_lock:
+        positions_items = list(_portfolio.positions.items())
+    with _market_status_lock:
+        status_snapshot = dict(_market_status)
+
+    # Determine which ESPN sport feeds we need
+    sports_needed: set[str] = set()
+    pos_sport: dict[str, str] = {}   # token_id -> sport_key
+    for tid, pos in positions_items:
+        ms = status_snapshot.get(tid, {})
+        cat = ms.get("category", "").lower()
+        # Fallback: scan question for sport keywords
+        if not cat:
+            q = pos.market_question.lower()
+            for kw in ["nba", "nfl", "nhl", "mlb", "mls", "bundesliga", "ncaab", "ncaaf"]:
+                if kw in q:
+                    cat = kw
+                    break
+        sport_key = _SPORT_ALIASES.get(cat, "")
+        if sport_key:
+            sports_needed.add(sport_key)
+            pos_sport[tid] = sport_key
+
+    if not sports_needed:
+        return []
+
+    # Parallel-fetch ESPN feeds for all needed sports
+    import asyncio as _aio
+    sport_list = list(sports_needed)
+    fetched = await _aio.gather(*[_fetch_espn(s) for s in sport_list], return_exceptions=True)
+    sport_events: dict[str, list] = {}
+    for sk, result in zip(sport_list, fetched):
+        if isinstance(result, list):
+            sport_events[sk] = result
+
+    # Match each position to a game
+    results = []
+    for tid, pos in positions_items:
+        sport_key = pos_sport.get(tid)
+        if not sport_key:
+            continue
+        events = sport_events.get(sport_key, [])
+        teams = _extract_teams(pos.market_question)
+        matched = None
+        if teams and events:
+            t1, t2 = teams
+            for ev in events:
+                ev_teams = ev.get("teams", [])
+                names = [t["name"] for t in ev_teams]
+                abbrs = [t["abbr"] for t in ev_teams]
+                if any(_team_matches(t1, n, a) for n, a in zip(names, abbrs)) or \
+                   any(_team_matches(t2, n, a) for n, a in zip(names, abbrs)):
+                    matched = ev
+                    break
+        results.append({
+            "token_id": tid,
+            "question": pos.market_question[:80],
+            "outcome": pos.outcome,
+            "strategy": pos.strategy,
+            "cost_basis": round(pos.cost_basis, 2),
+            "sport": sport_key.upper(),
+            "game": matched,
+        })
+
+    return results
+
+
+# ------------------------------------------------------------------ #
 #  Helpers                                                             #
 # ------------------------------------------------------------------ #
 
@@ -2058,6 +2268,7 @@ tr:hover td{background:var(--surface2)}
   <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
   <div class="tab" onclick="showTab('system')">System</div>
   <div class="tab" onclick="showTab('weather')">Weather</div>
+  <div class="tab" onclick="showTab('sports')">Sports</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -2683,6 +2894,22 @@ tr:hover td{background:var(--surface2)}
 
 </div>
 
+<!-- TAB 9: SPORTS                                              -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-sports">
+
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+    <h2 style="font-size:.9rem;font-weight:700;color:var(--text);margin:0">Live Sports</h2>
+    <span style="font-size:.65rem;color:var(--muted)">ESPN scores · refreshes every 30s · no API cost</span>
+    <button onclick="loadSports()" style="margin-left:auto;font-size:.65rem;padding:4px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer">Refresh</button>
+  </div>
+
+  <div id="sports-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px">
+    <div style="color:var(--muted);font-size:.8rem;padding:32px;text-align:center;grid-column:1/-1">Loading sports data...</div>
+  </div>
+
+</div>
+
 <!-- Hidden elements required by log stream (live-uptime, live-realized, etc.) -->
 <div style="display:none">
   <span id="live-uptime">--</span>
@@ -2709,9 +2936,10 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-// 8 tabs: overview, positions, trades, strategies, ai-intel, meta, system, weather
-const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system','weather'];
+// 9 tabs: overview, positions, trades, strategies, ai-intel, meta, system, weather, sports
+const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system','weather','sports'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
+let _sportsInterval=null;
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -2759,6 +2987,14 @@ function showTab(name){
     if(_newsInterval){clearInterval(_newsInterval);_newsInterval=null;}
     if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
   }
+
+  if(name==='sports'){
+    loadSports();
+    if(_sportsInterval)clearInterval(_sportsInterval);
+    _sportsInterval=setInterval(loadSports,30000);
+  } else {
+    if(_sportsInterval){clearInterval(_sportsInterval);_sportsInterval=null;}
+  }
 }
 
 function loadWeather(){
@@ -2802,6 +3038,94 @@ function loadWeather(){
     }
   }).catch(e=>console.error('weather stats error',e));
 }
+
+// ── Sports live scores ──────────────────────────────────────────────
+async function loadSports(){
+  const grid=$('sports-grid');
+  if(!grid)return;
+  let data=[];
+  try{
+    const r=await fetch('/api/sports-scores');
+    data=await r.json();
+  }catch(e){
+    grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;padding:32px;text-align:center;grid-column:1/-1">Failed to load sports data</div>';
+    return;
+  }
+  if(!data.length){
+    grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;padding:32px;text-align:center;grid-column:1/-1">No open sports positions</div>';
+    return;
+  }
+  // Deduplicate by game id — multiple positions can share a game
+  const seen=new Map(); // game_id -> card data
+  const noGame=[];
+  for(const p of data){
+    const g=p.game;
+    if(!g){noGame.push(p);continue;}
+    const key=g.id||g.name;
+    if(!seen.has(key)){seen.set(key,{game:g,sport:p.sport,positions:[]});}
+    seen.get(key).positions.push(p);
+  }
+  const cards=[...seen.values()];
+
+  function gameCard(c){
+    const g=c.game;
+    const teams=g.teams||[];
+    const away=teams.find(t=>t.home_away==='away')||teams[0]||{};
+    const home=teams.find(t=>t.home_away==='home')||teams[1]||{};
+    const state=g.state; // pre/in/post
+    const isLive=state==='in';
+    const isFinal=state==='post';
+    const stateColor=isLive?'#00e676':isFinal?'#64748b':'#ffd740';
+    const stateLabel=isLive?'● LIVE':isFinal?'FINAL':'PREGAME';
+    const scoreStyle='font-size:1.5rem;font-weight:700;color:var(--text);min-width:36px;text-align:center';
+    const nameStyle='font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-top:2px';
+    const abbrStyle='font-size:1rem;font-weight:700;color:var(--text)';
+
+    // Which positions bet on which side?
+    const posHtml=c.positions.map(p=>{
+      const teamGuess=p.outcome==='Yes'?'YES win':'NO win';
+      return`<span style="font-size:.62rem;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 6px;color:var(--accent2)" title="${p.question}">${p.sport} · ${p.strategy} · ${teamGuess} · $${p.cost_basis}</span>`;
+    }).join(' ');
+
+    return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:.6rem;font-weight:700;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--muted);letter-spacing:.06em">${c.sport}</span>
+        <span style="font-size:.65rem;font-weight:700;color:${stateColor}">${stateLabel}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;justify-content:center">
+        <div style="text-align:center;flex:1">
+          <div class="${abbrStyle}">${away.abbr||away.name||'—'}</div>
+          <div class="${nameStyle}">${(away.name||'').replace(away.abbr||'','').trim()||away.abbr||''}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="${scoreStyle}">${isLive||isFinal?away.score||'0':'—'}</span>
+          <span style="color:var(--muted);font-size:.8rem">:</span>
+          <span style="${scoreStyle}">${isLive||isFinal?home.score||'0':'—'}</span>
+        </div>
+        <div style="text-align:center;flex:1">
+          <div class="${abbrStyle}">${home.abbr||home.name||'—'}</div>
+          <div class="${nameStyle}">${(home.name||'').replace(home.abbr||'','').trim()||home.abbr||''}</div>
+        </div>
+      </div>
+      <div style="text-align:center;font-size:.65rem;color:var(--muted)">${g.detail||g.short_detail||''}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${posHtml}</div>
+    </div>`;
+  }
+
+  function noGameCard(p){
+    return`<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;opacity:.6">
+      <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:.6rem;font-weight:700;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--muted)">${p.sport}</span>
+        <span style="font-size:.62rem;color:var(--muted)">score unavailable</span>
+      </div>
+      <div style="font-size:.72rem;color:var(--text);margin-bottom:6px" title="${p.question}">${p.question}</div>
+      <div style="font-size:.62rem;color:var(--muted)">${p.strategy} · ${p.outcome} · $${p.cost_basis}</div>
+    </div>`;
+  }
+
+  grid.innerHTML=cards.map(gameCard).join('')+noGame.map(noGameCard).join('');
+}
+// ── End sports ──────────────────────────────────────────────────────
 
 const chartDefaults={responsive:true,maintainAspectRatio:true,plugins:{legend:{display:false}},scales:{x:{display:false,grid:{color:'#1a1a1a'}},y:{grid:{color:'#1a1a1a'},ticks:{color:'#555',font:{size:10}}}}};
 

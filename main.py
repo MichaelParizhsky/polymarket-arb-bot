@@ -645,8 +645,9 @@ class ArbBot:
                 for m in coll:
                     for t in m.tokens:
                         if t.token_id in open_tids:
+                            _cat = getattr(m, "category", "") or (m.tags[0] if m.tags else "")
                             _dashboard_update_market_status(
-                                t.token_id, m.active, m.closed, m.end_date_iso
+                                t.token_id, m.active, m.closed, m.end_date_iso, _cat
                             )
 
         # Collect all token IDs (main markets + crypto short markets)
