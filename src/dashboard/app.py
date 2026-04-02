@@ -618,6 +618,7 @@ def trades(limit: int = 100):
             "fee": round(t.fee, 4),
             "timestamp": int(t.timestamp),
             "notes": t.notes[:80],
+            "realized_pnl": round(getattr(t, "realized_pnl", 0.0), 4),
         }
         for t in recent
     ]
@@ -3739,8 +3740,13 @@ function updateTrades(data,status){
   $('t-fees').textContent=fmt(status.fees_paid);
   if(!data.length){$('trades-table').innerHTML='<div class="no-data">No trades yet</div>';return;}
   $('trades-table').innerHTML=`<table>
-    <tr><th>ID</th><th>Time</th><th>Strategy</th><th>Token (CLOB)</th><th>Side</th><th>Contracts</th><th>Price</th><th>Amount</th><th>Notes</th></tr>
-    ${data.map(t=>`<tr>
+    <tr><th>ID</th><th>Time</th><th>Strategy</th><th>Token (CLOB)</th><th>Side</th><th>Contracts</th><th>Price</th><th>Amount</th><th>Realized P&amp;L</th><th>Notes</th></tr>
+    ${data.map(t=>{
+      const rp=t.realized_pnl||0;
+      const rpCell=t.side==='SELL'
+        ?`<td class="${rp>=0?'win':'loss'}" style="font-weight:600">${rp>=0?'+':''}${fmt(rp)}</td>`
+        :`<td style="color:#555">—</td>`;
+      return`<tr>
       <td>${t.trade_id}</td>
       <td class="ts-small">${ts(t.timestamp)}</td>
       <td>${badge(t.strategy)}</td>
@@ -3749,8 +3755,9 @@ function updateTrades(data,status){
       <td>${t.contracts}</td>
       <td>${fmtN(t.price)}</td>
       <td>${fmt(t.usdc_amount)}</td>
+      ${rpCell}
       <td style="color:#555">${t.notes}</td>
-    </tr>`).join('')}
+    </tr>`;}).join('')}
   </table>`;
 }
 

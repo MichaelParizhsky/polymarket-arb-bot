@@ -60,6 +60,7 @@ class Trade:
     usdc_amount: float
     timestamp: float = field(default_factory=time.time)
     notes: str = ""
+    realized_pnl: float = 0.0   # set on SELL trades; 0 for BUY
 
     @property
     def fee(self) -> float:
@@ -224,6 +225,7 @@ class PaperPortfolio:
             price=price,
             usdc_amount=proceeds,
             notes=notes,
+            realized_pnl=round(realized, 4),
         )
         self.trades.append(trade)
         self._update_metrics()
@@ -401,6 +403,7 @@ class PaperPortfolio:
                     "fee": round(t.fee, 6),
                     "timestamp": t.timestamp,
                     "notes": t.notes,
+                    "realized_pnl": round(t.realized_pnl, 4),
                 }
                 for t in recent_trades
             ],
@@ -434,6 +437,7 @@ class PaperPortfolio:
                     usdc_amount=t["usdc_amount"],
                     timestamp=t["timestamp"],
                     notes=t.get("notes", ""),
+                    realized_pnl=t.get("realized_pnl", 0.0),
                 )
                 self.trades.append(trade)
             self._trade_counter = len(self.trades)
