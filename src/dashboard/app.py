@@ -449,6 +449,22 @@ def reset_portfolio():
     return {"ok": True, "starting_balance": starting}
 
 
+@app.post("/api/add-funds")
+def add_funds(amount: float = 10000.0):
+    """Add virtual USDC to the paper portfolio without resetting trades.
+    Also raises starting_balance so PnL % stays meaningful."""
+    if not _portfolio:
+        return JSONResponse({"ok": False, "error": "Bot not running"}, status_code=503)
+    amount = max(0.0, min(amount, 1_000_000.0))
+    with _portfolio_lock:
+        _portfolio.usdc_balance += amount
+        _portfolio.starting_balance += amount
+    _state_path = _os.getenv("STATE_FILE_PATH", "logs/portfolio_state.json")
+    _portfolio.save_to_json(_state_path)
+    logger.info(f"[PAPER] Added ${amount:,.0f} virtual USDC — new balance ${_portfolio.usdc_balance:,.2f}")
+    return {"ok": True, "added": amount, "usdc_balance": round(_portfolio.usdc_balance, 2)}
+
+
 # ------------------------------------------------------------------ #
 #  Bot API endpoints                                                   #
 # ------------------------------------------------------------------ #
@@ -2442,6 +2458,8 @@ header h1{color:var(--accent2);font-size:1.1rem;letter-spacing:.05em;font-weight
 #uptime-info{color:var(--muted);font-size:.75rem;margin-left:auto}
 #reset-btn{font-size:.7rem;padding:4px 12px;border-radius:6px;background:#1f0a0a;color:var(--red);border:1px solid #3d1515;cursor:pointer;transition:all .2s}
 #reset-btn:hover{background:#3d1515}
+#add-funds-btn{font-size:.7rem;padding:4px 12px;border-radius:6px;background:#0a1f0a;color:var(--green);border:1px solid #153d15;cursor:pointer;transition:all .2s}
+#add-funds-btn:hover{background:#153d15}
 
 .tabs{display:flex;background:var(--surface);border-bottom:1px solid var(--border);padding:0 20px;gap:2px}
 .tab{padding:11px 20px;cursor:pointer;color:var(--muted);font-size:.8rem;font-weight:500;border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap}
@@ -2654,6 +2672,7 @@ tr:hover td{background:var(--surface2)}
   <h1 id="bot-title">Polymarket Arb Bot</h1>
   <span id="mode-badge">PAPER</span>
   <span id="uptime-info">loading...</span>
+  <button id="add-funds-btn" onclick="addFunds()">+ Add $10k</button>
   <button id="reset-btn" onclick="resetPortfolio()">Reset to $10,000</button>
 </header>
 
@@ -4717,6 +4736,23 @@ async function resetPortfolio(){
       alert('Reset failed: '+(d.error||'unknown error'));
     }
   }catch(e){alert('Reset failed: '+e);}
+}
+
+async function addFunds(){
+  const input=prompt('Add virtual USDC (default $10,000):','10000');
+  if(input===null)return;
+  const amount=parseFloat(input.replace(/[,$]/g,''));
+  if(isNaN(amount)||amount<=0){alert('Invalid amount');return;}
+  try{
+    const r=await fetch(`/api/add-funds?amount=${amount}`,{method:'POST',headers:{'X-Api-Key':window._dashApiKey||''}});
+    const d=await r.json();
+    if(d.ok){
+      alert(`Added $${amount.toLocaleString()} — new balance: $${d.usdc_balance.toLocaleString()}`);
+      fetchAll();
+    }else{
+      alert('Failed: '+(d.error||'unknown error'));
+    }
+  }catch(e){alert('Failed: '+e);}
 }
 
 // ------------------------------------------------------------------ //
