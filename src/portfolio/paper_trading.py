@@ -17,8 +17,17 @@ from src.utils.metrics import (
 from src.utils.database import log_trade, init_db
 
 
-def _estimate_slippage(volume_24h: float) -> float:
-    """Liquidity-adjusted slippage estimate."""
+_MAKER_STRATEGIES = frozenset({"market_making"})
+
+
+def _estimate_slippage(volume_24h: float, strategy: str = "") -> float:
+    """Liquidity-adjusted slippage estimate.
+
+    Market making posts limit orders (maker fills) — no slippage since the fill
+    happens at the quoted price. All other strategies are taker orders.
+    """
+    if strategy in _MAKER_STRATEGIES:
+        return 0.0
     if volume_24h >= 100_000:
         return 0.002   # 0.2% — liquid market
     elif volume_24h >= 10_000:
@@ -107,7 +116,7 @@ class PaperPortfolio:
     ) -> Optional[Trade]:
         """Simulate buying outcome tokens."""
         volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
-        slippage_rate = _estimate_slippage(volume_24h)
+        slippage_rate = _estimate_slippage(volume_24h, strategy)
         slippage = price * slippage_rate
         cost = contracts * (price + slippage)
         fee = cost * 0.002
@@ -192,7 +201,7 @@ class PaperPortfolio:
             return None
 
         volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
-        slippage_rate = _estimate_slippage(volume_24h)
+        slippage_rate = _estimate_slippage(volume_24h, strategy)
         slippage = price * slippage_rate
         proceeds = contracts * (price - slippage)
         fee = proceeds * 0.002
