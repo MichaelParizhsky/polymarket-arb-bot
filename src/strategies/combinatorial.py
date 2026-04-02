@@ -32,8 +32,17 @@ _FEE_ROUND_TRIP = 2 * (FEE_RATE + SLIPPAGE_RATE)
 #  Keyword clusters to group related markets                           #
 # ------------------------------------------------------------------ #
 TOPIC_KEYWORDS: dict[str, list[str]] = {
-    "btc_price": ["bitcoin", "btc", "100k", "80k", "75k", "70k", "60k", "50k"],
-    "eth_price": ["ethereum", "eth", "5k", "4k", "3k", "2k"],
+    # BTC price levels — kept broad to cover current market range (~$85-95k) and wings
+    "btc_price": [
+        "bitcoin", "btc",
+        "120k", "115k", "110k", "105k", "100k", "95k", "90k", "85k",
+        "80k", "75k", "70k", "60k", "50k",
+    ],
+    # ETH price levels — updated to cover $2k-$8k range
+    "eth_price": [
+        "ethereum", "eth",
+        "8k", "7k", "6k", "5k", "4k", "3k", "2k",
+    ],
     "sol_price": ["solana", "sol"],
     "election_us": ["president", "election", "trump", "harris", "democrat", "republican"],
     "fed_rate": ["fed", "federal reserve", "interest rate", "rate cut", "bps"],
@@ -191,6 +200,11 @@ class CombinatorialStrategy(BaseStrategy):
 
             low_yes = low_m["yes_mid"]
             high_yes = high_m["yes_mid"]
+
+            # Skip near-resolved pairs — if both prices are already near 0 or 1,
+            # the spread exists but is unactionable (can't close at fair value).
+            if low_yes < 0.05 or high_yes > 0.95:
+                continue
 
             # Violation: P(above HIGH) > P(above LOW)
             if high_yes > low_yes + 0.01:

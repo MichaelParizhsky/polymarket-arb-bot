@@ -91,7 +91,7 @@ class MarketMakingStrategy(BaseStrategy):
             # Adverse selection check — skip market if risk is too high
             price_history = self._price_cache.get(token_id, [])
             as_score = self._compute_adverse_selection_score(market.condition_id, book, price_history)
-            AS_THRESHOLD = getattr(self.config.strategy, 'mm_adverse_selection_threshold', 0.6) if hasattr(self.config, 'strategy') else 0.6
+            AS_THRESHOLD = getattr(self.config.strategies, 'mm_adverse_selection_threshold', 0.6)
             if as_score >= AS_THRESHOLD:
                 self.log(
                     f"MM: skipping {market.question[:40]} — adverse selection score {as_score:.2f} >= {AS_THRESHOLD:.2f}",
@@ -199,16 +199,27 @@ class MarketMakingStrategy(BaseStrategy):
         """Pick top markets by volume that have reasonable spreads."""
         cfg = self.config.strategies
         max_spread = getattr(cfg, "mm_max_market_spread_pct", 0.06)
+        mid_min = getattr(cfg, "mm_mid_min", 0.30)
+        mid_max = getattr(cfg, "mm_mid_max", 0.70)
+        min_hours = getattr(cfg, "mm_min_hours_to_expiry", 12.0)
+        now_utc = datetime.now(timezone.utc)
         eligible = []
         for m in markets:
             if not m.active or m.closed:
                 continue
-            # Skip markets whose end date has already passed — Polymarket sometimes
-            # keeps them "active" while awaiting official resolution.
+            # Skip markets whose end date has already passed or is too soon.
+            # Polymarket sometimes keeps them "active" while awaiting resolution.
             if m.end_date_iso:
                 try:
                     end_dt = datetime.fromisoformat(m.end_date_iso.rstrip("Z")).replace(tzinfo=timezone.utc)
-                    if end_dt < datetime.now(timezone.utc):
+                    if end_dt < now_utc:
+                        continue
+                    hours_left = (end_dt - now_utc).total_seconds() / 3600
+                    if hours_left < min_hours:
+                        self.log(
+                            f"MM skip {m.question[:40]} — only {hours_left:.1f}h to expiry (min {min_hours}h)",
+                            "debug",
+                        )
                         continue
                 except ValueError:
                     pass
@@ -223,8 +234,14 @@ class MarketMakingStrategy(BaseStrategy):
             book = orderbooks.get(yes_tok.token_id)
             if not book or book.mid is None:
                 continue
-            # Only make markets where mid is not at extremes (avoid near-resolved markets)
-            if not (0.05 < book.mid < 0.95):
+            # Only make markets with balanced mid-price (avoids extreme-probability markets
+            # like 15¢ underdogs where adverse selection is severe). Configurable via
+            # MM_MID_MIN / MM_MID_MAX env vars.
+            if not (mid_min < book.mid < mid_max):
+                self.log(
+                    f"MM skip {m.question[:40]} — mid {book.mid:.3f} outside [{mid_min},{mid_max}]",
+                    "debug",
+                )
                 continue
             # Skip markets with a wide bid-ask spread — adverse selection risk
             if book.best_bid is not None and book.best_ask is not None:

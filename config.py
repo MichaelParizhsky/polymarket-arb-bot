@@ -111,7 +111,7 @@ class StrategyConfig:
     market_making_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_MARKET_MAKING", True))
 
     # Combinatorial
-    combo_min_edge: float = field(default_factory=lambda: _float("COMBO_MIN_EDGE", 0.03))
+    combo_min_edge: float = field(default_factory=lambda: _float("COMBO_MIN_EDGE", 0.02))
     combo_lookback_markets: int = field(default_factory=lambda: _int("COMBO_LOOKBACK_MARKETS", 50))
 
     # Latency arb (mostly disabled — Polymarket dynamic fees make this fee-negative at 50/50)
@@ -126,6 +126,11 @@ class StrategyConfig:
     mm_skew_factor: float = field(default_factory=lambda: _float("MM_SKEW_FACTOR", 0.3))
     mm_inventory_skew_limit: float = field(default_factory=lambda: _float("MM_INVENTORY_SKEW_LIMIT", 0.30))  # stop quoting adverse side at 30% skew
     mm_max_market_spread_pct: float = field(default_factory=lambda: _float("MM_MAX_MARKET_SPREAD_PCT", 0.06))  # skip markets with >6% bid-ask spread
+    # Mid-price bounds — only make markets with balanced odds (avoids 15¢ underdog bets)
+    mm_mid_min: float = field(default_factory=lambda: _float("MM_MID_MIN", 0.30))
+    mm_mid_max: float = field(default_factory=lambda: _float("MM_MID_MAX", 0.70))
+    # Minimum hours to resolution — skip markets resolving too soon (sports games ending tonight)
+    mm_min_hours_to_expiry: float = field(default_factory=lambda: _float("MM_MIN_HOURS_TO_EXPIRY", 12.0))
 
     # Cross-exchange — separate min edge (needs to clear ~4-5% combined fees)
     cross_exchange_min_edge: float = field(default_factory=lambda: _float("CROSS_EXCHANGE_MIN_EDGE", 0.05))
