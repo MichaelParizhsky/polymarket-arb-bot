@@ -98,6 +98,7 @@ class RiskConfig:
         "futures_hedge": 200.0,
         "crypto_5m": 150.0,  # tight budget — snipe mode fires blind without Binance data
         "swarm_prediction": 300.0,  # crowd simulation strategy budget
+        "optimism_tax": 300.0,  # NO-side longshot maker strategy — high win rate, capped conservatively
         "auto_close": 9999.0,  # auto-close is resolution, not a strategy — no budget cap
         "weather": 150.0,      # Kalshi weather markets — tight budget while calibrating NOAA model
         "live_game": 200.0,    # In-play momentum — conservative budget until calibrated
@@ -210,6 +211,19 @@ class StrategyConfig:
     live_game_max_spend: float = field(default_factory=lambda: _float("LIVE_GAME_MAX_SPEND", 75.0))
     live_game_min_volume: float = field(default_factory=lambda: _float("LIVE_GAME_MIN_VOLUME", 500.0))
     live_game_cooldown_hours: float = field(default_factory=lambda: _float("LIVE_GAME_COOLDOWN_HOURS", 2.0))
+
+    # Optimism Tax: exploit systematic overpricing of YES longshots (1-20¢).
+    # Based on Becker microstructure research — takers overpay for longshot YES by 20-57%.
+    # We buy NO as makers (limit orders). Target win rate: 90-99%.
+    # Edge by category: Crypto +2.69pp, Weather +2.57pp, Sports +2.23pp, Politics +1.02pp.
+    optimism_tax_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_OPTIMISM_TAX", True))
+    optimism_tax_min_yes_price: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MIN_YES_PRICE", 0.01))
+    optimism_tax_max_yes_price: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MAX_YES_PRICE", 0.20))
+    optimism_tax_min_edge: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MIN_EDGE", 0.005))
+    optimism_tax_max_spend: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MAX_SPEND", 150.0))
+    optimism_tax_min_volume: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MIN_VOLUME", 3000.0))
+    optimism_tax_cooldown_hours: float = field(default_factory=lambda: _float("OPTIMISM_TAX_COOLDOWN_HOURS", 6.0))
+    optimism_tax_min_p_profit: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MIN_P_PROFIT", 0.90))
 
     # Kalshi weather markets — trades temperature and precipitation markets using NOAA forecasts.
     # Requires KALSHI_ENABLED=true and valid Kalshi credentials.

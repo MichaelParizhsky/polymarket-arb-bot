@@ -1,0 +1,122 @@
+# Multi-bot local deployment
+# Bot A: Optimism Tax + Quick Resolution (conservative, high win rate)
+# Bot B: Market Making + Combinatorial (spread earning + arb)
+# Bot C: Crypto 5m + Live Game (aggressive, higher variance)
+#
+# Each bot has its own:
+# - Port for dashboard (5000, 5001, 5002)
+# - Logs directory (logs-a, logs-b, logs-c)
+# - Env file (.env.bot-a.local, .env.bot-b.local, .env.bot-c.local)
+# - Prometheus metrics port (8001, 8002, 8003)
+#
+# Shared:
+# - Prometheus (scrapes all 3 bots on :9090)
+# - Grafana dashboard (:3000)
+#
+# Usage:
+#   docker compose -f docker-compose.local.yml up --build
+#   docker compose -f docker-compose.local.yml logs -f bot-a
+
+version: "3.9"
+
+networks:
+  polymarket-net:
+    driver: bridge
+
+volumes:
+  grafana_data_local:
+
+services:
+  # ---------------------------------------------------------------------------
+  # Bot A — Optimism Tax + Quick Resolution (conservative, high win rate)
+  # ---------------------------------------------------------------------------
+  bot-a:
+    build: .
+    env_file: .env.bot-a.local
+    ports:
+      - "5000:5000"   # dashboard
+      - "8001:8001"   # prometheus metrics
+    volumes:
+      - ./logs-a:/app/logs
+    restart: unless-stopped
+    networks:
+      - polymarket-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Bot B — Market Making + Combinatorial (spread earning + arb)
+  # ---------------------------------------------------------------------------
+  bot-b:
+    build: .
+    env_file: .env.bot-b.local
+    ports:
+      - "5001:5001"   # dashboard
+      - "8002:8002"   # prometheus metrics
+    volumes:
+      - ./logs-b:/app/logs
+    restart: unless-stopped
+    networks:
+      - polymarket-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Bot C — Crypto 5m + Live Game (aggressive, higher variance)
+  # ---------------------------------------------------------------------------
+  bot-c:
+    build: .
+    env_file: .env.bot-c.local
+    ports:
+      - "5002:5002"   # dashboard
+      - "8003:8003"   # prometheus metrics
+    volumes:
+      - ./logs-c:/app/logs
+    restart: unless-stopped
+    networks:
+      - polymarket-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — scrapes metrics from all 3 bots
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - bot-a
+      - bot-b
+      - bot-c
+    restart: unless-stopped
+    networks:
+      - polymarket-net
+
+  # ---------------------------------------------------------------------------
+  # Grafana — unified dashboard for all 3 bots
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data_local:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - polymarket-net

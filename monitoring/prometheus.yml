@@ -1,7 +1,25 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: "polymarket-arb-bot"
+  - job_name: "bot-a"
     static_configs:
-      - targets: ["bot:8000"]
+      - targets: ["bot-a:8001"]
+    labels:
+      bot: "bot-a"
+      strategy: "optimism_tax"
+
+  - job_name: "bot-b"
+    static_configs:
+      - targets: ["bot-b:8002"]
+    labels:
+      bot: "bot-b"
+      strategy: "market_making"
+
+  - job_name: "bot-c"
+    static_configs:
+      - targets: ["bot-c:8003"]
+    labels:
+      bot: "bot-c"
+      strategy: "crypto_5m"

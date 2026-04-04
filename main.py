@@ -49,6 +49,11 @@ try:
     _WEATHER_AVAILABLE = True
 except ImportError:
     _WEATHER_AVAILABLE = False
+try:
+    from src.strategies.optimism_tax import OptimismTaxStrategy
+    _OPTIMISM_TAX_AVAILABLE = True
+except ImportError:
+    _OPTIMISM_TAX_AVAILABLE = False
 from src.utils.hedge_manager import HedgeManager
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
@@ -235,6 +240,14 @@ class ArbBot:
                 LiveGameStrategy(self.config, self.portfolio, self.risk)
             )
             logger.info("LiveGameStrategy (in-play momentum via ESPN win probability) ENABLED")
+        if getattr(cfg, 'optimism_tax_enabled', False):
+            if _OPTIMISM_TAX_AVAILABLE:
+                self._strategies.append(
+                    OptimismTaxStrategy(self.config, self.portfolio, self.risk)
+                )
+                logger.info("OptimismTaxStrategy (Becker maker-side longshot edge, NO limit orders) ENABLED")
+            else:
+                logger.warning("OptimismTaxStrategy not available — check src/strategies/optimism_tax.py")
         strategy_names = [s.name for s in self._strategies]
         logger.info(f"Loaded {len(self._strategies)} strategies: {strategy_names}")
         # Log which strategies are disabled so Railway logs show full picture
