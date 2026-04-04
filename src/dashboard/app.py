@@ -2227,6 +2227,106 @@ def optimism_tax_stats():
     }
 
 
+@app.get("/api/optimism_tax/model_viz")
+def optimism_tax_model_viz():
+    """Return Beta PDF curves and Monte Carlo fan paths for visualization."""
+    import math
+    import numpy as np
+
+    def _beta_pdf(x: float, a: float, b: float) -> float:
+        if x <= 0 or x >= 1:
+            return 0.0
+        try:
+            log_beta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+            log_pdf = (a - 1) * math.log(x) + (b - 1) * math.log(1 - x) - log_beta
+            return math.exp(log_pdf)
+        except (ValueError, OverflowError):
+            return 0.0
+
+    # Pull latest OT trade metadata for real alpha/beta/price
+    alpha, beta_param, entry_price, yes_ask = 4.35, 95.65, 0.957, 0.043  # 4.3¢ YES crypto defaults
+    size_usdc = 50.0
+    if _portfolio:
+        with _portfolio_lock:
+            ot = [t for t in _portfolio.trades if t.strategy == "optimism_tax"]
+        for t in reversed(ot):
+            meta = getattr(t, "metadata", {}) or {}
+            if meta.get("bayesian_alpha") and meta.get("bayesian_beta"):
+                alpha = float(meta["bayesian_alpha"])
+                beta_param = float(meta["bayesian_beta"])
+                entry_price = float(meta.get("no_entry_price", entry_price))
+                yes_ask = float(meta.get("yes_ask", yes_ask))
+                size_usdc = float(meta.get("kelly_size", 50.0))
+                break
+
+    # --- Beta PDF curves (market-implied vs calibrated) ---
+    xs = [round(i / 200, 4) for i in range(1, 200)]  # 0.005 to 0.995
+    # Market-implied: Beta centered at yes_ask (same alpha+beta total, different mean)
+    n_obs = alpha + beta_param
+    mkt_alpha = yes_ask * n_obs
+    mkt_beta = (1 - yes_ask) * n_obs
+    market_pdf = [round(_beta_pdf(x, mkt_alpha, mkt_beta), 6) for x in xs]
+    calibrated_pdf = [round(_beta_pdf(x, alpha, beta_param), 6) for x in xs]
+
+    # --- Monte Carlo fan (80 paths × 50 trades) ---
+    n_paths, n_trades = 80, 50
+    rng = np.random.default_rng(42)
+    win_probs = rng.beta(alpha, beta_param, size=(n_paths, n_trades))
+    outcomes = rng.random(size=(n_paths, n_trades))
+    wins = outcomes >= win_probs
+    contracts = size_usdc / entry_price
+    pnl_win = float(contracts * 0.998 - size_usdc)
+    pnl_loss = -size_usdc
+    per_trade = np.where(wins, pnl_win, pnl_loss)
+    cumulative = np.cumsum(per_trade, axis=1)
+
+    # Downsample paths to 40 for the chart (keep every-other)
+    paths_out = []
+    for i in range(0, n_paths, 2):
+        row = [0.0] + [round(float(v), 2) for v in cumulative[i]]
+        paths_out.append(row)
+
+    # Median path
+    median_path = [0.0] + [round(float(v), 2) for v in np.median(cumulative, axis=0).tolist()]
+    p10_path = [0.0] + [round(float(v), 2) for v in np.percentile(cumulative, 10, axis=0).tolist()]
+    p90_path = [0.0] + [round(float(v), 2) for v in np.percentile(cumulative, 90, axis=0).tolist()]
+
+    # Kelly formula components
+    b = (1 - entry_price) / entry_price * 0.998  # net odds after fee
+    true_no_prob = alpha / (alpha + beta_param)
+    f_star = max(0.0, (b * true_no_prob - (1 - true_no_prob)) / b)
+    kelly_fraction = 0.25
+    kelly_f = round(f_star * kelly_fraction, 4)
+
+    return {
+        "params": {
+            "alpha": round(alpha, 4),
+            "beta": round(beta_param, 4),
+            "entry_price": round(entry_price, 4),
+            "yes_ask": round(yes_ask, 4),
+            "size_usdc": round(size_usdc, 2),
+            "true_no_prob": round(true_no_prob, 4),
+            "pnl_win": round(pnl_win, 2),
+            "pnl_loss": round(pnl_loss, 2),
+            "b": round(b, 4),
+            "f_star": round(f_star, 4),
+            "kelly_f": kelly_f,
+        },
+        "pdf": {
+            "xs": xs,
+            "market": market_pdf,
+            "calibrated": calibrated_pdf,
+        },
+        "mc": {
+            "paths": paths_out,
+            "median": median_path,
+            "p10": p10_path,
+            "p90": p90_path,
+            "n_trades": n_trades + 1,
+        },
+    }
+
+
 @app.get("/api/sports/live")
 async def sports_live():
     """
@@ -2912,28 +3012,107 @@ tr:hover td{background:var(--surface2)}
   </div>
 
   <!-- Optimism Tax Deep-Dive Panel -->
-  <div class="section" style="margin-bottom:14px" id="ot-panel">
-    <h3 style="display:flex;align-items:center;gap:10px">
-      Optimism Tax
-      <span style="font-size:.65rem;font-weight:600;background:#0a2a1a;color:var(--green);padding:2px 8px;border-radius:8px">NO-side Longshot Edge</span>
-    </h3>
-    <!-- Summary metrics row -->
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px" id="ot-metrics">
-      <div class="card" style="padding:10px"><div class="lbl">Trades</div><div class="val" id="ot-total">--</div></div>
-      <div class="card" style="padding:10px"><div class="lbl">Avg Edge</div><div class="val blue" id="ot-edge">--</div></div>
-      <div class="card" style="padding:10px"><div class="lbl">Avg MC P(profit)</div><div class="val" id="ot-mcp">--</div></div>
-      <div class="card" style="padding:10px"><div class="lbl">Win Rate</div><div class="val green" id="ot-wr">--</div></div>
-      <div class="card" style="padding:10px"><div class="lbl">W / L</div><div class="val" id="ot-wl">--</div></div>
+  <div style="margin-bottom:14px" id="ot-panel">
+    <!-- Header bar -->
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+      <h3 style="margin:0;font-size:.85rem;font-weight:700;letter-spacing:.04em;color:var(--text)">OPTIMISM TAX</h3>
+      <span style="font-size:.6rem;font-weight:700;background:#0a1a2a;color:#06b6d4;padding:2px 10px;border-radius:10px;letter-spacing:.08em">ARB ENGINE // BTC LIMIT ORDER BOT</span>
+      <span style="font-size:.6rem;color:var(--muted);margin-left:auto" id="ot-block-info">EDGE: --</span>
     </div>
-    <!-- Category breakdown + recent trades -->
-    <div style="display:grid;grid-template-columns:200px 1fr;gap:14px">
-      <div>
-        <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Category Breakdown</div>
-        <div id="ot-categories"><div class="no-data">--</div></div>
+
+    <!-- Summary metrics strip -->
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:12px">
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <div style="font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Trades</div>
+        <div style="font-size:1.2rem;font-weight:700;color:var(--text)" id="ot-total">--</div>
       </div>
-      <div>
-        <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Recent NO Trades</div>
-        <div id="ot-recent-trades" style="font-size:.72rem;max-height:220px;overflow-y:auto"><div class="no-data">No trades yet</div></div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <div style="font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Avg Edge</div>
+        <div style="font-size:1.2rem;font-weight:700;color:#06b6d4" id="ot-edge">--</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <div style="font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">MC P(profit)</div>
+        <div style="font-size:1.2rem;font-weight:700;color:var(--green)" id="ot-mcp">--</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <div style="font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Win Rate</div>
+        <div style="font-size:1.2rem;font-weight:700;color:var(--green)" id="ot-wr">--</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <div style="font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">W / L</div>
+        <div style="font-size:1.2rem;font-weight:700;color:var(--text)" id="ot-wl">-- / --</div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <div style="font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Strategy</div>
+        <div style="font-size:.75rem;font-weight:700;color:var(--yellow);margin-top:4px">LIMIT</div>
+      </div>
+    </div>
+
+    <!-- Three model charts row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px">
+
+      <!-- Bayesian Model -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px">Bayesian Model</div>
+        <div style="font-size:.65rem;color:#555;margin-bottom:8px" id="ot-bay-subtitle">β(α,β) posterior</div>
+        <canvas id="ot-bayesian-chart" style="max-height:160px"></canvas>
+        <div style="display:flex;gap:14px;margin-top:8px;font-size:.6rem;color:var(--muted)">
+          <span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:2px;background:#ef4444;border-radius:1px"></span>Market</span>
+          <span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:2px;background:#06b6d4;border-radius:1px"></span>Calibrated</span>
+        </div>
+      </div>
+
+      <!-- Monte Carlo Fan -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px">Monte Carlo</div>
+        <div style="font-size:.65rem;color:#555;margin-bottom:8px" id="ot-mc-subtitle">N=1000 simulation paths</div>
+        <canvas id="ot-mc-chart" style="max-height:160px"></canvas>
+        <div style="display:flex;gap:14px;margin-top:8px;font-size:.6rem;color:var(--muted)">
+          <span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:2px;background:#10b981;border-radius:1px"></span>Median</span>
+          <span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:2px;background:#1e293b;border-radius:1px;border:1px solid #334155"></span>Paths</span>
+        </div>
+      </div>
+
+      <!-- Kelly Sizing -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:2px">Kelly Criterion</div>
+        <div style="font-size:.65rem;color:#555;margin-bottom:10px">f* = (b·p − q) / b × 0.25</div>
+        <div id="ot-kelly-display" style="font-size:.68rem;line-height:2;font-family:monospace;color:var(--text)">
+          <div class="no-data">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom row: P&L curve + category + trades -->
+    <div style="display:grid;grid-template-columns:1fr 180px 1fr;gap:10px">
+
+      <!-- P&L Curve -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">P&amp;L Curve</div>
+        <div style="font-size:1.6rem;font-weight:700;color:var(--green);margin-bottom:8px" id="ot-pnl-total">$0.00</div>
+        <canvas id="ot-pnl-chart" style="max-height:120px"></canvas>
+      </div>
+
+      <!-- Category breakdown -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Categories</div>
+        <div id="ot-categories" style="font-size:.68rem"></div>
+      </div>
+
+      <!-- Bot status panel -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Bot Status</div>
+        <div id="ot-bot-status" style="font-size:.7rem;line-height:2;font-family:monospace">
+          <div class="no-data">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent trades table -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:10px">
+      <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Recent NO Trades</div>
+      <div id="ot-recent-trades" style="font-size:.72rem;max-height:200px;overflow-y:auto">
+        <div class="no-data">No trades yet</div>
       </div>
     </div>
   </div>
@@ -3993,80 +4172,210 @@ function renderSystemStatus(d){
       });
     }).catch(()=>{});
 
-    // Optimism Tax panel
-    fetch('/api/optimism_tax/stats').then(r=>r.json()).then(ot=>{
+    // ── Optimism Tax panel ──────────────────────────────────────────────
+    // Chart instances (keep refs so we can destroy/recreate on next poll)
+    if(!window._otCharts) window._otCharts={};
+
+    Promise.all([
+      fetch('/api/optimism_tax/stats').then(r=>r.json()),
+      fetch('/api/optimism_tax/model_viz').then(r=>r.json()),
+    ]).then(([ot, viz])=>{
       const s=ot.summary||{};
       const setEl=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
+
+      // --- Summary strip ---
       setEl('ot-total',s.total_trades??'0');
       const edgeEl=document.getElementById('ot-edge');
-      if(edgeEl){
-        const e=s.avg_edge||0;
-        edgeEl.textContent=(e*100).toFixed(2)+'pp';
-        edgeEl.style.color=e>0?'var(--green)':'var(--muted)';
-      }
+      if(edgeEl){const e=s.avg_edge||0;edgeEl.textContent=(e*100).toFixed(2)+'pp';edgeEl.style.color=e>0?'#06b6d4':'var(--muted)';}
       const mcpEl=document.getElementById('ot-mcp');
-      if(mcpEl){
-        const p=s.avg_mc_p_profit||0;
-        mcpEl.textContent=p?(p*100).toFixed(1)+'%':'--';
-        mcpEl.style.color=p>=0.9?'var(--green)':p>=0.7?'var(--yellow)':'var(--red)';
-      }
+      if(mcpEl){const p=s.avg_mc_p_profit||0;mcpEl.textContent=p?(p*100).toFixed(1)+'%':'--';mcpEl.style.color=p>=0.9?'var(--green)':p>=0.7?'var(--yellow)':'var(--red)';}
       const wrEl=document.getElementById('ot-wr');
-      if(wrEl){
-        wrEl.textContent=s.win_rate!=null?s.win_rate.toFixed(1)+'%':'--';
-        wrEl.style.color=s.win_rate>=90?'var(--green)':s.win_rate>=70?'var(--yellow)':'var(--red)';
-      }
+      if(wrEl){wrEl.textContent=s.win_rate!=null?s.win_rate.toFixed(1)+'%':'--';wrEl.style.color=(s.win_rate||0)>=90?'var(--green)':(s.win_rate||0)>=70?'var(--yellow)':'var(--red)';}
       setEl('ot-wl',(s.wins||0)+' / '+(s.losses||0));
+      const bi=document.getElementById('ot-block-info');
+      if(bi&&viz.params){bi.textContent=`EDGE: ${((viz.params.f_star||0)*100).toFixed(1)}%  ·  YES@${((viz.params.yes_ask||0)*100).toFixed(1)}¢  ·  NO@${((viz.params.entry_price||0)*100).toFixed(1)}¢`;}
 
-      // Category breakdown
+      // --- Bayesian chart ---
+      const bayCtx=document.getElementById('ot-bayesian-chart');
+      if(bayCtx&&viz.pdf){
+        if(window._otCharts.bay){window._otCharts.bay.destroy();}
+        const sub=document.getElementById('ot-bay-subtitle');
+        if(sub&&viz.params){sub.textContent=`α=${viz.params.alpha.toFixed(1)}  β=${viz.params.beta.toFixed(1)}`;}
+        window._otCharts.bay=new Chart(bayCtx,{
+          type:'line',
+          data:{
+            labels:viz.pdf.xs,
+            datasets:[
+              {label:'Market',data:viz.pdf.market,borderColor:'#ef4444',borderWidth:1.5,pointRadius:0,fill:false,tension:.4,borderDash:[4,3]},
+              {label:'Calibrated',data:viz.pdf.calibrated,borderColor:'#06b6d4',borderWidth:2,pointRadius:0,fill:true,backgroundColor:'rgba(6,182,212,.08)',tension:.4},
+            ]
+          },
+          options:{
+            responsive:true,maintainAspectRatio:true,
+            plugins:{legend:{display:false},tooltip:{enabled:false}},
+            scales:{
+              x:{display:true,ticks:{color:'#334155',font:{size:9},maxTicksLimit:6},grid:{color:'#0f172a'},title:{display:true,text:'YES probability',color:'#334155',font:{size:9}}},
+              y:{display:true,ticks:{color:'#334155',font:{size:9},maxTicksLimit:4},grid:{color:'#0f172a'}},
+            }
+          }
+        });
+      }
+
+      // --- Monte Carlo fan chart ---
+      const mcCtx=document.getElementById('ot-mc-chart');
+      if(mcCtx&&viz.mc){
+        if(window._otCharts.mc){window._otCharts.mc.destroy();}
+        const sub2=document.getElementById('ot-mc-subtitle');
+        if(sub2&&viz.params){sub2.textContent=`${(viz.params.pnl_win||0).toFixed(2)} win / ${(viz.params.pnl_loss||0).toFixed(2)} loss per trade`;}
+        const labels=Array.from({length:viz.mc.n_trades},(_, i)=>i);
+        const pathDatasets=(viz.mc.paths||[]).map(path=>({
+          data:path,borderColor:'rgba(30,41,59,0.9)',borderWidth:1,pointRadius:0,fill:false,tension:.1,
+        }));
+        const p10Dataset={data:viz.mc.p10,borderColor:'rgba(239,68,68,.4)',borderWidth:1.5,pointRadius:0,fill:false,tension:.3,borderDash:[3,2]};
+        const p90Dataset={data:viz.mc.p90,borderColor:'rgba(16,185,129,.4)',borderWidth:1.5,pointRadius:0,fill:false,tension:.3,borderDash:[3,2]};
+        const medianDataset={data:viz.mc.median,borderColor:'#10b981',borderWidth:2.5,pointRadius:0,fill:false,tension:.3};
+        window._otCharts.mc=new Chart(mcCtx,{
+          type:'line',
+          data:{labels,datasets:[...pathDatasets,p10Dataset,p90Dataset,medianDataset]},
+          options:{
+            responsive:true,maintainAspectRatio:true,animation:false,
+            plugins:{legend:{display:false},tooltip:{enabled:false}},
+            scales:{
+              x:{display:true,ticks:{color:'#334155',font:{size:9},maxTicksLimit:6},grid:{color:'#0f172a'},title:{display:true,text:'Trades',color:'#334155',font:{size:9}}},
+              y:{display:true,ticks:{color:'#334155',font:{size:9},maxTicksLimit:4,callback:v=>'$'+v.toFixed(0)},grid:{color:'#0f172a'}},
+            }
+          }
+        });
+      }
+
+      // --- Kelly display ---
+      const kellyEl=document.getElementById('ot-kelly-display');
+      if(kellyEl&&viz.params){
+        const p=viz.params;
+        const winPct=(p.true_no_prob*100).toFixed(1);
+        const lossPct=((1-p.true_no_prob)*100).toFixed(1);
+        kellyEl.innerHTML=`
+          <div style="color:#06b6d4">f* = (b·p − q) / b</div>
+          <div style="color:var(--muted)">b = <span style="color:var(--text)">${p.b.toFixed(4)}</span></div>
+          <div style="color:var(--muted)">p = <span style="color:var(--green)">${winPct}%</span> (NO wins)</div>
+          <div style="color:var(--muted)">q = <span style="color:var(--red)">${lossPct}%</span> (YES wins)</div>
+          <div style="color:var(--muted)">f* = <span style="color:var(--yellow)">${(p.f_star*100).toFixed(2)}%</span></div>
+          <div style="color:var(--muted)">×0.25 → <span style="color:#10b981;font-weight:700">${(p.kelly_f*100).toFixed(2)}% Kelly</span></div>
+          <div style="color:var(--muted)">Size: <span style="color:var(--text)">$${p.size_usdc.toFixed(0)}</span></div>
+        `;
+      }
+
+      // --- P&L curve for OT only ---
+      const otTrades=ot.recent_trades||[];
+      const sellTrades=otTrades.filter(t=>t.side==='SELL').reverse();
+      const pnlCtxEl=document.getElementById('ot-pnl-chart');
+      if(pnlCtxEl){
+        if(window._otCharts.pnl){window._otCharts.pnl.destroy();}
+        let running=0;
+        const pnlPoints=sellTrades.map(t=>{running+=t.realized_pnl||0;return parseFloat(running.toFixed(2));});
+        const pnlLabels=sellTrades.map(t=>new Date(t.timestamp*1000).toLocaleDateString([],{month:'short',day:'numeric'}));
+        const totalOtPnl=running;
+        const pnlTotalEl=document.getElementById('ot-pnl-total');
+        if(pnlTotalEl){pnlTotalEl.textContent=(totalOtPnl>=0?'+':'')+'$'+totalOtPnl.toFixed(2);pnlTotalEl.style.color=totalOtPnl>=0?'var(--green)':'var(--red)';}
+        window._otCharts.pnl=new Chart(pnlCtxEl,{
+          type:'line',
+          data:{
+            labels:pnlLabels.length?pnlLabels:['--'],
+            datasets:[{
+              data:pnlPoints.length?pnlPoints:[0],
+              borderColor:'#10b981',borderWidth:2,pointRadius:0,fill:true,
+              backgroundColor:'rgba(16,185,129,.07)',tension:.4,
+            }]
+          },
+          options:{
+            responsive:true,maintainAspectRatio:true,
+            plugins:{legend:{display:false},tooltip:{enabled:false}},
+            scales:{
+              x:{display:false},
+              y:{display:true,ticks:{color:'#334155',font:{size:9},maxTicksLimit:3,callback:v=>'$'+v.toFixed(0)},grid:{color:'#0f172a'}},
+            }
+          }
+        });
+      }
+
+      // --- Category breakdown ---
       const catEl=document.getElementById('ot-categories');
       if(catEl){
         const cats=ot.category_counts||{};
         const total=Object.values(cats).reduce((a,b)=>a+b,0)||1;
         const sorted=Object.entries(cats).sort((a,b)=>b[1]-a[1]);
+        const catColors={crypto:'#06b6d4',sports:'#f59e0b',weather:'#8b5cf6',politics:'#ec4899',world:'#10b981',entertainment:'#f97316',finance:'#6b7280',unknown:'#475569'};
         catEl.innerHTML=sorted.length?sorted.map(([cat,cnt])=>{
           const pct=Math.round(cnt/total*100);
-          return`<div style="margin-bottom:6px">
-            <div style="display:flex;justify-content:space-between;font-size:.7rem;margin-bottom:2px">
-              <span style="color:var(--text)">${cat}</span>
-              <span style="color:var(--muted)">${cnt} (${pct}%)</span>
+          const col=catColors[cat]||'#475569';
+          return`<div style="margin-bottom:7px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+              <span style="color:${col};font-weight:600">${cat}</span>
+              <span style="color:var(--muted)">${cnt}</span>
             </div>
-            <div class="health-bar"><div class="health-fill" style="width:${pct}%;background:var(--blue)"></div></div>
+            <div style="background:#0f172a;border-radius:3px;height:4px"><div style="width:${pct}%;height:4px;background:${col};border-radius:3px"></div></div>
           </div>`;
-        }).join(''):'<div class="no-data">No data</div>';
+        }).join(''):'<div class="no-data" style="font-size:.68rem">No data</div>';
       }
 
-      // Recent trades table
+      // --- Bot status panel ---
+      const bsEl=document.getElementById('ot-bot-status');
+      if(bsEl){
+        const fmt=(v,pfx='')=>v!=null?(pfx+(typeof v==='number'?v.toFixed(2):v)):'--';
+        const row=(lbl,val,col='var(--text)')=>`<div style="display:flex;justify-content:space-between"><span style="color:var(--muted)">${lbl}</span><span style="color:${col};font-weight:600">${val}</span></div>`;
+        const p=viz.params||{};
+        const wr=s.win_rate;
+        const wrCol=wr>=95?'var(--green)':wr>=80?'var(--yellow)':'var(--red)';
+        bsEl.innerHTML=`
+          ${row('Balance',fmt(null),'var(--muted)')}
+          ${row('Win Rate',wr!=null?wr.toFixed(1)+'%':'--',wrCol)}
+          ${row('W / L',(s.wins||0)+' / '+(s.losses||0))}
+          ${row('Avg Edge',((s.avg_edge||0)*100).toFixed(2)+'pp','#06b6d4')}
+          ${row('MC P(profit)',s.avg_mc_p_profit!=null?((s.avg_mc_p_profit)*100).toFixed(1)+'%':'--','var(--green)')}
+          ${row('YES Range','1¢ – 20¢','var(--yellow)')}
+          ${row('Bet Size','$'+fmt(p.size_usdc||0))}
+          ${row('Kelly','0.25× Kelly','var(--accent2)')}
+          ${row('Strategy','LIMIT ORDER','var(--green)')}
+          ${row('Engine','ONLINE','var(--green)')}
+        `;
+      }
+
+      // --- Recent trades table ---
       const rtEl=document.getElementById('ot-recent-trades');
       if(rtEl){
         const trades=ot.recent_trades||[];
         if(!trades.length){rtEl.innerHTML='<div class="no-data">No trades yet</div>';return;}
         const rows=trades.map(t=>{
-          const ts=new Date(t.timestamp*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-          const pnlTxt=t.side==='SELL'?(t.realized_pnl>0?`<span style="color:var(--green)">+$${t.realized_pnl.toFixed(2)}</span>`:`<span style="color:var(--red)">$${t.realized_pnl.toFixed(2)}</span>`):'—';
+          const tStr=new Date(t.timestamp*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+          const pnlTxt=t.side==='SELL'?(t.realized_pnl>0
+            ?`<span style="color:var(--green)">+$${t.realized_pnl.toFixed(2)}</span>`
+            :`<span style="color:var(--red)">$${t.realized_pnl.toFixed(2)}</span>`):'—';
           const edgeTxt=t.net_edge!=null?((t.net_edge*100).toFixed(2)+'pp'):'—';
           const mcTxt=t.mc_p_profit!=null?((t.mc_p_profit*100).toFixed(0)+'%'):'—';
           const yesTxt=t.yes_ask!=null?(t.yes_ask*100).toFixed(1)+'¢':'—';
-          return`<tr>
-            <td style="color:var(--muted);padding:2px 6px">${ts}</td>
-            <td style="padding:2px 6px">${t.side}</td>
-            <td style="color:var(--yellow);padding:2px 6px">${yesTxt}</td>
-            <td style="padding:2px 6px">${t.category||'—'}</td>
-            <td style="color:var(--blue);padding:2px 6px">${edgeTxt}</td>
-            <td style="padding:2px 6px">${mcTxt}</td>
-            <td style="padding:2px 6px">${pnlTxt}</td>
-            <td style="color:var(--muted);padding:2px 6px;max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${t.market_question||''}</td>
+          const catColors2={crypto:'#06b6d4',sports:'#f59e0b',weather:'#8b5cf6',politics:'#ec4899',world:'#10b981',entertainment:'#f97316',finance:'#6b7280'};
+          const catCol=catColors2[t.category]||'var(--muted)';
+          return`<tr style="border-bottom:1px solid #0f172a">
+            <td style="color:var(--muted);padding:4px 6px;white-space:nowrap">${tStr}</td>
+            <td style="padding:4px 6px;font-weight:700;color:${t.side==='BUY'?'var(--green)':'var(--yellow)'}">${t.side}</td>
+            <td style="color:var(--yellow);padding:4px 6px">${yesTxt}</td>
+            <td style="padding:4px 6px;color:${catCol};font-weight:600">${t.category||'—'}</td>
+            <td style="color:#06b6d4;padding:4px 6px">${edgeTxt}</td>
+            <td style="padding:4px 6px">${mcTxt}</td>
+            <td style="padding:4px 6px">${pnlTxt}</td>
+            <td style="color:var(--muted);padding:4px 6px;max-width:220px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${t.market_question||''}</td>
           </tr>`;
         }).join('');
         rtEl.innerHTML=`<table style="width:100%;border-collapse:collapse">
-          <thead><tr style="color:var(--muted);font-size:.63rem;text-transform:uppercase">
-            <th style="padding:2px 6px;text-align:left">Time</th>
-            <th style="padding:2px 6px;text-align:left">Side</th>
-            <th style="padding:2px 6px;text-align:left">YES</th>
-            <th style="padding:2px 6px;text-align:left">Cat</th>
-            <th style="padding:2px 6px;text-align:left">Edge</th>
-            <th style="padding:2px 6px;text-align:left">MC P</th>
-            <th style="padding:2px 6px;text-align:left">P&L</th>
-            <th style="padding:2px 6px;text-align:left">Market</th>
+          <thead><tr style="color:var(--muted);font-size:.6rem;text-transform:uppercase;border-bottom:1px solid var(--border)">
+            <th style="padding:4px 6px;text-align:left;font-weight:400">Time</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">Side</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">YES</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">Cat</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">Edge</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">MC P</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">P&amp;L</th>
+            <th style="padding:4px 6px;text-align:left;font-weight:400">Market</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
