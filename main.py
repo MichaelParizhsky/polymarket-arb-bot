@@ -869,6 +869,7 @@ class ArbBot:
                         outcome=outcome,
                         notes=sig.notes,
                         end_date_iso=end_dt,
+                        metadata=getattr(sig, "metadata", None) or {},
                     )
                     if trade:
                         trades_total.labels(strategy=sig.strategy, side=sig.side).inc()
@@ -889,6 +890,7 @@ class ArbBot:
                     outcome=outcome,
                     notes=sig.notes,
                     end_date_iso=end_dt,
+                    metadata=getattr(sig, "metadata", None) or {},
                 )
             else:
                 n_closed_before = len(self.portfolio.closed_positions)

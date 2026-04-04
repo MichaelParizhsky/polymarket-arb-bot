@@ -2161,6 +2161,72 @@ def sports_stats(api_key: str = Depends(_check_api_key)):
     }
 
 
+@app.get("/api/optimism_tax/stats")
+def optimism_tax_stats():
+    """Aggregate stats for the Optimism Tax strategy panel."""
+    if not _portfolio:
+        return {"trades": [], "summary": {}}
+    with _portfolio_lock:
+        all_trades = list(_portfolio.trades)
+
+    ot_trades = [t for t in all_trades if t.strategy == "optimism_tax"]
+
+    category_counts: dict = {}
+    total_edge = 0.0
+    total_mc_p = 0.0
+    wins = 0
+    losses = 0
+    edge_count = 0
+
+    recent: list = []
+    for t in reversed(ot_trades):
+        meta = getattr(t, "metadata", {}) or {}
+        cat = meta.get("category", "unknown")
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+        net_edge = meta.get("net_edge")
+        if net_edge is not None:
+            total_edge += net_edge
+            edge_count += 1
+        mc_p = meta.get("mc_p_profit")
+        if mc_p is not None:
+            total_mc_p += mc_p
+        rpnl = getattr(t, "realized_pnl", 0.0) or 0.0
+        if t.side == "SELL":
+            if rpnl > 0:
+                wins += 1
+            elif rpnl < 0:
+                losses += 1
+        if len(recent) < 30:
+            recent.append({
+                "timestamp": int(t.timestamp),
+                "side": t.side,
+                "price": round(t.price, 4),
+                "usdc": round(t.usdc_amount, 2),
+                "realized_pnl": round(rpnl, 4),
+                "category": cat,
+                "yes_ask": round(meta.get("yes_ask", 0), 4) if meta.get("yes_ask") else None,
+                "net_edge": round(net_edge, 4) if net_edge is not None else None,
+                "mc_p_profit": round(mc_p, 3) if mc_p is not None else None,
+                "true_no_prob": round(meta.get("true_no_prob", 0), 4) if meta.get("true_no_prob") else None,
+                "market_question": (meta.get("market_question") or "")[:80],
+            })
+
+    n = len(ot_trades)
+    resolved = wins + losses
+    return {
+        "summary": {
+            "total_trades": n,
+            "avg_edge": round(total_edge / edge_count, 4) if edge_count else 0,
+            "avg_mc_p_profit": round(total_mc_p / n, 3) if n else 0,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / resolved * 100, 1) if resolved else None,
+        },
+        "category_counts": category_counts,
+        "recent_trades": recent,
+    }
+
+
 @app.get("/api/sports/live")
 async def sports_live():
     """
@@ -2842,6 +2908,33 @@ tr:hover td{background:var(--surface2)}
     <h3>Strategies</h3>
     <div class="status-grid" id="status-strategies">
       <div class="no-data">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Optimism Tax Deep-Dive Panel -->
+  <div class="section" style="margin-bottom:14px" id="ot-panel">
+    <h3 style="display:flex;align-items:center;gap:10px">
+      Optimism Tax
+      <span style="font-size:.65rem;font-weight:600;background:#0a2a1a;color:var(--green);padding:2px 8px;border-radius:8px">NO-side Longshot Edge</span>
+    </h3>
+    <!-- Summary metrics row -->
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px" id="ot-metrics">
+      <div class="card" style="padding:10px"><div class="lbl">Trades</div><div class="val" id="ot-total">--</div></div>
+      <div class="card" style="padding:10px"><div class="lbl">Avg Edge</div><div class="val blue" id="ot-edge">--</div></div>
+      <div class="card" style="padding:10px"><div class="lbl">Avg MC P(profit)</div><div class="val" id="ot-mcp">--</div></div>
+      <div class="card" style="padding:10px"><div class="lbl">Win Rate</div><div class="val green" id="ot-wr">--</div></div>
+      <div class="card" style="padding:10px"><div class="lbl">W / L</div><div class="val" id="ot-wl">--</div></div>
+    </div>
+    <!-- Category breakdown + recent trades -->
+    <div style="display:grid;grid-template-columns:200px 1fr;gap:14px">
+      <div>
+        <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Category Breakdown</div>
+        <div id="ot-categories"><div class="no-data">--</div></div>
+      </div>
+      <div>
+        <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Recent NO Trades</div>
+        <div id="ot-recent-trades" style="font-size:.72rem;max-height:220px;overflow-y:auto"><div class="no-data">No trades yet</div></div>
+      </div>
     </div>
   </div>
 
@@ -3898,6 +3991,86 @@ function renderSystemStatus(d){
           spans[2].style.color=wr>=50?'var(--green)':'var(--yellow)';
         }
       });
+    }).catch(()=>{});
+
+    // Optimism Tax panel
+    fetch('/api/optimism_tax/stats').then(r=>r.json()).then(ot=>{
+      const s=ot.summary||{};
+      const setEl=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v;};
+      setEl('ot-total',s.total_trades??'0');
+      const edgeEl=document.getElementById('ot-edge');
+      if(edgeEl){
+        const e=s.avg_edge||0;
+        edgeEl.textContent=(e*100).toFixed(2)+'pp';
+        edgeEl.style.color=e>0?'var(--green)':'var(--muted)';
+      }
+      const mcpEl=document.getElementById('ot-mcp');
+      if(mcpEl){
+        const p=s.avg_mc_p_profit||0;
+        mcpEl.textContent=p?(p*100).toFixed(1)+'%':'--';
+        mcpEl.style.color=p>=0.9?'var(--green)':p>=0.7?'var(--yellow)':'var(--red)';
+      }
+      const wrEl=document.getElementById('ot-wr');
+      if(wrEl){
+        wrEl.textContent=s.win_rate!=null?s.win_rate.toFixed(1)+'%':'--';
+        wrEl.style.color=s.win_rate>=90?'var(--green)':s.win_rate>=70?'var(--yellow)':'var(--red)';
+      }
+      setEl('ot-wl',(s.wins||0)+' / '+(s.losses||0));
+
+      // Category breakdown
+      const catEl=document.getElementById('ot-categories');
+      if(catEl){
+        const cats=ot.category_counts||{};
+        const total=Object.values(cats).reduce((a,b)=>a+b,0)||1;
+        const sorted=Object.entries(cats).sort((a,b)=>b[1]-a[1]);
+        catEl.innerHTML=sorted.length?sorted.map(([cat,cnt])=>{
+          const pct=Math.round(cnt/total*100);
+          return`<div style="margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;font-size:.7rem;margin-bottom:2px">
+              <span style="color:var(--text)">${cat}</span>
+              <span style="color:var(--muted)">${cnt} (${pct}%)</span>
+            </div>
+            <div class="health-bar"><div class="health-fill" style="width:${pct}%;background:var(--blue)"></div></div>
+          </div>`;
+        }).join(''):'<div class="no-data">No data</div>';
+      }
+
+      // Recent trades table
+      const rtEl=document.getElementById('ot-recent-trades');
+      if(rtEl){
+        const trades=ot.recent_trades||[];
+        if(!trades.length){rtEl.innerHTML='<div class="no-data">No trades yet</div>';return;}
+        const rows=trades.map(t=>{
+          const ts=new Date(t.timestamp*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+          const pnlTxt=t.side==='SELL'?(t.realized_pnl>0?`<span style="color:var(--green)">+$${t.realized_pnl.toFixed(2)}</span>`:`<span style="color:var(--red)">$${t.realized_pnl.toFixed(2)}</span>`):'—';
+          const edgeTxt=t.net_edge!=null?((t.net_edge*100).toFixed(2)+'pp'):'—';
+          const mcTxt=t.mc_p_profit!=null?((t.mc_p_profit*100).toFixed(0)+'%'):'—';
+          const yesTxt=t.yes_ask!=null?(t.yes_ask*100).toFixed(1)+'¢':'—';
+          return`<tr>
+            <td style="color:var(--muted);padding:2px 6px">${ts}</td>
+            <td style="padding:2px 6px">${t.side}</td>
+            <td style="color:var(--yellow);padding:2px 6px">${yesTxt}</td>
+            <td style="padding:2px 6px">${t.category||'—'}</td>
+            <td style="color:var(--blue);padding:2px 6px">${edgeTxt}</td>
+            <td style="padding:2px 6px">${mcTxt}</td>
+            <td style="padding:2px 6px">${pnlTxt}</td>
+            <td style="color:var(--muted);padding:2px 6px;max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${t.market_question||''}</td>
+          </tr>`;
+        }).join('');
+        rtEl.innerHTML=`<table style="width:100%;border-collapse:collapse">
+          <thead><tr style="color:var(--muted);font-size:.63rem;text-transform:uppercase">
+            <th style="padding:2px 6px;text-align:left">Time</th>
+            <th style="padding:2px 6px;text-align:left">Side</th>
+            <th style="padding:2px 6px;text-align:left">YES</th>
+            <th style="padding:2px 6px;text-align:left">Cat</th>
+            <th style="padding:2px 6px;text-align:left">Edge</th>
+            <th style="padding:2px 6px;text-align:left">MC P</th>
+            <th style="padding:2px 6px;text-align:left">P&L</th>
+            <th style="padding:2px 6px;text-align:left">Market</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+      }
     }).catch(()=>{});
   }
 

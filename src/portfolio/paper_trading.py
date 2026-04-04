@@ -70,6 +70,7 @@ class Trade:
     timestamp: float = field(default_factory=time.time)
     notes: str = ""
     realized_pnl: float = 0.0   # set on SELL trades; 0 for BUY
+    metadata: dict = field(default_factory=dict)
 
     @property
     def fee(self) -> float:
@@ -113,6 +114,7 @@ class PaperPortfolio:
         notes: str = "",
         market=None,
         end_date_iso: str = "",
+        metadata: dict | None = None,
     ) -> Optional[Trade]:
         """Simulate buying outcome tokens."""
         volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
@@ -139,6 +141,7 @@ class PaperPortfolio:
             price=price,
             usdc_amount=cost,
             notes=notes,
+            metadata=metadata or {},
         )
         self.trades.append(trade)
 
@@ -413,6 +416,7 @@ class PaperPortfolio:
                     "timestamp": t.timestamp,
                     "notes": t.notes,
                     "realized_pnl": round(t.realized_pnl, 4),
+                    "metadata": t.metadata,
                 }
                 for t in recent_trades
             ],
@@ -447,6 +451,7 @@ class PaperPortfolio:
                     timestamp=t["timestamp"],
                     notes=t.get("notes", ""),
                     realized_pnl=t.get("realized_pnl", 0.0),
+                    metadata=t.get("metadata", {}),
                 )
                 self.trades.append(trade)
             self._trade_counter = len(self.trades)
