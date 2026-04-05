@@ -54,6 +54,12 @@ try:
     _OPTIMISM_TAX_AVAILABLE = True
 except ImportError:
     _OPTIMISM_TAX_AVAILABLE = False
+
+try:
+    from src.models.ml_engine import MLEngine
+    _ML_AVAILABLE = True
+except ImportError:
+    _ML_AVAILABLE = False
 from src.utils.hedge_manager import HedgeManager
 from src.utils.logger import logger, setup_logger
 from src.utils.metrics import start_metrics_server, trades_total, arb_executed
@@ -78,6 +84,16 @@ class ArbBot:
             init_db()
         except ImportError:
             logger.debug("src.utils.database not available — skipping init_db()")
+
+        # ML engine — self-improving calibration
+        self.ml_engine = None
+        if _ML_AVAILABLE:
+            from src.models.bayesian import PRICE_BUCKET_CALIBRATION
+            self.ml_engine = MLEngine(PRICE_BUCKET_CALIBRATION)
+            if self.ml_engine.load("logs/ml_state.json"):
+                logger.info(f"ML engine loaded: {self.ml_engine._total_updates} resolved trades in memory")
+            else:
+                logger.info("ML engine initialized (no prior state)")
 
         # Core components
         self.portfolio = PaperPortfolio(starting_balance=self.config.starting_balance)
@@ -243,7 +259,7 @@ class ArbBot:
         if getattr(cfg, 'optimism_tax_enabled', False):
             if _OPTIMISM_TAX_AVAILABLE:
                 self._strategies.append(
-                    OptimismTaxStrategy(self.config, self.portfolio, self.risk)
+                    OptimismTaxStrategy(self.config, self.portfolio, self.risk, ml_engine=self.ml_engine)
                 )
                 logger.info("OptimismTaxStrategy (Becker maker-side longshot edge, NO limit orders) ENABLED")
             else:
@@ -373,7 +389,8 @@ class ArbBot:
                            binance=self.binance, kalshi=self._kalshi,
                            news_monitor=self._news_monitor,
                            hedge_manager=self._hedge_manager,
-                           state_loaded_from_file=self._state_loaded)
+                           state_loaded_from_file=self._state_loaded,
+                           ml_engine=self.ml_engine)
 
         # Dashboard already started at top of run() — just register state now
 
@@ -906,6 +923,11 @@ class ArbBot:
                 if trade and len(self.portfolio.closed_positions) > n_closed_before:
                     closed = self.portfolio.closed_positions[-1]
                     self.risk.record_trade_result(closed["strategy"], closed["realized_pnl"])
+                    # ML learning: update calibration/predictor with resolved outcome
+                    if self.ml_engine is not None and trade.metadata:
+                        won = (trade.realized_pnl or 0.0) > 0
+                        self.ml_engine.update(trade.metadata, won)
+                        self.ml_engine.save("logs/ml_state.json")
 
             if trade and not (not self.paper and sig.side == "BUY"):
                 # For paper BUY and all SELL paths: increment metrics here

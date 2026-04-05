@@ -49,6 +49,7 @@ _kalshi_ref = None
 _news_monitor_ref = None
 _hedge_manager_ref = None
 _state_loaded_from_file: bool = False
+_ml_engine_ref = None
 
 # Lock protecting reads of the portfolio object from the dashboard thread
 _portfolio_lock = _threading.RLock()
@@ -380,9 +381,9 @@ def log_cross_exchange_decision(entry: dict) -> None:
 
 def register(portfolio, start_time: float, config=None, risk=None, binance=None, kalshi=None,
              news_monitor=None, hedge_manager=None,
-             state_loaded_from_file: bool = False) -> None:
+             state_loaded_from_file: bool = False, ml_engine=None) -> None:
     global _portfolio, _bot_start_time, _config, _risk, _binance_ref, _kalshi_ref
-    global _news_monitor_ref, _hedge_manager_ref, _state_loaded_from_file
+    global _news_monitor_ref, _hedge_manager_ref, _state_loaded_from_file, _ml_engine_ref
     _portfolio = portfolio
     _bot_start_time = start_time
     _config = config
@@ -392,6 +393,7 @@ def register(portfolio, start_time: float, config=None, risk=None, binance=None,
     _news_monitor_ref = news_monitor
     _hedge_manager_ref = hedge_manager
     _state_loaded_from_file = state_loaded_from_file
+    _ml_engine_ref = ml_engine
 
 
 @app.post("/api/reset")
@@ -2327,6 +2329,16 @@ def optimism_tax_model_viz():
     }
 
 
+@app.get("/api/ml/stats")
+def ml_stats():
+    """ML engine stats: calibration drift, category learning, predictor status."""
+    if _ml_engine_ref is None:
+        return {"available": False, "reason": "MLEngine not initialized"}
+    stats = _ml_engine_ref.get_stats()
+    stats["available"] = True
+    return stats
+
+
 @app.get("/api/sports/live")
 async def sports_live():
     """
@@ -3113,6 +3125,41 @@ tr:hover td{background:var(--surface2)}
       <div style="font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Recent NO Trades</div>
       <div id="ot-recent-trades" style="font-size:.72rem;max-height:200px;overflow-y:auto">
         <div class="no-data">No trades yet</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ML Engine Panel -->
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:16px;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <h3 style="margin:0;font-size:.82rem;font-weight:700;letter-spacing:.04em">ML ENGINE</h3>
+      <span id="ml-status-badge" style="font-size:.6rem;font-weight:700;padding:2px 10px;border-radius:10px;background:#0a1a2a;color:#06b6d4">INITIALIZING</span>
+      <span style="font-size:.63rem;color:var(--muted);margin-left:auto" id="ml-samples-info">-- samples</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+
+      <!-- Predictor status -->
+      <div>
+        <div style="font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Predictor</div>
+        <div id="ml-predictor-status" style="font-size:.72rem;line-height:1.9;font-family:monospace;color:var(--text)">
+          <div class="no-data">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Calibration drift -->
+      <div>
+        <div style="font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Calibration Drift (pp)</div>
+        <div id="ml-calibration-drift" style="font-size:.68rem">
+          <div class="no-data">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Category win rates -->
+      <div>
+        <div style="font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Category Win Rates</div>
+        <div id="ml-category-stats" style="font-size:.68rem">
+          <div class="no-data">Loading...</div>
+        </div>
       </div>
     </div>
   </div>
@@ -4379,6 +4426,80 @@ function renderSystemStatus(d){
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
+      }
+    }).catch(()=>{});
+
+    // ── ML Engine panel ──────────────────────────────────────────────────
+    fetch('/api/ml/stats').then(r=>r.json()).then(ml=>{
+      const badge=document.getElementById('ml-status-badge');
+      const info=document.getElementById('ml-samples-info');
+      if(!ml.available){
+        if(badge){badge.textContent='UNAVAILABLE';badge.style.color='var(--red)';}
+        return;
+      }
+      const ready=ml.predictor_ready;
+      const n=ml.predictor_samples||0;
+      const needed=ml.min_samples_needed||50;
+      if(badge){
+        badge.textContent=ready?'MODEL ACTIVE':'LEARNING';
+        badge.style.color=ready?'var(--green)':'var(--yellow)';
+        badge.style.background=ready?'#0a2a1a':'#1a1a0a';
+      }
+      if(info) info.textContent=n+' resolved trades · needs '+needed+' to activate';
+
+      // Predictor card
+      const predEl=document.getElementById('ml-predictor-status');
+      if(predEl){
+        const acc=ml.predictor_accuracy_pct;
+        const trained=ml.predictor_trained_on||0;
+        predEl.innerHTML=`
+          <div style="color:var(--muted)">Status: <span style="color:${ready?'var(--green)':'var(--yellow)';}">${ready?'ACTIVE':'Waiting for '+needed+' trades'}</span></div>
+          <div style="color:var(--muted)">Samples: <span style="color:var(--text)">${n}</span></div>
+          <div style="color:var(--muted)">Trained on: <span style="color:var(--text)">${trained}</span></div>
+          <div style="color:var(--muted)">Accuracy: <span style="color:${acc>=80?'var(--green)':acc>=65?'var(--yellow)':'var(--red)'}">${acc!=null?acc+'%':'--'}</span></div>
+          <div style="color:var(--muted)">Updates: <span style="color:var(--text)">${ml.total_updates||0}</span></div>
+          <div style="color:#334155;font-size:.6rem;margin-top:4px">Features: YES price, edge, MC P(profit),<br>true NO prob, category (8-way onehot)</div>
+        `;
+      }
+
+      // Calibration drift table
+      const driftEl=document.getElementById('ml-calibration-drift');
+      if(driftEl){
+        const drift=ml.calibration_drift||{};
+        const rows=Object.entries(drift).map(([bucket,d])=>{
+          if(d.n_obs===0) return '';
+          const pp=d.drift_pp;
+          const col=pp==null?'var(--muted)':pp>0?'var(--green)':pp<0?'var(--red)':'var(--muted)';
+          const ppTxt=pp!=null?(pp>0?'+':'')+pp.toFixed(2)+'pp':'--';
+          const mlRate=d.ml_rate!=null?((d.ml_rate*100).toFixed(2)+'%'):'<'+5+' obs';
+          return`<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #0f172a">
+            <span style="color:var(--muted)">${(parseFloat(bucket)*100).toFixed(0)}¢</span>
+            <span style="color:var(--text)">${mlRate}</span>
+            <span style="color:${col};font-weight:600">${ppTxt}</span>
+            <span style="color:#334155">(${d.n_obs})</span>
+          </div>`;
+        }).filter(Boolean).join('');
+        driftEl.innerHTML=rows||'<div class="no-data" style="font-size:.68rem">No resolved trades yet</div>';
+        if(rows) driftEl.insertAdjacentHTML('afterbegin','<div style="display:flex;justify-content:space-between;color:#334155;font-size:.6rem;padding-bottom:4px"><span>Bucket</span><span>ML Rate</span><span>Drift</span><span>Obs</span></div>');
+      }
+
+      // Category win rates
+      const catEl=document.getElementById('ml-category-stats');
+      if(catEl){
+        const cats=ml.category_stats||{};
+        const catColors={crypto:'#06b6d4',sports:'#f59e0b',weather:'#8b5cf6',politics:'#ec4899',world:'#10b981',entertainment:'#f97316',finance:'#6b7280',unknown:'#475569'};
+        const sorted=Object.entries(cats).sort((a,b)=>(b[1].total||0)-(a[1].total||0));
+        catEl.innerHTML=sorted.length?sorted.map(([cat,s])=>{
+          if(!s.total) return '';
+          const wr=s.win_rate_pct;
+          const wrCol=wr>=95?'var(--green)':wr>=80?'var(--yellow)':'var(--red)';
+          const col=catColors[cat]||'#475569';
+          return`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #0f172a">
+            <span style="color:${col};font-weight:600;min-width:80px">${cat}</span>
+            <span style="color:var(--muted)">${s.wins}W/${s.losses}L</span>
+            <span style="color:${wrCol};font-weight:700">${wr!=null?wr+'%':'--'}</span>
+          </div>`;
+        }).filter(Boolean).join(''):'<div class="no-data" style="font-size:.68rem">No data yet</div>';
       }
     }).catch(()=>{});
   }

@@ -48,11 +48,12 @@ class OptimismTaxStrategy(BaseStrategy):
     from the YES best_ask (no_price = 1 - yes_best_ask).
     """
 
-    def __init__(self, config, portfolio, risk_manager) -> None:
+    def __init__(self, config, portfolio, risk_manager, ml_engine=None) -> None:
         super().__init__(config, portfolio, risk_manager)
         # condition_id -> timestamp of last entry
         self._entered: dict[str, float] = {}
         self._bayesian = BayesianEngine()
+        self._ml = ml_engine  # optional MLEngine for self-improving predictions
         cfg = config.strategies
         kelly_fraction = 0.25
         max_bet = getattr(cfg, "optimism_tax_max_spend", 150.0)
@@ -160,6 +161,23 @@ class OptimismTaxStrategy(BaseStrategy):
                 continue
 
             true_no_prob = 1.0 - calibrated_yes_prob
+
+            # ML blending: if MLEngine has enough data, blend Bayesian with learned predictor
+            if self._ml is not None:
+                ml_meta = {
+                    "yes_ask": yes_ask,
+                    "category": category,
+                    "net_edge": true_no_prob - no_entry_price - 0.001,
+                    "mc_p_profit": 0.0,   # placeholder; MC not run yet
+                    "true_no_prob": true_no_prob,
+                }
+                true_no_prob = self._ml.get_blended_win_prob(ml_meta, true_no_prob)
+
+                # Also check if ML has updated calibration for this bucket
+                ml_rate = self._ml.get_updated_calibration_rate(yes_ask)
+                if ml_rate is not None:
+                    true_no_prob = max(true_no_prob, 1.0 - ml_rate)
+
             gross_edge = true_no_prob - no_entry_price
 
             # Maker orders apply a conservative 0.1% cost + half the category edge bonus
