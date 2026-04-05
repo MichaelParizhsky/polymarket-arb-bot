@@ -2586,6 +2586,293 @@ def _fmt_uptime(seconds: int) -> str:
 
 
 # ------------------------------------------------------------------ #
+#  Analytics API Endpoints                                             #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/analytics/deep")
+async def analytics_deep():
+    import datetime, math, collections
+    s = _portfolio
+    if not s:
+        return {"error": "no data"}
+    closed = s.get("closed_positions", [])
+    resolved = sorted([p for p in closed if p.get("closed_at")], key=lambda x: x["closed_at"])
+    equity, balance, cumulative_fees = [], s.get("starting_balance", 10000), 0.0
+    daily, daily_fees = collections.defaultdict(float), collections.defaultdict(float)
+    for p in resolved:
+        pnl = p.get("realized_pnl", 0)
+        fee = p.get("fee", 0)
+        balance += pnl
+        cumulative_fees += fee
+        equity.append({"t": p["closed_at"], "balance": round(balance, 2), "pnl": round(pnl, 4), "cumulative_fees": round(cumulative_fees, 4)})
+        day = datetime.datetime.fromtimestamp(p["closed_at"]).strftime("%Y-%m-%d")
+        daily[day] += pnl
+        daily_fees[day] += fee
+    daily_pnl = [{"day": d, "pnl": round(v, 4), "fees": round(daily_fees[d], 4)} for d, v in sorted(daily.items())]
+    peak = s.get("starting_balance", 10000)
+    drawdowns = []
+    for e in equity:
+        if e["balance"] > peak:
+            peak = e["balance"]
+        dd = (e["balance"] - peak) / peak * 100 if peak > 0 else 0
+        drawdowns.append({"t": e["t"], "drawdown": round(dd, 4)})
+    sharpe_series, window = [], 20
+    pnls = [p.get("realized_pnl", 0) for p in resolved]
+    for i in range(window, len(pnls) + 1):
+        w = pnls[i - window:i]
+        mean = sum(w) / len(w)
+        std = math.sqrt(sum((x - mean) ** 2 for x in w) / len(w)) if len(w) > 1 else 1
+        sharpe = (mean / std * math.sqrt(252)) if std > 0 else 0
+        sharpe_series.append({"t": resolved[i - 1]["closed_at"], "sharpe": round(sharpe, 4)})
+    return {
+        "equity_curve": equity,
+        "daily_pnl": daily_pnl,
+        "drawdown": drawdowns,
+        "sharpe_series": sharpe_series,
+        "total_fees": round(cumulative_fees, 4),
+        "total_trades": len(resolved),
+        "net_pnl": round(balance - s.get("starting_balance", 10000), 4),
+    }
+
+
+@app.get("/api/analytics/strategy_deep")
+async def strategy_deep():
+    import collections
+    s = _portfolio
+    if not s:
+        return []
+    stats = collections.defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0, "edges": [], "hold_times": [], "fees": 0.0})
+    for p in s.get("closed_positions", []):
+        strat = p.get("strategy", "unknown")
+        pnl = p.get("realized_pnl", 0)
+        if pnl > 0:
+            stats[strat]["wins"] += 1
+        else:
+            stats[strat]["losses"] += 1
+        stats[strat]["pnl"] += pnl
+        stats[strat]["fees"] += p.get("fee", 0)
+        meta = p.get("metadata", {}) or {}
+        if meta.get("edge"):
+            stats[strat]["edges"].append(float(meta["edge"]))
+        if p.get("opened_at") and p.get("closed_at"):
+            stats[strat]["hold_times"].append((p["closed_at"] - p["opened_at"]) / 3600)
+    result = []
+    for strat, d in stats.items():
+        total = d["wins"] + d["losses"]
+        result.append({
+            "strategy": strat, "trades": total, "wins": d["wins"], "losses": d["losses"],
+            "win_rate": round(d["wins"] / total * 100, 1) if total > 0 else 0,
+            "total_pnl": round(d["pnl"], 4),
+            "avg_pnl": round(d["pnl"] / total, 4) if total > 0 else 0,
+            "avg_edge": round(sum(d["edges"]) / len(d["edges"]), 4) if d["edges"] else 0,
+            "avg_hold_h": round(sum(d["hold_times"]) / len(d["hold_times"]), 2) if d["hold_times"] else 0,
+            "total_fees": round(d["fees"], 4),
+            "net_pnl": round(d["pnl"] - d["fees"], 4),
+        })
+    result.sort(key=lambda x: x["total_pnl"], reverse=True)
+    return result
+
+
+@app.get("/api/analytics/trade_scatter")
+async def trade_scatter():
+    s = _portfolio
+    if not s:
+        return []
+    points = []
+    for p in s.get("closed_positions", []):
+        meta = p.get("metadata", {}) or {}
+        edge = meta.get("edge") or meta.get("signal_edge") or meta.get("net_edge")
+        if edge is not None:
+            points.append({
+                "edge": round(float(edge), 4),
+                "pnl": round(p.get("realized_pnl", 0), 4),
+                "strategy": p.get("strategy", "unknown"),
+                "market": (p.get("market_question", "") or "")[:40],
+            })
+    return points
+
+
+@app.get("/api/analytics/activity_heatmap")
+async def activity_heatmap():
+    import datetime
+    s = _portfolio
+    if not s:
+        return []
+    matrix = [[0] * 24 for _ in range(7)]
+    for t in s.get("trades", []):
+        ts = t.get("timestamp")
+        if ts and t.get("side") == "BUY":
+            dt = datetime.datetime.fromtimestamp(ts)
+            matrix[dt.weekday()][dt.hour] += 1
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return [{"day": days[d], "hour": h, "count": matrix[d][h]} for d in range(7) for h in range(24)]
+
+
+@app.get("/api/analytics/pnl_distribution")
+async def pnl_distribution():
+    import math
+    s = _portfolio
+    if not s:
+        return {}
+    pnls = [p.get("realized_pnl", 0) for p in s.get("closed_positions", [])]
+    if not pnls:
+        return {"buckets": [], "stats": {}}
+    mn, mx = min(pnls), max(pnls)
+    if mn == mx:
+        return {"buckets": [{"range": round(mn, 3), "count": len(pnls)}], "stats": {}}
+    n_bins, step = 20, (mx - mn) / 20
+    bins = [0] * n_bins
+    for v in pnls:
+        bins[min(int((v - mn) / step), n_bins - 1)] += 1
+    buckets = [{"range": round(mn + i * step, 3), "count": bins[i]} for i in range(n_bins)]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    mean = sum(pnls) / len(pnls)
+    std = math.sqrt(sum((x - mean) ** 2 for x in pnls) / len(pnls))
+    return {
+        "buckets": buckets,
+        "stats": {
+            "mean": round(mean, 4), "std": round(std, 4),
+            "median": round(sorted(pnls)[len(pnls) // 2], 4),
+            "best": round(max(pnls), 4), "worst": round(min(pnls), 4),
+            "win_avg": round(sum(wins) / len(wins), 4) if wins else 0,
+            "loss_avg": round(sum(losses) / len(losses), 4) if losses else 0,
+            "profit_factor": round(sum(wins) / abs(sum(losses)), 3) if losses and sum(losses) != 0 else 999,
+        },
+    }
+
+
+@app.get("/api/analytics/hold_time")
+async def hold_time_distribution():
+    import collections
+    s = _portfolio
+    if not s:
+        return {}
+    by_strat = collections.defaultdict(list)
+    for p in s.get("closed_positions", []):
+        if p.get("opened_at") and p.get("closed_at"):
+            by_strat[p.get("strategy", "unknown")].append(round((p["closed_at"] - p["opened_at"]) / 3600, 2))
+    return {strat: sorted(times) for strat, times in by_strat.items()}
+
+
+@app.get("/api/analytics/rolling_winrate")
+async def rolling_winrate():
+    s = _portfolio
+    if not s:
+        return []
+    resolved = sorted([p for p in s.get("closed_positions", []) if p.get("closed_at")], key=lambda x: x["closed_at"])
+    window, result = 20, []
+    for i in range(window, len(resolved) + 1):
+        w = resolved[i - window:i]
+        wins = sum(1 for x in w if x.get("realized_pnl", 0) > 0)
+        result.append({"t": resolved[i - 1]["closed_at"], "win_rate": round(wins / window * 100, 1), "trade_num": i})
+    return result
+
+
+@app.get("/api/analytics/edge_calibration")
+async def edge_calibration():
+    import collections
+    s = _portfolio
+    if not s:
+        return []
+    buckets = collections.defaultdict(lambda: {"wins": 0, "total": 0})
+    for p in s.get("closed_positions", []):
+        meta = p.get("metadata", {}) or {}
+        edge = meta.get("edge") or meta.get("net_edge")
+        if edge is None:
+            continue
+        bucket = round(float(edge) * 20) / 20
+        buckets[bucket]["total"] += 1
+        if p.get("realized_pnl", 0) > 0:
+            buckets[bucket]["wins"] += 1
+    return [
+        {"predicted_edge": e, "actual_win_rate": round(d["wins"] / d["total"], 3), "sample_size": d["total"]}
+        for e, d in sorted(buckets.items()) if d["total"] >= 3
+    ]
+
+
+@app.get("/api/analytics/price_bucket_accuracy")
+async def price_bucket_accuracy():
+    import collections
+    s = _portfolio
+    if not s:
+        return []
+    buckets = collections.defaultdict(lambda: {"wins": 0, "total": 0})
+    for p in s.get("closed_positions", []):
+        if p.get("strategy") != "optimism_tax":
+            continue
+        meta = p.get("metadata", {}) or {}
+        price = meta.get("yes_ask") or meta.get("price")
+        if price is None:
+            continue
+        bucket = round(float(price) * 10) / 10
+        buckets[bucket]["total"] += 1
+        if p.get("realized_pnl", 0) > 0:
+            buckets[bucket]["wins"] += 1
+    return [
+        {"price_bucket": pv, "actual_win_rate": round(d["wins"] / d["total"], 3) if d["total"] > 0 else 0,
+         "bayesian_prediction": round(1 - pv, 3), "sample_size": d["total"]}
+        for pv, d in sorted(buckets.items())
+    ]
+
+
+@app.get("/api/analytics/category_performance")
+async def category_performance():
+    import collections
+    s = _portfolio
+    if not s:
+        return []
+
+    def _cat(q):
+        q = (q or "").lower()
+        if any(w in q for w in ["btc", "eth", "sol", "crypto", "bitcoin", "ethereum"]):
+            return "Crypto"
+        if any(w in q for w in ["nba", "nfl", "nhl", "mlb", "game", "match", "vs.", "win"]):
+            return "Sports"
+        if any(w in q for w in ["trump", "biden", "election", "president", "congress", "senate"]):
+            return "Politics"
+        if any(w in q for w in ["fed", "rate", "inflation", "gdp", "recession", "cpi"]):
+            return "Economics"
+        if any(w in q for w in ["elon", "musk", "spacex", "tesla", "apple", "microsoft", "google"]):
+            return "Tech/Corp"
+        return "Other"
+
+    stats = collections.defaultdict(lambda: {"wins": 0, "total": 0, "pnl": 0.0})
+    for p in s.get("closed_positions", []):
+        cat = _cat(p.get("market_question", ""))
+        stats[cat]["total"] += 1
+        stats[cat]["pnl"] += p.get("realized_pnl", 0)
+        if p.get("realized_pnl", 0) > 0:
+            stats[cat]["wins"] += 1
+    return [
+        {"category": cat, "total": d["total"],
+         "win_rate": round(d["wins"] / d["total"] * 100, 1) if d["total"] > 0 else 0,
+         "total_pnl": round(d["pnl"], 4),
+         "avg_pnl": round(d["pnl"] / d["total"], 4) if d["total"] > 0 else 0}
+        for cat, d in sorted(stats.items(), key=lambda x: x[1]["pnl"], reverse=True)
+    ]
+
+
+@app.get("/api/analytics/portfolio_concentration")
+async def portfolio_concentration():
+    s = _portfolio
+    if not s:
+        return []
+    positions = s.get("positions", {})
+    items = []
+    for tid, p in positions.items():
+        cost = p.get("contracts", 0) * p.get("avg_cost", 0)
+        items.append({"market": (p.get("market_question", "") or tid)[:50], "strategy": p.get("strategy", "?"), "deployed": round(cost, 2)})
+    items.sort(key=lambda x: x["deployed"], reverse=True)
+    total = sum(i["deployed"] for i in items)
+    running = 0
+    for item in items:
+        running += item["deployed"]
+        item["cumulative_pct"] = round(running / total * 100, 1) if total > 0 else 0
+    return items[:20]
+
+
+# ------------------------------------------------------------------ #
 #  Dashboard HTML                                                      #
 # ------------------------------------------------------------------ #
 
@@ -2864,6 +3151,7 @@ tr:hover td{background:var(--surface2)}
   <div class="tab" onclick="showTab('system')">System</div>
   <div class="tab" onclick="showTab('weather')">Weather</div>
   <div class="tab" onclick="showTab('sports')">Sports</div>
+  <div class="tab" onclick="showTab('analytics')">Analytics</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -3722,6 +4010,353 @@ tr:hover td{background:var(--surface2)}
 
 </div>
 
+<!-- ════════════════════════════════════════ ANALYTICS TAB ════════════════════════════════════════ -->
+<div class="page" id="tab-analytics">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+    <h2 style="font-size:.9rem;font-weight:700;color:var(--text);margin:0">Deep Analytics</h2>
+    <span style="font-size:.65rem;color:var(--muted)">All data from closed trades · refresh on tab open</span>
+    <button onclick="reloadAnalyticsTab()" style="margin-left:auto;font-size:.65rem;padding:4px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer">Refresh</button>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:16px">
+
+    <!-- 1. Equity Curve + Drawdown -->
+    <div class="section" style="grid-column:1/-1">
+      <h3>Equity Curve</h3>
+      <canvas id="an-equity" height="90"></canvas>
+      <h3 style="margin-top:12px">Drawdown %</h3>
+      <canvas id="an-drawdown" height="50"></canvas>
+    </div>
+
+    <!-- 2. Daily PnL -->
+    <div class="section">
+      <h3>Daily PnL</h3>
+      <canvas id="an-daily-pnl"></canvas>
+    </div>
+
+    <!-- 3. Strategy Net PnL -->
+    <div class="section">
+      <h3>Strategy Net PnL ($)</h3>
+      <canvas id="an-strat-pnl"></canvas>
+    </div>
+
+    <!-- 4. Strategy Win Rate -->
+    <div class="section">
+      <h3>Strategy Win Rate %</h3>
+      <canvas id="an-win-rate"></canvas>
+    </div>
+
+    <!-- 5. PnL Distribution -->
+    <div class="section">
+      <h3>PnL Distribution</h3>
+      <canvas id="an-pnl-hist"></canvas>
+      <div id="an-pnl-stats" style="font-size:10px;margin-top:6px;color:var(--muted)"></div>
+    </div>
+
+    <!-- 6. Activity Heatmap -->
+    <div class="section" style="grid-column:span 2">
+      <h3>Trade Activity Heatmap (Hour × Weekday)</h3>
+      <div id="an-heatmap" style="overflow-x:auto;font-size:10px"></div>
+    </div>
+
+    <!-- 7. Rolling Win Rate -->
+    <div class="section">
+      <h3>Rolling 20-Trade Win Rate %</h3>
+      <canvas id="an-rolling-wr"></canvas>
+    </div>
+
+    <!-- 8. Rolling Sharpe -->
+    <div class="section">
+      <h3>Rolling 20-Trade Sharpe Ratio</h3>
+      <canvas id="an-sharpe"></canvas>
+    </div>
+
+    <!-- 9. Edge Calibration -->
+    <div class="section">
+      <h3>Edge Calibration (Predicted Edge → Actual Win Rate)</h3>
+      <canvas id="an-calibration"></canvas>
+    </div>
+
+    <!-- 10. Edge vs PnL Scatter -->
+    <div class="section">
+      <h3>Signal Edge vs Realized PnL</h3>
+      <canvas id="an-scatter"></canvas>
+    </div>
+
+    <!-- 11. Category Performance -->
+    <div class="section">
+      <h3>Category: Win Rate & Total PnL</h3>
+      <canvas id="an-category"></canvas>
+    </div>
+
+    <!-- 12. Fee Drag -->
+    <div class="section">
+      <h3>Cumulative Fee Drag vs Net PnL</h3>
+      <canvas id="an-fee-drag"></canvas>
+    </div>
+
+    <!-- 13. Hold Time Distribution -->
+    <div class="section">
+      <h3>Avg Hold Time by Strategy (hours)</h3>
+      <canvas id="an-hold-time"></canvas>
+    </div>
+
+    <!-- 14. OptimismTax Accuracy -->
+    <div class="section">
+      <h3>OptimismTax: Actual Win Rate vs Bayesian Prediction</h3>
+      <canvas id="an-opt-tax"></canvas>
+    </div>
+
+    <!-- 15. Strategy Trade Count + Avg Edge -->
+    <div class="section">
+      <h3>Strategy: Trade Count & Avg Edge</h3>
+      <canvas id="an-strat-edge"></canvas>
+    </div>
+
+    <!-- 16. Portfolio Concentration -->
+    <div class="section" style="grid-column:1/-1">
+      <h3>Open Position Concentration (Top 20)</h3>
+      <canvas id="an-concentration" height="60"></canvas>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+//  Analytics Tab — Chart.js charts loaded on first visit
+// ══════════════════════════════════════════════════════════════════════════════
+const AN_COLORS = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
+let _anLoaded = false;
+const _anCharts = {};
+
+function _anDestroy(id) {
+  if (_anCharts[id]) { _anCharts[id].destroy(); delete _anCharts[id]; }
+}
+
+function reloadAnalyticsTab() {
+  _anLoaded = false;
+  Object.keys(_anCharts).forEach(id => { try { _anCharts[id].destroy(); } catch(e){} delete _anCharts[id]; });
+  loadAnalyticsTab();
+}
+
+async function loadAnalyticsTab() {
+  if (_anLoaded) return;
+  _anLoaded = true;
+
+  const [deep, stratDeep, scatter, heatmap, pnlDist, holdTime, rollingWr, calibration, priceBucket, category, concentration] = await Promise.all([
+    fetch('/api/analytics/deep').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/analytics/strategy_deep').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/trade_scatter').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/activity_heatmap').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/pnl_distribution').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/analytics/hold_time').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/analytics/rolling_winrate').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/edge_calibration').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/price_bucket_accuracy').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/category_performance').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/analytics/portfolio_concentration').then(r=>r.json()).catch(()=>[]),
+  ]);
+
+  const noData = el => { if(el) el.parentElement.innerHTML += '<p style="color:var(--muted);font-size:11px;text-align:center">No data yet</p>'; };
+  const tsL = t => new Date(t*1000).toLocaleDateString();
+
+  // 1. Equity Curve
+  if (deep.equity_curve && deep.equity_curve.length) {
+    const ec = deep.equity_curve;
+    _anCharts['equity'] = new Chart($('an-equity'), {
+      type:'line',
+      data:{ labels: ec.map(e=>tsL(e.t)), datasets:[{ label:'Balance ($)', data:ec.map(e=>e.balance), borderColor:'#4e79a7', backgroundColor:'rgba(78,121,167,0.1)', fill:true, pointRadius:0, tension:0.2 }] },
+      options:{ plugins:{legend:{display:false}}, scales:{ x:{ticks:{maxTicksLimit:10}} } }
+    });
+    if (deep.drawdown && deep.drawdown.length) {
+      _anCharts['drawdown'] = new Chart($('an-drawdown'), {
+        type:'line',
+        data:{ labels: deep.drawdown.map(e=>tsL(e.t)), datasets:[{ label:'Drawdown %', data:deep.drawdown.map(e=>e.drawdown), borderColor:'#e15759', backgroundColor:'rgba(225,87,89,0.15)', fill:true, pointRadius:0 }] },
+        options:{ plugins:{legend:{display:false}}, scales:{ x:{ticks:{maxTicksLimit:10}} } }
+      });
+    }
+  } else { noData($('an-equity')); }
+
+  // 2. Daily PnL
+  if (deep.daily_pnl && deep.daily_pnl.length) {
+    const dp = deep.daily_pnl;
+    _anCharts['dailypnl'] = new Chart($('an-daily-pnl'), {
+      type:'bar',
+      data:{ labels:dp.map(d=>d.day), datasets:[{ label:'PnL', data:dp.map(d=>d.pnl), backgroundColor:dp.map(d=>d.pnl>=0?'#59a14f':'#e15759') }] },
+      options:{ plugins:{legend:{display:false}}, scales:{ x:{ticks:{maxTicksLimit:15}} } }
+    });
+  } else { noData($('an-daily-pnl')); }
+
+  // 3. Strategy Net PnL
+  if (stratDeep && stratDeep.length) {
+    _anCharts['stratpnl'] = new Chart($('an-strat-pnl'), {
+      type:'bar',
+      data:{ labels:stratDeep.map(s=>s.strategy), datasets:[{ label:'Net PnL ($)', data:stratDeep.map(s=>s.net_pnl), backgroundColor:stratDeep.map(s=>s.net_pnl>=0?'#59a14f':'#e15759') }] },
+      options:{ indexAxis:'y', plugins:{legend:{display:false}} }
+    });
+  } else { noData($('an-strat-pnl')); }
+
+  // 4. Strategy Win Rate
+  if (stratDeep && stratDeep.length) {
+    _anCharts['winrate'] = new Chart($('an-win-rate'), {
+      type:'bar',
+      data:{ labels:stratDeep.map(s=>s.strategy), datasets:[{ label:'Win Rate %', data:stratDeep.map(s=>s.win_rate), backgroundColor:stratDeep.map(s=>s.win_rate>=50?'#4e79a7':'#f28e2b') }] },
+      options:{ indexAxis:'y', scales:{ x:{max:100} }, plugins:{legend:{display:false}} }
+    });
+  }
+
+  // 5. PnL Histogram
+  if (pnlDist.buckets && pnlDist.buckets.length) {
+    _anCharts['pnlhist'] = new Chart($('an-pnl-hist'), {
+      type:'bar',
+      data:{ labels:pnlDist.buckets.map(b=>b.range.toFixed(3)), datasets:[{ label:'Trades', data:pnlDist.buckets.map(b=>b.count), backgroundColor:pnlDist.buckets.map(b=>b.range>=0?'#59a14f':'#e15759') }] },
+      options:{ plugins:{legend:{display:false}}, scales:{ x:{ticks:{maxTicksLimit:10}} } }
+    });
+    if (pnlDist.stats) {
+      const st = pnlDist.stats;
+      $('an-pnl-stats').innerHTML = `Mean: $${st.mean} &nbsp;|&nbsp; Std: $${st.std} &nbsp;|&nbsp; Best: $${st.best} &nbsp;|&nbsp; Worst: $${st.worst} &nbsp;|&nbsp; Profit Factor: ${st.profit_factor}`;
+    }
+  } else { noData($('an-pnl-hist')); }
+
+  // 6. Activity Heatmap
+  if (heatmap && heatmap.length) {
+    const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    const maxC = Math.max(...heatmap.map(h=>h.count), 1);
+    let html = '<table style="border-collapse:collapse"><tr><th style="padding:2px 8px"></th>';
+    for (let h=0;h<24;h++) html += `<th style="padding:1px 3px;font-weight:normal;color:var(--muted)">${h}</th>`;
+    html += '</tr>';
+    for (const day of days) {
+      html += `<tr><td style="padding:2px 8px;color:var(--muted)">${day}</td>`;
+      for (let h=0;h<24;h++) {
+        const cell = heatmap.find(x=>x.day===day&&x.hour===h);
+        const c = cell ? cell.count : 0;
+        const a = (c/maxC).toFixed(2);
+        html += `<td style="width:20px;height:18px;background:rgba(78,121,167,${a});border:1px solid rgba(255,255,255,0.05)" title="${day} ${h}:00 — ${c} trades"></td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</table>';
+    $('an-heatmap').innerHTML = html;
+  }
+
+  // 7. Rolling Win Rate
+  if (rollingWr && rollingWr.length) {
+    _anCharts['rollingwr'] = new Chart($('an-rolling-wr'), {
+      type:'line',
+      data:{ labels:rollingWr.map(r=>`#${r.trade_num}`), datasets:[
+        { label:'Win Rate %', data:rollingWr.map(r=>r.win_rate), borderColor:'#59a14f', fill:false, pointRadius:0 },
+        { label:'50% Line', data:rollingWr.map(()=>50), borderColor:'#888', borderDash:[5,5], pointRadius:0 }
+      ]},
+      options:{ scales:{ y:{min:0,max:100} }, plugins:{legend:{position:'top'}} }
+    });
+  } else { noData($('an-rolling-wr')); }
+
+  // 8. Rolling Sharpe
+  if (deep.sharpe_series && deep.sharpe_series.length) {
+    _anCharts['sharpe'] = new Chart($('an-sharpe'), {
+      type:'line',
+      data:{ labels:deep.sharpe_series.map(r=>tsL(r.t)), datasets:[{ label:'Sharpe', data:deep.sharpe_series.map(r=>r.sharpe), borderColor:'#f28e2b', fill:false, pointRadius:0 }] },
+      options:{ plugins:{legend:{display:false}}, scales:{ x:{ticks:{maxTicksLimit:10}} } }
+    });
+  } else { noData($('an-sharpe')); }
+
+  // 9. Edge Calibration
+  if (calibration && calibration.length) {
+    _anCharts['calibration'] = new Chart($('an-calibration'), {
+      type:'scatter',
+      data:{ datasets:[
+        { label:'Actual Win Rate', data:calibration.map(c=>({x:c.predicted_edge,y:c.actual_win_rate})), backgroundColor:'#4e79a7', pointRadius:6 },
+        { label:'Perfect', type:'line', data:[{x:0,y:0.5},{x:0.5,y:1}], borderColor:'#888', borderDash:[5,5], pointRadius:0, fill:false }
+      ]},
+      options:{ scales:{ x:{title:{display:true,text:'Predicted Edge'}}, y:{title:{display:true,text:'Actual Win Rate'},min:0,max:1} } }
+    });
+  } else { noData($('an-calibration')); }
+
+  // 10. Edge vs PnL Scatter
+  if (scatter && scatter.length) {
+    const stratSet = [...new Set(scatter.map(p=>p.strategy))];
+    _anCharts['scatter'] = new Chart($('an-scatter'), {
+      type:'scatter',
+      data:{ datasets: stratSet.map((s,i)=>({ label:s, data:scatter.filter(p=>p.strategy===s).map(p=>({x:p.edge,y:p.pnl})), backgroundColor:AN_COLORS[i%AN_COLORS.length]+'aa', pointRadius:4 })) },
+      options:{ scales:{ x:{title:{display:true,text:'Signal Edge'}}, y:{title:{display:true,text:'Realized PnL ($)'}} } }
+    });
+  } else { noData($('an-scatter')); }
+
+  // 11. Category Performance
+  if (category && category.length) {
+    _anCharts['category'] = new Chart($('an-category'), {
+      type:'bar',
+      data:{ labels:category.map(c=>c.category), datasets:[
+        { label:'Win Rate %', data:category.map(c=>c.win_rate), backgroundColor:'#4e79a7', yAxisID:'y1' },
+        { label:'Total PnL ($)', data:category.map(c=>c.total_pnl), backgroundColor:'#f28e2b', yAxisID:'y2' }
+      ]},
+      options:{ scales:{ y1:{type:'linear',position:'left',max:100}, y2:{type:'linear',position:'right',grid:{drawOnChartArea:false}} } }
+    });
+  } else { noData($('an-category')); }
+
+  // 12. Fee Drag
+  if (deep.equity_curve && deep.equity_curve.length) {
+    const ec = deep.equity_curve;
+    const startBal = ec[0]?.balance || 0;
+    _anCharts['feedrag'] = new Chart($('an-fee-drag'), {
+      type:'line',
+      data:{ labels:ec.map(e=>tsL(e.t)), datasets:[
+        { label:'Cumulative Fees ($)', data:ec.map(e=>e.cumulative_fees), borderColor:'#e15759', fill:false, pointRadius:0 },
+        { label:'Net PnL ($)', data:ec.map(e=>+(e.balance-startBal).toFixed(2)), borderColor:'#59a14f', fill:false, pointRadius:0 }
+      ]},
+      options:{ scales:{ x:{ticks:{maxTicksLimit:10}} } }
+    });
+  }
+
+  // 13. Hold Time
+  if (holdTime && Object.keys(holdTime).length) {
+    const strats = Object.keys(holdTime);
+    _anCharts['holdtime'] = new Chart($('an-hold-time'), {
+      type:'bar',
+      data:{ labels:strats, datasets:[{ label:'Avg Hold (hrs)', data:strats.map(s=>{ const t=holdTime[s]; return t.length?+(t.reduce((a,b)=>a+b,0)/t.length).toFixed(2):0; }), backgroundColor:strats.map((_,i)=>AN_COLORS[i%AN_COLORS.length]) }] },
+      options:{ indexAxis:'y', plugins:{legend:{display:false}} }
+    });
+  } else { noData($('an-hold-time')); }
+
+  // 14. OptimismTax
+  if (priceBucket && priceBucket.length) {
+    _anCharts['opttax'] = new Chart($('an-opt-tax'), {
+      type:'line',
+      data:{ labels:priceBucket.map(p=>p.price_bucket.toFixed(1)), datasets:[
+        { label:'Actual Win Rate', data:priceBucket.map(p=>p.actual_win_rate), borderColor:'#4e79a7', pointRadius:5, fill:false },
+        { label:'Bayesian Prediction', data:priceBucket.map(p=>p.bayesian_prediction), borderColor:'#f28e2b', borderDash:[5,5], pointRadius:0, fill:false }
+      ]},
+      options:{ scales:{ y:{min:0,max:1} } }
+    });
+  } else { noData($('an-opt-tax')); }
+
+  // 15. Strategy Trade Count + Avg Edge
+  if (stratDeep && stratDeep.length) {
+    _anCharts['stratedge'] = new Chart($('an-strat-edge'), {
+      type:'bar',
+      data:{ labels:stratDeep.map(s=>s.strategy), datasets:[
+        { label:'Trade Count', data:stratDeep.map(s=>s.trades), backgroundColor:'#4e79a7', yAxisID:'y1' },
+        { label:'Avg Edge', data:stratDeep.map(s=>s.avg_edge), backgroundColor:'#f28e2b', yAxisID:'y2' }
+      ]},
+      options:{ scales:{ y1:{type:'linear',position:'left'}, y2:{type:'linear',position:'right',grid:{drawOnChartArea:false}} } }
+    });
+  }
+
+  // 16. Portfolio Concentration
+  if (concentration && concentration.length) {
+    _anCharts['concentration'] = new Chart($('an-concentration'), {
+      type:'bar',
+      data:{ labels:concentration.map(c=>c.market), datasets:[
+        { label:'Deployed ($)', data:concentration.map(c=>c.deployed), backgroundColor:'#4e79a7', yAxisID:'y1' },
+        { label:'Cumulative %', type:'line', data:concentration.map(c=>c.cumulative_pct), borderColor:'#f28e2b', pointRadius:3, fill:false, yAxisID:'y2' }
+      ]},
+      options:{ scales:{ y1:{type:'linear',position:'left'}, y2:{type:'linear',position:'right',max:100,grid:{drawOnChartArea:false}}, x:{ticks:{maxTicksLimit:15,maxRotation:45}} } }
+    });
+  } else { noData($('an-concentration')); }
+}
+</script>
+
 <!-- Hidden elements required by log stream (live-uptime, live-realized, etc.) -->
 <div style="display:none">
   <span id="live-uptime">--</span>
@@ -3748,8 +4383,8 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-// 9 tabs: overview, positions, trades, strategies, ai-intel, meta, system, weather, sports
-const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system','weather','sports'];
+// 10 tabs: overview, positions, trades, strategies, ai-intel, meta, system, weather, sports, analytics
+const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system','weather','sports','analytics'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
 let _sportsInterval=null;
 
@@ -3790,6 +4425,10 @@ function showTab(name){
     window._sportsInterval=setInterval(()=>{loadSports();loadSportsLive();},30000);
   } else {
     if(window._sportsInterval){clearInterval(window._sportsInterval);window._sportsInterval=null;}
+  }
+
+  if(name==='analytics'){
+    loadAnalyticsTab();
   }
 
   if(name==='ai-intel'){

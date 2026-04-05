@@ -49,6 +49,7 @@ class Position:
     opened_at: float = field(default_factory=time.time)
     realized_pnl: float = 0.0
     end_date_iso: str = ""   # ISO date string for market resolution (optional)
+    metadata: dict = field(default_factory=dict)
 
     @property
     def cost_basis(self) -> float:
@@ -162,6 +163,7 @@ class PaperPortfolio:
                 avg_cost=all_in_per_contract,
                 strategy=strategy,
                 end_date_iso=end_date_iso or "",
+                metadata=metadata or {},
             )
 
         self._update_metrics()
@@ -215,6 +217,7 @@ class PaperPortfolio:
         pos.contracts -= contracts
         pos.realized_pnl += realized
 
+        _meta = pos.metadata
         if pos.contracts < 0.001:
             self.closed_positions.append({
                 "token_id": token_id,
@@ -224,6 +227,7 @@ class PaperPortfolio:
                 "realized_pnl": round(pos.realized_pnl, 4),
                 "opened_at": pos.opened_at,
                 "closed_at": time.time(),
+                "metadata": pos.metadata,
             })
             del self.positions[token_id]
 
@@ -238,6 +242,7 @@ class PaperPortfolio:
             usdc_amount=proceeds,
             notes=notes,
             realized_pnl=round(realized, 4),
+            metadata=_meta,
         )
         self.trades.append(trade)
         self._update_metrics()

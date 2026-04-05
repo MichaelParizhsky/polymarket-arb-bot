@@ -29,7 +29,7 @@ CATEGORIES: list[str] = [
 ]
 
 # Minimum resolved trades before WinPredictor activates
-N_MIN_PREDICTOR = 50
+N_MIN_PREDICTOR = 20
 
 # Prior weight for Bayesian bucket blending (≈ virtual prior observations)
 PRIOR_WEIGHT = 20
@@ -154,7 +154,7 @@ class WinPredictor:
         n = len(self._y)
         if n < N_MIN_PREDICTOR:
             return False
-        if sum(self._y) < 3 or sum(1 - y for y in self._y) < 3:
+        if sum(self._y) < 2 or sum(1 - y for y in self._y) < 2:
             return False
         try:
             from sklearn.linear_model import LogisticRegression

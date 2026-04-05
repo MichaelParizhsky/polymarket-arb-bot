@@ -953,6 +953,7 @@ class ArbBot:
                         won = (trade.realized_pnl or 0.0) > 0
                         self.ml_engine.update(trade.metadata, won)
                         self.ml_engine.save("logs/ml_state.json")
+                        logger.debug(f"[ML] Updated with {'WIN' if won else 'LOSS'}: yes_ask={trade.metadata.get('yes_ask','?')}, total_updates={self.ml_engine._total_updates}")
 
             if trade and not (not self.paper and sig.side == "BUY"):
                 # For paper BUY and all SELL paths: increment metrics here
