@@ -489,13 +489,26 @@ class ArbBot:
 
                 all_signals = []
                 per_strategy: dict[str, int] = {}
+                # Max signals to forward from any single strategy per cycle.
+                # Prevents one high-signal strategy (e.g. QuickResolution with 300+ near-expiry
+                # markets) from consuming all execution slots and starving other strategies.
+                # Each strategy first sorts its own signals by edge, then forwards at most this many.
+                _max_per_strat = int(os.getenv("MAX_SIGNALS_PER_STRATEGY", "5"))
                 for strategy, result in zip(self._strategies, results):
                     if isinstance(result, Exception):
                         logger.error(f"Strategy {strategy.__class__.__name__} scan failed: {result}")
                         continue
                     sigs = result or []
-                    all_signals.extend(sigs)
                     per_strategy[strategy.__class__.__name__] = len(sigs)
+                    # Cap per strategy: keep the top N by edge
+                    if len(sigs) > _max_per_strat:
+                        sigs = sorted(sigs, key=lambda s: s.edge, reverse=True)[:_max_per_strat]
+                    all_signals.extend(sigs)
+
+                # Sort the merged signal list by edge so the best signals across all strategies
+                # get priority. This ensures OptimismTax/MarketMaking compete fairly with
+                # QuickResolution instead of being blocked by strategy execution order.
+                all_signals.sort(key=lambda s: s.edge, reverse=True)
 
                 # Log signal pipeline state every cycle — essential for debugging a stalled bot.
                 n_markets = len(context.get("markets", []))
@@ -778,8 +791,16 @@ class ArbBot:
         # min_trade_interval between legs without waiting MIN_TRADE_INTERVAL seconds.
         executed_this_cycle: set[str] = set()
 
-        min_interval = self.config.risk.min_trade_interval
+        # Paper mode: no API rate concern — execute all signals without global delay.
+        # Live mode: enforce min_trade_interval to avoid hammering the CLOB API.
+        min_interval = 0 if self.paper else self.config.risk.min_trade_interval
         token_cooldown = self.config.risk.token_cooldown
+        # Per-cycle trade cap: prevent any single cycle from exhausting the paper balance
+        # when many strategies fire simultaneously (e.g. QuickRes finding 300+ signals).
+        # Signals are pre-sorted by edge so the highest-conviction trades win the slots.
+        # In live mode this cap doesn't apply — the global min_trade_interval throttles instead.
+        _max_per_cycle = int(os.getenv("MAX_TRADES_PER_CYCLE", "20")) if self.paper else 9999
+        _trades_this_cycle = 0
 
         # Identify paired signals (YES+NO pairs).
         # If rate budget can't cover even 1 trade, skip BOTH legs to avoid an unhedged position.
@@ -801,6 +822,9 @@ class ArbBot:
                     skip_token_ids.add(leg.token_id)
 
         for sig in signals:
+            if _trades_this_cycle >= _max_per_cycle:
+                break
+
             if sig.token_id in skip_token_ids:
                 logger.debug(f"Skipping paired signal for {sig.token_id[:12]} — insufficient rate budget")
                 continue
@@ -894,6 +918,7 @@ class ArbBot:
                         self._last_trade_time = time.time()
                         self._token_last_traded[sig.token_id] = time.time()
                         executed_this_cycle.add(sig.token_id)
+                        _trades_this_cycle += 1
                         self.portfolio.save_to_json(STATE_PATH)
             elif sig.side == "BUY":
                 # Paper: simulate directly
@@ -937,6 +962,7 @@ class ArbBot:
                 self._last_trade_time = time.time()
                 self._token_last_traded[sig.token_id] = time.time()
                 executed_this_cycle.add(sig.token_id)
+                _trades_this_cycle += 1
                 self.portfolio.save_to_json(STATE_PATH)
 
             if trade and sig.side == "BUY" and self._hedge_manager is not None:
