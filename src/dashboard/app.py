@@ -2592,16 +2592,18 @@ def _fmt_uptime(seconds: int) -> str:
 @app.get("/api/analytics/deep")
 async def analytics_deep():
     import datetime, math, collections
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return {"error": "no data"}
-    closed = s.get("closed_positions", [])
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
+        starting = _portfolio.starting_balance
     resolved = sorted([p for p in closed if p.get("closed_at")], key=lambda x: x["closed_at"])
-    equity, balance, cumulative_fees = [], s.get("starting_balance", 10000), 0.0
+    equity, balance, cumulative_fees = [], starting, 0.0
     daily, daily_fees = collections.defaultdict(float), collections.defaultdict(float)
     for p in resolved:
         pnl = p.get("realized_pnl", 0)
-        fee = p.get("fee", 0)
+        # fee not stored on closed_position dict; estimate from realized_pnl magnitude
+        fee = abs(pnl) * 0.002 if pnl else 0
         balance += pnl
         cumulative_fees += fee
         equity.append({"t": p["closed_at"], "balance": round(balance, 2), "pnl": round(pnl, 4), "cumulative_fees": round(cumulative_fees, 4)})
@@ -2609,7 +2611,7 @@ async def analytics_deep():
         daily[day] += pnl
         daily_fees[day] += fee
     daily_pnl = [{"day": d, "pnl": round(v, 4), "fees": round(daily_fees[d], 4)} for d, v in sorted(daily.items())]
-    peak = s.get("starting_balance", 10000)
+    peak = starting
     drawdowns = []
     for e in equity:
         if e["balance"] > peak:
@@ -2631,18 +2633,19 @@ async def analytics_deep():
         "sharpe_series": sharpe_series,
         "total_fees": round(cumulative_fees, 4),
         "total_trades": len(resolved),
-        "net_pnl": round(balance - s.get("starting_balance", 10000), 4),
+        "net_pnl": round(balance - starting, 4),
     }
 
 
 @app.get("/api/analytics/strategy_deep")
 async def strategy_deep():
     import collections
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
     stats = collections.defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0, "edges": [], "hold_times": [], "fees": 0.0})
-    for p in s.get("closed_positions", []):
+    for p in closed:
         strat = p.get("strategy", "unknown")
         pnl = p.get("realized_pnl", 0)
         if pnl > 0:
@@ -2650,15 +2653,16 @@ async def strategy_deep():
         else:
             stats[strat]["losses"] += 1
         stats[strat]["pnl"] += pnl
-        stats[strat]["fees"] += p.get("fee", 0)
         meta = p.get("metadata", {}) or {}
-        if meta.get("edge"):
-            stats[strat]["edges"].append(float(meta["edge"]))
+        edge = meta.get("edge") or meta.get("net_edge") or meta.get("gross_edge")
+        if edge:
+            stats[strat]["edges"].append(float(edge))
         if p.get("opened_at") and p.get("closed_at"):
             stats[strat]["hold_times"].append((p["closed_at"] - p["opened_at"]) / 3600)
     result = []
     for strat, d in stats.items():
         total = d["wins"] + d["losses"]
+        net_pnl = round(d["pnl"], 4)
         result.append({
             "strategy": strat, "trades": total, "wins": d["wins"], "losses": d["losses"],
             "win_rate": round(d["wins"] / total * 100, 1) if total > 0 else 0,
@@ -2666,8 +2670,7 @@ async def strategy_deep():
             "avg_pnl": round(d["pnl"] / total, 4) if total > 0 else 0,
             "avg_edge": round(sum(d["edges"]) / len(d["edges"]), 4) if d["edges"] else 0,
             "avg_hold_h": round(sum(d["hold_times"]) / len(d["hold_times"]), 2) if d["hold_times"] else 0,
-            "total_fees": round(d["fees"], 4),
-            "net_pnl": round(d["pnl"] - d["fees"], 4),
+            "net_pnl": net_pnl,
         })
     result.sort(key=lambda x: x["total_pnl"], reverse=True)
     return result
@@ -2675,13 +2678,14 @@ async def strategy_deep():
 
 @app.get("/api/analytics/trade_scatter")
 async def trade_scatter():
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
     points = []
-    for p in s.get("closed_positions", []):
+    for p in closed:
         meta = p.get("metadata", {}) or {}
-        edge = meta.get("edge") or meta.get("signal_edge") or meta.get("net_edge")
+        edge = meta.get("edge") or meta.get("net_edge") or meta.get("gross_edge")
         if edge is not None:
             points.append({
                 "edge": round(float(edge), 4),
@@ -2695,14 +2699,14 @@ async def trade_scatter():
 @app.get("/api/analytics/activity_heatmap")
 async def activity_heatmap():
     import datetime
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
+    with _portfolio_lock:
+        trades_snap = list(_portfolio.trades)
     matrix = [[0] * 24 for _ in range(7)]
-    for t in s.get("trades", []):
-        ts = t.get("timestamp")
-        if ts and t.get("side") == "BUY":
-            dt = datetime.datetime.fromtimestamp(ts)
+    for t in trades_snap:
+        if t.side == "BUY":
+            dt = datetime.datetime.fromtimestamp(t.timestamp)
             matrix[dt.weekday()][dt.hour] += 1
     days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return [{"day": days[d], "hour": h, "count": matrix[d][h]} for d in range(7) for h in range(24)]
@@ -2711,10 +2715,11 @@ async def activity_heatmap():
 @app.get("/api/analytics/pnl_distribution")
 async def pnl_distribution():
     import math
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return {}
-    pnls = [p.get("realized_pnl", 0) for p in s.get("closed_positions", [])]
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
+    pnls = [p.get("realized_pnl", 0) for p in closed]
     if not pnls:
         return {"buckets": [], "stats": {}}
     mn, mx = min(pnls), max(pnls)
@@ -2725,8 +2730,8 @@ async def pnl_distribution():
     for v in pnls:
         bins[min(int((v - mn) / step), n_bins - 1)] += 1
     buckets = [{"range": round(mn + i * step, 3), "count": bins[i]} for i in range(n_bins)]
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p <= 0]
+    wins = [v for v in pnls if v > 0]
+    losses = [v for v in pnls if v <= 0]
     mean = sum(pnls) / len(pnls)
     std = math.sqrt(sum((x - mean) ** 2 for x in pnls) / len(pnls))
     return {
@@ -2745,11 +2750,12 @@ async def pnl_distribution():
 @app.get("/api/analytics/hold_time")
 async def hold_time_distribution():
     import collections
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return {}
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
     by_strat = collections.defaultdict(list)
-    for p in s.get("closed_positions", []):
+    for p in closed:
         if p.get("opened_at") and p.get("closed_at"):
             by_strat[p.get("strategy", "unknown")].append(round((p["closed_at"] - p["opened_at"]) / 3600, 2))
     return {strat: sorted(times) for strat, times in by_strat.items()}
@@ -2757,10 +2763,11 @@ async def hold_time_distribution():
 
 @app.get("/api/analytics/rolling_winrate")
 async def rolling_winrate():
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
-    resolved = sorted([p for p in s.get("closed_positions", []) if p.get("closed_at")], key=lambda x: x["closed_at"])
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
+    resolved = sorted([p for p in closed if p.get("closed_at")], key=lambda x: x["closed_at"])
     window, result = 20, []
     for i in range(window, len(resolved) + 1):
         w = resolved[i - window:i]
@@ -2772,13 +2779,14 @@ async def rolling_winrate():
 @app.get("/api/analytics/edge_calibration")
 async def edge_calibration():
     import collections
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
     buckets = collections.defaultdict(lambda: {"wins": 0, "total": 0})
-    for p in s.get("closed_positions", []):
+    for p in closed:
         meta = p.get("metadata", {}) or {}
-        edge = meta.get("edge") or meta.get("net_edge")
+        edge = meta.get("edge") or meta.get("net_edge") or meta.get("gross_edge")
         if edge is None:
             continue
         bucket = round(float(edge) * 20) / 20
@@ -2787,18 +2795,19 @@ async def edge_calibration():
             buckets[bucket]["wins"] += 1
     return [
         {"predicted_edge": e, "actual_win_rate": round(d["wins"] / d["total"], 3), "sample_size": d["total"]}
-        for e, d in sorted(buckets.items()) if d["total"] >= 3
+        for e, d in sorted(buckets.items()) if d["total"] >= 2
     ]
 
 
 @app.get("/api/analytics/price_bucket_accuracy")
 async def price_bucket_accuracy():
     import collections
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
     buckets = collections.defaultdict(lambda: {"wins": 0, "total": 0})
-    for p in s.get("closed_positions", []):
+    for p in closed:
         if p.get("strategy") != "optimism_tax":
             continue
         meta = p.get("metadata", {}) or {}
@@ -2819,9 +2828,10 @@ async def price_bucket_accuracy():
 @app.get("/api/analytics/category_performance")
 async def category_performance():
     import collections
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
+    with _portfolio_lock:
+        closed = list(_portfolio.closed_positions)
 
     def _cat(q):
         q = (q or "").lower()
@@ -2838,7 +2848,7 @@ async def category_performance():
         return "Other"
 
     stats = collections.defaultdict(lambda: {"wins": 0, "total": 0, "pnl": 0.0})
-    for p in s.get("closed_positions", []):
+    for p in closed:
         cat = _cat(p.get("market_question", ""))
         stats[cat]["total"] += 1
         stats[cat]["pnl"] += p.get("realized_pnl", 0)
@@ -2855,14 +2865,14 @@ async def category_performance():
 
 @app.get("/api/analytics/portfolio_concentration")
 async def portfolio_concentration():
-    s = _portfolio
-    if not s:
+    if not _portfolio:
         return []
-    positions = s.get("positions", {})
+    with _portfolio_lock:
+        pos_items = list(_portfolio.positions.items())
     items = []
-    for tid, p in positions.items():
-        cost = p.get("contracts", 0) * p.get("avg_cost", 0)
-        items.append({"market": (p.get("market_question", "") or tid)[:50], "strategy": p.get("strategy", "?"), "deployed": round(cost, 2)})
+    for tid, p in pos_items:
+        cost = p.contracts * p.avg_cost
+        items.append({"market": (p.market_question or tid)[:50], "strategy": p.strategy, "deployed": round(cost, 2)})
     items.sort(key=lambda x: x["deployed"], reverse=True)
     total = sum(i["deployed"] for i in items)
     running = 0
