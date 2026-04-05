@@ -948,12 +948,14 @@ class ArbBot:
                 if trade and len(self.portfolio.closed_positions) > n_closed_before:
                     closed = self.portfolio.closed_positions[-1]
                     self.risk.record_trade_result(closed["strategy"], closed["realized_pnl"])
-                    # ML learning: update calibration/predictor with resolved outcome
-                    if self.ml_engine is not None and trade.metadata:
+                    # ML learning: update calibration/predictor with resolved outcome.
+                    # metadata may be empty for older positions — ml_engine handles that
+                    # gracefully with default feature values.
+                    if self.ml_engine is not None:
                         won = (trade.realized_pnl or 0.0) > 0
-                        self.ml_engine.update(trade.metadata, won)
+                        self.ml_engine.update(trade.metadata or {}, won)
                         self.ml_engine.save("logs/ml_state.json")
-                        logger.debug(f"[ML] Updated with {'WIN' if won else 'LOSS'}: yes_ask={trade.metadata.get('yes_ask','?')}, total_updates={self.ml_engine._total_updates}")
+                        logger.debug(f"[ML] Updated with {'WIN' if won else 'LOSS'}: yes_ask={trade.metadata.get('yes_ask','?') if trade.metadata else '?'}, total_updates={self.ml_engine._total_updates}")
 
             if trade and not (not self.paper and sig.side == "BUY"):
                 # For paper BUY and all SELL paths: increment metrics here
