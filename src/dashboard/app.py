@@ -4453,7 +4453,7 @@ function renderSystemStatus(d){
         const acc=ml.predictor_accuracy_pct;
         const trained=ml.predictor_trained_on||0;
         predEl.innerHTML=`
-          <div style="color:var(--muted)">Status: <span style="color:${ready?'var(--green)':'var(--yellow)';}">${ready?'ACTIVE':'Waiting for '+needed+' trades'}</span></div>
+          <div style="color:var(--muted)">Status: <span style="color:${ready?'var(--green)':'var(--yellow)'}">${ready?'ACTIVE':'Waiting for '+needed+' trades'}</span></div>
           <div style="color:var(--muted)">Samples: <span style="color:var(--text)">${n}</span></div>
           <div style="color:var(--muted)">Trained on: <span style="color:var(--text)">${trained}</span></div>
           <div style="color:var(--muted)">Accuracy: <span style="color:${acc>=80?'var(--green)':acc>=65?'var(--yellow)':'var(--red)'}">${acc!=null?acc+'%':'--'}</span></div>
