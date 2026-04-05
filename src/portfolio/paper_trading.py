@@ -198,11 +198,16 @@ class PaperPortfolio:
     ) -> Optional[Trade]:
         """Simulate selling outcome tokens."""
         pos = self.positions.get(token_id)
-        if not pos or pos.contracts < contracts:
-            logger.warning(
-                f"[PAPER] Cannot sell {contracts:.2f} of {token_id[:16]}: "
-                f"position={pos.contracts if pos else 0:.2f}"
+        if not pos:
+            logger.warning(f"[PAPER] Cannot sell: no position for {token_id[:16]}")
+            return None
+        if pos.contracts < contracts:
+            # Clamp to available — sell whatever we actually hold rather than rejecting
+            logger.debug(
+                f"[PAPER] Sell clamped {contracts:.2f}→{pos.contracts:.2f} of {token_id[:16]}"
             )
+            contracts = pos.contracts
+        if contracts < 0.001:
             return None
 
         volume_24h = market.get("volume_24h", 0.0) if isinstance(market, dict) else getattr(market, "volume_24h", 0.0) if market else 0.0
