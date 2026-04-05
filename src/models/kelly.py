@@ -113,15 +113,19 @@ class KellySizer:
         """Convenience wrapper: derive win_prob from edge and entry_price.
 
         edge = calibrated_no_prob - market_no_price
-        calibrated_no_prob = market_no_price + edge
-        win_prob = calibrated_no_prob = (1 - entry_price) + edge
+        calibrated_no_prob = market_no_price + edge = entry_price + edge
+        win_prob = entry_price + edge
+
+        ``entry_price`` is the NO token price (= 1 - yes_price), which is also the
+        market's implied NO win probability.  Adding the edge gives the calibrated
+        posterior NO win probability.
 
         Parameters
         ----------
         edge:
             Net edge in probability-point units (from BayesianEngine.get_no_edge).
         entry_price:
-            NO token limit order price in (0, 1).
+            NO token limit order price in (0, 1).  This equals (1 - yes_price).
         bankroll:
             Current USDC balance.
 
@@ -130,6 +134,5 @@ class KellySizer:
         float
             Dollar amount to risk on this trade.
         """
-        market_no_price = 1.0 - entry_price
-        win_prob = min(0.999, max(0.001, market_no_price + edge))
+        win_prob = min(0.999, max(0.001, entry_price + edge))
         return self.compute(win_prob, entry_price, bankroll)
