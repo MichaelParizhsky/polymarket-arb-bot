@@ -596,6 +596,12 @@ def close_position(idx: int = 0, price: float = 0.001):
         if not trade:
             return JSONResponse({"error": "sell() returned None — position may already be gone"}, status_code=500)
 
+        # ML update: count the resolved trade toward predictor training
+        if _ml_engine_ref is not None:
+            won = (trade.realized_pnl or 0.0) > 0
+            _ml_engine_ref.update(trade.metadata or {}, won)
+            _ml_engine_ref.save("logs/ml_state.json")
+
         try:
             _portfolio.save_to_json()
         except Exception as save_err:
