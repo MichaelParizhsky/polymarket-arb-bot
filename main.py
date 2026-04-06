@@ -1056,7 +1056,7 @@ class ArbBot:
         We detect resolution when the best_bid >= 0.995 (winner) or best_ask <= 0.005 (loser)
         and close the position at that price.
         """
-        check_interval = 30  # seconds between resolution checks
+        check_interval = 15  # seconds between resolution checks
 
         while self._running:
             await asyncio.sleep(check_interval)
@@ -1114,33 +1114,38 @@ class ArbBot:
                                 await self._hedge_manager.maybe_close_hedge(token_id)
 
                     # Stale expired position fallback: orderbook didn't trigger above.
-                    # For any position past end_date_iso by > 10 minutes, resolve via
-                    # Gamma API + last trade price. Handles crypto_5m and other short-
-                    # expiry markets whose orderbooks go empty after settlement.
+                    # Expired position fallback: orderbook didn't trigger above.
+                    # crypto_5m windows are done the moment the clock hits — close
+                    # immediately (grace=1 min, force after 5 min).
+                    # Other strategies get a 10-min grace and 60-min force.
                     elif pos.end_date_iso:
                         try:
-                            from datetime import datetime, timezone, timedelta
+                            from datetime import datetime, timezone
                             end_dt = datetime.fromisoformat(
                                 pos.end_date_iso.replace("Z", "+00:00")
                             )
                             now_utc = datetime.now(timezone.utc)
                             minutes_past = (now_utc - end_dt).total_seconds() / 60
-                            if minutes_past < 10:
-                                pass  # too soon — wait for grace period
-                            else:
-                                # Step A: confirm market is actually closed via Gamma
-                                condition_id = (pos.metadata or {}).get("condition_id", "")
-                                gamma_active = None
-                                if condition_id:
-                                    gamma_data = await self.poly.get_market_by_condition_id(condition_id)
-                                    if gamma_data is not None:
-                                        gamma_active = gamma_data.get("active", None)
 
-                                # If Gamma says still active, don't close
+                            is_crypto_5m = (pos.strategy or "") == "crypto_5m"
+                            grace_min = 1 if is_crypto_5m else 10
+                            force_min = 5 if is_crypto_5m else 60
+
+                            if minutes_past < grace_min:
+                                pass  # too soon
+                            else:
+                                # For non-crypto_5m: confirm via Gamma before closing
+                                gamma_active = None
+                                if not is_crypto_5m:
+                                    condition_id = (pos.metadata or {}).get("condition_id", "")
+                                    if condition_id:
+                                        gamma_data = await self.poly.get_market_by_condition_id(condition_id)
+                                        if gamma_data is not None:
+                                            gamma_active = gamma_data.get("active", None)
+
                                 if gamma_active is True:
-                                    pass
+                                    pass  # Gamma says still active
                                 else:
-                                    # Step B: last trade price to determine winner/loser
                                     last_price = await self.poly.get_last_trade_price(token_id)
                                     resolved_price: float | None = None
                                     label = "unknown"
@@ -1151,13 +1156,13 @@ class ArbBot:
                                     elif last_price is not None and last_price <= 0.10:
                                         resolved_price = max(last_price, 0.001)
                                         label = "loser"
-                                    elif minutes_past >= 60:
-                                        # 1+ hour past expiry with no clear price: force-close as loss
+                                    elif minutes_past >= force_min:
+                                        # Past force threshold with no clear price
                                         resolved_price = 0.001
                                         label = "stale-loser"
                                         logger.warning(
-                                            f"[AUTO-CLOSE] Force-closing {pos.strategy} position "
-                                            f"{token_id[:16]}... expired {minutes_past:.0f}min ago, "
+                                            f"[AUTO-CLOSE] Force-closing {pos.strategy} "
+                                            f"{token_id[:16]}... expired {minutes_past:.1f}min ago, "
                                             f"last_price={last_price}"
                                         )
 
@@ -1169,7 +1174,7 @@ class ArbBot:
                                             strategy=pos.strategy or "auto_close",
                                             notes=(
                                                 f"[AUTO-CLOSE] expired {label} @ {resolved_price:.4f} "
-                                                f"({minutes_past:.0f}min past expiry)"
+                                                f"({minutes_past:.1f}min past expiry)"
                                             ),
                                         )
                                         if trade:
