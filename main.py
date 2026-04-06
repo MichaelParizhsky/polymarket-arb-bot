@@ -1075,7 +1075,10 @@ class ArbBot:
                     try:
                         book = await self.poly.get_orderbook(token_id)
                     except Exception:
-                        continue
+                        # 404 means market closed/expired — use empty book so the
+                        # stale-expiry fallback below can still fire.
+                        from src.exchange.polymarket import Orderbook
+                        book = Orderbook(token_id=token_id, bids=[], asks=[])
 
                     # Winning resolution: bid >= 0.995 — sell at near $1.00
                     if book.best_bid is not None and book.best_bid >= 0.995:
@@ -1109,6 +1112,78 @@ class ArbBot:
                             )
                             if self._hedge_manager is not None:
                                 await self._hedge_manager.maybe_close_hedge(token_id)
+
+                    # Stale expired position fallback: orderbook didn't trigger above.
+                    # For any position past end_date_iso by > 10 minutes, resolve via
+                    # Gamma API + last trade price. Handles crypto_5m and other short-
+                    # expiry markets whose orderbooks go empty after settlement.
+                    elif pos.end_date_iso:
+                        try:
+                            from datetime import datetime, timezone, timedelta
+                            end_dt = datetime.fromisoformat(
+                                pos.end_date_iso.replace("Z", "+00:00")
+                            )
+                            now_utc = datetime.now(timezone.utc)
+                            minutes_past = (now_utc - end_dt).total_seconds() / 60
+                            if minutes_past < 10:
+                                pass  # too soon — wait for grace period
+                            else:
+                                # Step A: confirm market is actually closed via Gamma
+                                condition_id = (pos.metadata or {}).get("condition_id", "")
+                                gamma_active = None
+                                if condition_id:
+                                    gamma_data = await self.poly.get_market_by_condition_id(condition_id)
+                                    if gamma_data is not None:
+                                        gamma_active = gamma_data.get("active", None)
+
+                                # If Gamma says still active, don't close
+                                if gamma_active is True:
+                                    pass
+                                else:
+                                    # Step B: last trade price to determine winner/loser
+                                    last_price = await self.poly.get_last_trade_price(token_id)
+                                    resolved_price: float | None = None
+                                    label = "unknown"
+
+                                    if last_price is not None and last_price >= 0.90:
+                                        resolved_price = last_price
+                                        label = "winner"
+                                    elif last_price is not None and last_price <= 0.10:
+                                        resolved_price = max(last_price, 0.001)
+                                        label = "loser"
+                                    elif minutes_past >= 60:
+                                        # 1+ hour past expiry with no clear price: force-close as loss
+                                        resolved_price = 0.001
+                                        label = "stale-loser"
+                                        logger.warning(
+                                            f"[AUTO-CLOSE] Force-closing {pos.strategy} position "
+                                            f"{token_id[:16]}... expired {minutes_past:.0f}min ago, "
+                                            f"last_price={last_price}"
+                                        )
+
+                                    if resolved_price is not None:
+                                        trade = self.portfolio.sell(
+                                            token_id=token_id,
+                                            contracts=pos.contracts,
+                                            price=resolved_price,
+                                            strategy=pos.strategy or "auto_close",
+                                            notes=(
+                                                f"[AUTO-CLOSE] expired {label} @ {resolved_price:.4f} "
+                                                f"({minutes_past:.0f}min past expiry)"
+                                            ),
+                                        )
+                                        if trade:
+                                            logger.info(
+                                                f"[AUTO-CLOSE] Closed expired {label} "
+                                                f"{token_id[:16]}... @ {resolved_price:.4f} | "
+                                                f"{pos.contracts:.2f} contracts | "
+                                                f"{pos.end_date_iso}"
+                                            )
+                                            if self._hedge_manager is not None:
+                                                await self._hedge_manager.maybe_close_hedge(token_id)
+                        except Exception as stale_exc:
+                            logger.debug(f"Stale-position close error {token_id[:16]}: {stale_exc}")
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:

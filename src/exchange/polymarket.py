@@ -225,6 +225,25 @@ class PolymarketClient:
                 logger.debug(f"Skipping malformed market: {raw.get('id') or raw.get('conditionId')}")
         return markets
 
+    async def get_market_by_condition_id(self, condition_id: str) -> dict | None:
+        """Fetch raw market data from Gamma API by condition ID.
+        Returns the raw dict (includes 'closed', 'active' resolution fields).
+        Returns None on failure.
+        """
+        try:
+            resp = await self._http.get(
+                f"{self.GAMMA_BASE}/markets",
+                params={"condition_id": condition_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list) and data:
+                return data[0]
+            return None
+        except Exception as exc:
+            logger.debug(f"get_market_by_condition_id({condition_id[:16]}): {exc}")
+            return None
+
     async def get_markets_cached(self) -> list[Market]:
         """Return cached markets, refreshing if stale."""
         now = time.time()
