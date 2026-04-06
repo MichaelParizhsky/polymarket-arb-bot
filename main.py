@@ -186,6 +186,8 @@ class ArbBot:
         self._last_trade_time: float = 0.0
         self._token_last_traded: dict[str, float] = {}
         self._dynamic_strategies: list = []  # strategies deployed at runtime via dashboard
+        # token_id -> asyncio.Task for timer-based expiry closes
+        self._expiry_tasks: dict[str, asyncio.Task] = {}
 
         # GC optimization: freeze all initialization-time objects so the garbage collector
         # ignores them permanently, reducing GC overhead from ~3% to ~0.5% in hot loops.
@@ -444,12 +446,15 @@ class ArbBot:
             _t1 = asyncio.create_task(self._meta_agent_loop())
             _t2 = asyncio.create_task(self._auto_close_resolved_loop())
             _t3 = asyncio.create_task(self._eod_close_loop())
+            _t4 = asyncio.create_task(self._expiry_watcher_loop())
             self._background_tasks.add(_t1)
             self._background_tasks.add(_t2)
             self._background_tasks.add(_t3)
+            self._background_tasks.add(_t4)
             _t1.add_done_callback(self._background_tasks.discard)
             _t2.add_done_callback(self._background_tasks.discard)
             _t3.add_done_callback(self._background_tasks.discard)
+            _t4.add_done_callback(self._background_tasks.discard)
 
             try:
                 await self._main_loop()
@@ -1049,14 +1054,122 @@ class ArbBot:
                 price_map[tid] = book.mid
         return price_map
 
+    async def _expiry_watcher_loop(self) -> None:
+        """
+        Watches for positions that have an end_date_iso and schedules a
+        one-shot close task for each one.  Runs every 5 s — cheap because
+        it only does dict look-ups; all actual API work is in _close_at_expiry.
+        On bot restart any positions loaded from state are picked up here too.
+        """
+        while self._running:
+            await asyncio.sleep(5)
+            for token_id, pos in list(self.portfolio.positions.items()):
+                if not pos.end_date_iso:
+                    continue
+                if token_id in self._expiry_tasks and not self._expiry_tasks[token_id].done():
+                    continue
+                task = asyncio.create_task(self._close_at_expiry(token_id, pos.end_date_iso, pos.strategy))
+                self._expiry_tasks[token_id] = task
+
+    async def _close_at_expiry(self, token_id: str, end_date_iso: str, strategy: str) -> None:
+        """
+        Sleep until end_date_iso, then close the position via last-trade price.
+        For crypto_5m a 1-minute buffer is enough; other strategies wait 2 min.
+        Retries once after 3 more minutes if the first price lookup is unclear.
+        Force-closes after 5 min (crypto_5m) / 60 min (others) at 0.001.
+        """
+        from datetime import datetime, timezone
+        try:
+            end_dt = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+            is_crypto_5m = strategy == "crypto_5m"
+            buffer_sec = 60 if is_crypto_5m else 120   # wait after expiry before first check
+            force_min  = 5  if is_crypto_5m else 60
+
+            now_utc = datetime.now(timezone.utc)
+            sleep_sec = (end_dt - now_utc).total_seconds() + buffer_sec
+            if sleep_sec > 0:
+                logger.info(
+                    f"[EXPIRY-CLOSE] Scheduled {strategy} {token_id[:16]}... "
+                    f"closes in {sleep_sec/60:.1f}min ({end_date_iso})"
+                )
+                await asyncio.sleep(sleep_sec)
+
+            if not self._running or not self.poly:
+                return
+            if token_id not in self.portfolio.positions:
+                return  # already closed by another path
+
+            # Try to resolve; retry once if price is ambiguous
+            for attempt in range(2):
+                if token_id not in self.portfolio.positions:
+                    return
+
+                pos = self.portfolio.positions.get(token_id)
+                if pos is None:
+                    return
+
+                now_utc = datetime.now(timezone.utc)
+                minutes_past = (now_utc - end_dt).total_seconds() / 60
+
+                last_price = await self.poly.get_last_trade_price(token_id)
+                resolved_price: float | None = None
+                label = "unknown"
+
+                if last_price is not None and last_price >= 0.90:
+                    resolved_price = last_price
+                    label = "winner"
+                elif last_price is not None and last_price <= 0.10:
+                    resolved_price = max(last_price, 0.001)
+                    label = "loser"
+                elif minutes_past >= force_min:
+                    resolved_price = 0.001
+                    label = "stale-loser"
+                    logger.warning(
+                        f"[EXPIRY-CLOSE] Force-closing {strategy} {token_id[:16]}... "
+                        f"{minutes_past:.1f}min past expiry, last_price={last_price}"
+                    )
+
+                if resolved_price is not None:
+                    trade = self.portfolio.sell(
+                        token_id=token_id,
+                        contracts=pos.contracts,
+                        price=resolved_price,
+                        strategy=strategy or "auto_close",
+                        notes=f"[EXPIRY-CLOSE] {label} @ {resolved_price:.4f} ({minutes_past:.1f}min past expiry)",
+                    )
+                    still_open = token_id in self.portfolio.positions
+                    if trade:
+                        logger.info(
+                            f"[EXPIRY-CLOSE] Closed {label} {strategy} {token_id[:16]}... "
+                            f"@ {resolved_price:.4f} | still_in_portfolio={still_open}"
+                        )
+                        if self.ml_engine is not None:
+                            won = resolved_price >= 0.5
+                            self.ml_engine.update(pos.metadata or {}, won)
+                            self.ml_engine.save("logs/ml_state.json")
+                        if self._hedge_manager is not None:
+                            await self._hedge_manager.maybe_close_hedge(token_id)
+                    return
+
+                # Price unclear — wait 3 more minutes and retry once
+                if attempt == 0:
+                    await asyncio.sleep(180)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"[EXPIRY-CLOSE] Error closing {token_id[:16]}: {exc}")
+        finally:
+            self._expiry_tasks.pop(token_id, None)
+
     async def _auto_close_resolved_loop(self) -> None:
         """
-        Periodically scan open positions for markets that have resolved.
-        A resolved binary market pays $1.00 for winning tokens and $0.00 for losing ones.
-        We detect resolution when the best_bid >= 0.995 (winner) or best_ask <= 0.005 (loser)
-        and close the position at that price.
+        Scan open positions for orderbook-based resolution signals.
+        Handles positions WITHOUT end_date_iso (or ones the expiry watcher missed)
+        by checking bid >= 0.995 (winner) or ask <= 0.005 (loser).
+        Timed positions are handled by _expiry_watcher_loop / _close_at_expiry.
         """
-        check_interval = 15  # seconds between resolution checks
+        check_interval = 30  # seconds; expiry closes are timer-driven, not scanned
 
         while self._running:
             await asyncio.sleep(check_interval)
@@ -1075,12 +1188,9 @@ class ArbBot:
                     try:
                         book = await self.poly.get_orderbook(token_id)
                     except Exception:
-                        # 404 means market closed/expired — use empty book so the
-                        # stale-expiry fallback below can still fire.
-                        from src.exchange.polymarket import Orderbook
-                        book = Orderbook(token_id=token_id, bids=[], asks=[])
+                        continue  # 404 / network error — expiry watcher handles timed positions
 
-                    # Winning resolution: bid >= 0.995 — sell at near $1.00
+                    # Winning resolution: bid >= 0.995
                     if book.best_bid is not None and book.best_bid >= 0.995:
                         trade = self.portfolio.sell(
                             token_id=token_id,
@@ -1096,7 +1206,7 @@ class ArbBot:
                             )
                             if self._hedge_manager is not None:
                                 await self._hedge_manager.maybe_close_hedge(token_id)
-                    # Losing resolution: ask <= 0.005 — position is worthless, sell at market
+                    # Losing resolution: ask <= 0.005
                     elif book.best_ask is not None and book.best_ask <= 0.005:
                         trade = self.portfolio.sell(
                             token_id=token_id,
@@ -1112,82 +1222,6 @@ class ArbBot:
                             )
                             if self._hedge_manager is not None:
                                 await self._hedge_manager.maybe_close_hedge(token_id)
-
-                    # Stale expired position fallback: orderbook didn't trigger above.
-                    # Expired position fallback: orderbook didn't trigger above.
-                    # crypto_5m windows are done the moment the clock hits — close
-                    # immediately (grace=1 min, force after 5 min).
-                    # Other strategies get a 10-min grace and 60-min force.
-                    elif pos.end_date_iso:
-                        try:
-                            from datetime import datetime, timezone
-                            end_dt = datetime.fromisoformat(
-                                pos.end_date_iso.replace("Z", "+00:00")
-                            )
-                            now_utc = datetime.now(timezone.utc)
-                            minutes_past = (now_utc - end_dt).total_seconds() / 60
-
-                            is_crypto_5m = (pos.strategy or "") == "crypto_5m"
-                            grace_min = 1 if is_crypto_5m else 10
-                            force_min = 5 if is_crypto_5m else 60
-
-                            if minutes_past < grace_min:
-                                pass  # too soon
-                            else:
-                                # For non-crypto_5m: confirm via Gamma before closing
-                                gamma_active = None
-                                if not is_crypto_5m:
-                                    condition_id = (pos.metadata or {}).get("condition_id", "")
-                                    if condition_id:
-                                        gamma_data = await self.poly.get_market_by_condition_id(condition_id)
-                                        if gamma_data is not None:
-                                            gamma_active = gamma_data.get("active", None)
-
-                                if gamma_active is True:
-                                    pass  # Gamma says still active
-                                else:
-                                    last_price = await self.poly.get_last_trade_price(token_id)
-                                    resolved_price: float | None = None
-                                    label = "unknown"
-
-                                    if last_price is not None and last_price >= 0.90:
-                                        resolved_price = last_price
-                                        label = "winner"
-                                    elif last_price is not None and last_price <= 0.10:
-                                        resolved_price = max(last_price, 0.001)
-                                        label = "loser"
-                                    elif minutes_past >= force_min:
-                                        # Past force threshold with no clear price
-                                        resolved_price = 0.001
-                                        label = "stale-loser"
-                                        logger.warning(
-                                            f"[AUTO-CLOSE] Force-closing {pos.strategy} "
-                                            f"{token_id[:16]}... expired {minutes_past:.1f}min ago, "
-                                            f"last_price={last_price}"
-                                        )
-
-                                    if resolved_price is not None:
-                                        trade = self.portfolio.sell(
-                                            token_id=token_id,
-                                            contracts=pos.contracts,
-                                            price=resolved_price,
-                                            strategy=pos.strategy or "auto_close",
-                                            notes=(
-                                                f"[AUTO-CLOSE] expired {label} @ {resolved_price:.4f} "
-                                                f"({minutes_past:.1f}min past expiry)"
-                                            ),
-                                        )
-                                        if trade:
-                                            logger.info(
-                                                f"[AUTO-CLOSE] Closed expired {label} "
-                                                f"{token_id[:16]}... @ {resolved_price:.4f} | "
-                                                f"{pos.contracts:.2f} contracts | "
-                                                f"{pos.end_date_iso}"
-                                            )
-                                            if self._hedge_manager is not None:
-                                                await self._hedge_manager.maybe_close_hedge(token_id)
-                        except Exception as stale_exc:
-                            logger.debug(f"Stale-position close error {token_id[:16]}: {stale_exc}")
 
             except asyncio.CancelledError:
                 break
