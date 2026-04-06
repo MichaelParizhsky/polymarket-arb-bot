@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from src.exchange.polymarket import Market, Orderbook
+from src.strategies.latency_arb import _days_to_expiry
 from src.filters.category_filter import classify_market, get_category_edge, is_tradeable_category
 from src.models.bayesian import BayesianEngine
 from src.models.kelly import KellySizer
@@ -83,6 +84,16 @@ class OptimismTaxStrategy(BaseStrategy):
         for cid in expired_cids:
             del self._entered[cid]
 
+        # Resolution window: in DAILY_CLOSE_ONLY mode the EOD loop dumps all
+        # positions at market price every midnight.  Long-dated NO positions
+        # (e.g. "Will Tiger Woods win the Masters?") get closed at their entry
+        # price → ~$0 PnL.  Only trade markets resolving within the window.
+        daily_close = getattr(self.config.strategies, "daily_close_only", False)
+        ot_max_days: float = float(getattr(cfg, "optimism_tax_max_days", 30))
+        # In daily-close-only mode restrict to same-day resolution (≤24 h);
+        # EOD dump would zero out any longer hold.
+        max_dte: float = 1.0 if daily_close else ot_max_days
+
         skipped_inactive = 0
         skipped_volume = 0
         skipped_cooldown = 0
@@ -95,6 +106,12 @@ class OptimismTaxStrategy(BaseStrategy):
         for market in markets:
             if not market.active or market.closed:
                 skipped_inactive += 1
+                continue
+
+            # Resolution window filter: skip markets that resolve beyond max_dte.
+            # Prevents positions from being EOD-dumped at cost before they resolve.
+            dte_days = _days_to_expiry(getattr(market, "end_date_iso", None) or "")
+            if dte_days <= 0 or dte_days > max_dte:
                 continue
 
             volume = market.volume or 0.0

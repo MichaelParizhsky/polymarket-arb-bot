@@ -58,6 +58,25 @@ _SPORTS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Spread / handicap / both-teams-to-score markets — skip entirely.
+# These require a dedicated mathematical sports model to find edge;
+# without one the strategy is a coin flip on the spread direction.
+# Examples: "Spread: Kristiansund BK (-2.5)", "Both Teams to Score"
+_SPREAD_MARKET_RE = re.compile(
+    r"(?:"
+    r"\bspread\s*:"           # "Spread: Team (-2.5)"
+    r"|\bboth\s+teams?\s+to\s+score\b"  # BTTS
+    r"|\bbtts\b"
+    r"|\bhandicap\b"
+    r"|\basian\s+handicap\b"
+    r"|\(-\d+(?:\.\d+)?\)"    # handicap notation (-2.5), (-1.5) etc.
+    r"|\bover/under\s+\d"     # "Over/Under 2.5 goals"
+    r"|\bclean\s+sheet\b"     # clean-sheet prop
+    r"|\bfirst\s+(?:goal|scorer|team\s+to\s+score)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 # College basketball keywords — historically one of the most tradeable categories
 _CBB_RE = re.compile(
     r"\b(ncaa|march madness|college basketball|cbb|tournament|bracket|"
@@ -161,6 +180,14 @@ class QuickResolutionStrategy(BaseStrategy):
         for market in markets:
             if not market.active or market.closed:
                 skipped_inactive += 1
+                continue
+
+            # Skip spread/handicap/BTTS markets — no edge without a real sports model.
+            # These produced the worst losses (Norwegian football spreads, BTTS bets).
+            if _SPREAD_MARKET_RE.search(market.question):
+                logger.debug(
+                    f"QuickRes: skip spread/handicap | {market.question[:60]}"
+                )
                 continue
 
             # Only consider markets within the max_hours window

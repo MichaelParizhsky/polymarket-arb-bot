@@ -170,6 +170,14 @@ class StrategyConfig:
     crypto_5m_min_net_edge: float = field(
         default_factory=lambda: _float("CRYPTO_5M_MIN_NET_EDGE", 0.005)
     )
+    # Snipe mode conviction threshold — raised from 0.65 to 0.88 after losses at 65-80% conviction.
+    crypto_5m_snipe_min_conviction: float = field(
+        default_factory=lambda: _float("CRYPTO_5M_SNIPE_MIN_CONVICTION", 0.88)
+    )
+    # Snipe mode max spend — tighter cap than dual_arb (snipe is directional, not market-neutral).
+    crypto_5m_snipe_max_spend: float = field(
+        default_factory=lambda: _float("CRYPTO_5M_SNIPE_MAX_SPEND", 30.0)
+    )
 
     # Markets coverage
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))
@@ -224,6 +232,10 @@ class StrategyConfig:
     optimism_tax_min_volume: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MIN_VOLUME", 3000.0))
     optimism_tax_cooldown_hours: float = field(default_factory=lambda: _float("OPTIMISM_TAX_COOLDOWN_HOURS", 6.0))
     optimism_tax_min_p_profit: float = field(default_factory=lambda: _float("OPTIMISM_TAX_MIN_P_PROFIT", 0.90))
+    # Max days to resolution for optimism_tax entries.
+    # In DAILY_CLOSE_ONLY mode this is overridden to 1.0 (same-day only) so the
+    # EOD dump does not zero out positions before they resolve.
+    optimism_tax_max_days: int = field(default_factory=lambda: _int("OPTIMISM_TAX_MAX_DAYS", 30))
 
     # Kalshi weather markets — trades temperature and precipitation markets using NOAA forecasts.
     # Requires KALSHI_ENABLED=true and valid Kalshi credentials.

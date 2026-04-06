@@ -48,8 +48,12 @@ DUAL_ARB_THRESHOLD = 0.995
 # End-of-window snipe: fire when this many seconds remain in the window
 SNIPE_WINDOW_SECONDS = 120.0
 
-# Minimum conviction for end-of-window snipe
-SNIPE_MIN_CONVICTION = 0.65
+# Minimum conviction for end-of-window snipe.
+# 0.65 was too low — coin flips at 65% caused big losses (-$84, -$85, -$86).
+# 0.88 aligns with QuickResolution's threshold and matches the fee-after-edge
+# profile where net_edge is positive at crypto_5m fees.
+# Override via CRYPTO_5M_SNIPE_MIN_CONVICTION env var.
+SNIPE_MIN_CONVICTION = 0.88
 
 # Minimum net edge required for any entry
 MIN_NET_EDGE = 0.005  # 0.5%
@@ -263,6 +267,10 @@ class CryptoShortStrategy(BaseStrategy):
 
         signals: list[Signal] = []
         max_spend = getattr(cfg, "crypto_5m_max_spend", 100.0)
+        # Snipe mode gets a tighter conviction threshold and smaller spend cap
+        # to limit directional risk when Binance data may not be fresh.
+        snipe_min_conviction = getattr(cfg, "crypto_5m_snipe_min_conviction", SNIPE_MIN_CONVICTION)
+        snipe_max_spend = getattr(cfg, "crypto_5m_snipe_max_spend", min(30.0, max_spend))
 
         # Prune stale entries (windows are 5-15 min, keep 30min buffer)
         cutoff = time.time() - 1800
@@ -472,7 +480,7 @@ class CryptoShortStrategy(BaseStrategy):
             if not _snipe_allowed:
                 continue  # no Binance data = no directional edge = skip snipe
             if seconds_left <= SNIPE_WINDOW_SECONDS and yes_mid is not None:
-                if yes_mid >= SNIPE_MIN_CONVICTION:
+                if yes_mid >= snipe_min_conviction:
                     net_edge = (1.0 - yes_ask) - TAKER_FEE
                     if net_edge >= MIN_NET_EDGE and yes_ask < 1.0:
                         # ── Grok sentiment gate (YES snipe) ──────────────
@@ -506,7 +514,7 @@ class CryptoShortStrategy(BaseStrategy):
 
                         arb_opportunities.labels(strategy="crypto_5m").inc()
                         edge_detected.labels(strategy="crypto_5m").observe(net_edge)
-                        size_usdc = self.risk.size_position(edge=net_edge, base_size=max_spend)
+                        size_usdc = self.risk.size_position(edge=net_edge, base_size=snipe_max_spend)
                         if size_usdc >= MIN_TRADE_USDC:
                             self._entered[market.condition_id] = time.time()
                             self.log(
@@ -533,7 +541,7 @@ class CryptoShortStrategy(BaseStrategy):
                                 },
                             ))
 
-                elif yes_mid <= (1.0 - SNIPE_MIN_CONVICTION):
+                elif yes_mid <= (1.0 - snipe_min_conviction):
                     net_edge = (1.0 - no_ask) - TAKER_FEE
                     if net_edge >= MIN_NET_EDGE and no_ask < 1.0:
                         # ── Grok sentiment gate (NO snipe) ───────────────
@@ -567,7 +575,7 @@ class CryptoShortStrategy(BaseStrategy):
 
                         arb_opportunities.labels(strategy="crypto_5m").inc()
                         edge_detected.labels(strategy="crypto_5m").observe(net_edge)
-                        size_usdc = self.risk.size_position(edge=net_edge, base_size=max_spend)
+                        size_usdc = self.risk.size_position(edge=net_edge, base_size=snipe_max_spend)
                         if size_usdc >= MIN_TRADE_USDC:
                             self._entered[market.condition_id] = time.time()
                             self.log(
