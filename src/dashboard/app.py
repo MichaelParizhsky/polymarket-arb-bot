@@ -410,7 +410,9 @@ def set_live_account(data: dict) -> None:
         usdc_balance         float  — real USDC from CLOB
         positions            list   — raw Data API position dicts
         total_position_value float  — sum of currentValue across positions
-        unrealized_pnl       float  — sum of cashPnl across positions
+        total_value          float  — usdc_balance + total_position_value
+        pnl_1d               float  — total_value - snapshot_24h_ago (snapshot-based)
+        pnl_alltime          float  — total_value - first_snapshot (snapshot-based)
         refreshed_at         float  — time.time() when data was fetched
     """
     with _live_account_lock:
@@ -539,20 +541,20 @@ def status():
         if la:
             balance = round(la.get("usdc_balance", 0.0), 2)
             total_pos_value = round(la.get("total_position_value", 0.0), 2)
-            total_value = round(balance + total_pos_value, 2)
-            unrealized_pnl = round(la.get("unrealized_pnl", 0.0), 2)
-            with _portfolio_lock:
-                realized_pnl = round(_portfolio.realized_closed_pnl(), 2)
-            total_pnl = round(unrealized_pnl + realized_pnl, 2)
+            total_value = round(la.get("total_value", balance + total_pos_value), 2)
+            # Snapshot-based PnL: delta from 24h-ago snapshot (same methodology as Polymarket 1D)
+            pnl_1d = round(la.get("pnl_1d", 0.0), 2)
+            pnl_alltime = round(la.get("pnl_alltime", 0.0), 2)
+            pnl_1d_pct = round((pnl_1d / total_value) * 100, 3) if total_value else 0.0
             open_positions = len(la.get("positions", []))
             age_secs = round(time.time() - la.get("refreshed_at", time.time()), 0)
             base.update({
                 "balance": balance,
                 "total_position_value": total_pos_value,
                 "total_value": total_value,
-                "pnl": total_pnl,
-                "unrealized_pnl": unrealized_pnl,
-                "realized_pnl": realized_pnl,
+                "pnl": pnl_1d,
+                "pnl_pct": pnl_1d_pct,
+                "pnl_alltime": pnl_alltime,
                 "open_positions": open_positions,
                 "exposure": total_pos_value,
                 "live_data_age_secs": age_secs,

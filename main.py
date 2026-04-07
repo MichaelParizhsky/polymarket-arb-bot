@@ -488,11 +488,58 @@ class ArbBot:
         # 2. Open positions (Data API, no auth needed)
         live_positions = await poly.get_live_positions()
         total_position_value = sum(float(p.get("currentValue", 0)) for p in live_positions)
-        unrealized_pnl = sum(float(p.get("cashPnl", 0)) for p in live_positions)
+        total_value = real_bal + total_position_value
+
         if startup:
             logger.info(
                 f"[LIVE] {len(live_positions)} open positions, "
-                f"value=${total_position_value:.2f}, unrealized_pnl=${unrealized_pnl:.2f}"
+                f"pos_value=${total_position_value:.2f}, total=${total_value:.2f}"
+            )
+
+        # 3. Snapshot-based PnL — persist total_value with timestamp so we can
+        #    compute 1D and all-time deltas without relying on external APIs.
+        import json as _json
+        SNAPSHOT_PATH = "logs/live_value_snapshots.json"
+        now_ts = time.time()
+        try:
+            with open(SNAPSHOT_PATH) as f:
+                snapshots: list[dict] = _json.load(f)
+        except (FileNotFoundError, ValueError):
+            snapshots = []
+
+        # Seed from config starting_balance if no snapshots yet
+        if not snapshots:
+            seed_balance = getattr(self.config, "starting_balance", None) or total_value
+            snapshots = [{"t": now_ts - 1, "v": float(seed_balance)}]
+            logger.info(f"[LIVE] Seeding PnL history with starting_balance=${seed_balance:.2f}")
+
+        # Append current snapshot (deduplicate: skip if last snapshot < 4 min ago)
+        if now_ts - snapshots[-1]["t"] >= 240:
+            snapshots.append({"t": now_ts, "v": total_value})
+
+        # Trim to last 8 days to keep file small
+        cutoff = now_ts - 8 * 86400
+        snapshots = [s for s in snapshots if s["t"] >= cutoff]
+
+        # Persist
+        try:
+            with open(SNAPSHOT_PATH, "w") as f:
+                _json.dump(snapshots, f)
+        except Exception as exc:
+            logger.warning(f"[LIVE] Could not save snapshots: {exc}")
+
+        # 1D PnL: find nearest snapshot to 24h ago
+        target_1d = now_ts - 86400
+        nearest_1d = min(snapshots, key=lambda s: abs(s["t"] - target_1d))
+        pnl_1d = total_value - nearest_1d["v"]
+
+        # All-time PnL: delta from the oldest snapshot (bot's first run)
+        pnl_alltime = total_value - snapshots[0]["v"]
+
+        if startup:
+            logger.info(
+                f"[LIVE] PnL: 1D={pnl_1d:+.2f}, all-time={pnl_alltime:+.2f} "
+                f"(ref_1d=${nearest_1d['v']:.2f} @ {time.strftime('%m-%d %H:%M', time.localtime(nearest_1d['t']))})"
             )
 
         # Push real account data to the dashboard — it will display these values directly.
@@ -500,8 +547,10 @@ class ArbBot:
             "usdc_balance": real_bal,
             "positions": live_positions,
             "total_position_value": total_position_value,
-            "unrealized_pnl": unrealized_pnl,
-            "refreshed_at": time.time(),
+            "total_value": total_value,
+            "pnl_1d": pnl_1d,
+            "pnl_alltime": pnl_alltime,
+            "refreshed_at": now_ts,
         })
 
         # 3. Fill history — synced for trade-count display only (not for PnL).

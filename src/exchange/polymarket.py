@@ -253,6 +253,28 @@ class PolymarketClient:
             logger.warning(f"get_live_positions failed: {exc}")
             return []
 
+    async def get_all_activity(self, limit: int = 500) -> list[dict]:
+        """Fetch all-time trade/redeem activity from Polymarket Data API.
+
+        Returns list of activity dicts with keys: type (TRADE/REDEEM),
+        side (BUY/SELL), usdcSize, timestamp, title.
+        Falls back to [] on failure.
+        """
+        address = self.config.funder_address
+        if not address or not self._http:
+            return []
+        try:
+            resp = await self._http.get(
+                "https://data-api.polymarket.com/activity",
+                params={"user": address, "limit": limit},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            logger.warning(f"get_all_activity failed: {exc}")
+            return []
+
     # ------------------------------------------------------------------ #
     #  Market data                                                          #
     # ------------------------------------------------------------------ #
