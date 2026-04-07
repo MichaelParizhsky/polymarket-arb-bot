@@ -132,23 +132,39 @@ class PolymarketClient:
             ),
         )
         # Pre-build the ClobClient once for the session to avoid per-order overhead
+        self._clob_is_sync = False
         if not self.paper_trading and self.config.private_key:
             try:
-                from py_clob_client.client import AsyncClobClient
                 from py_clob_client.constants import POLYGON
-                self._clob_client = AsyncClobClient(
-                    host=self.CLOB_BASE,
-                    chain_id=POLYGON,
-                    key=self.config.private_key,
-                    creds={
-                        "api_key": self.config.api_key,
-                        "api_secret": self.config.api_secret,
-                        "api_passphrase": self.config.api_passphrase,
-                    },
-                    signature_type=2,
-                    funder=self.config.funder_address,
+                from py_clob_client.clob_types import ApiCreds
+                _creds = ApiCreds(
+                    api_key=self.config.api_key,
+                    api_secret=self.config.api_secret,
+                    api_passphrase=self.config.api_passphrase,
                 )
-                logger.info("AsyncClobClient initialised (session-level, gasless via CLOB relayer)")
+                try:
+                    from py_clob_client.client import AsyncClobClient
+                    self._clob_client = AsyncClobClient(
+                        host=self.CLOB_BASE,
+                        chain_id=POLYGON,
+                        key=self.config.private_key,
+                        creds=_creds,
+                        signature_type=2,
+                        funder=self.config.funder_address,
+                    )
+                    logger.info("AsyncClobClient initialised (session-level, gasless via CLOB relayer)")
+                except ImportError:
+                    from py_clob_client.client import ClobClient
+                    self._clob_client = ClobClient(
+                        host=self.CLOB_BASE,
+                        chain_id=POLYGON,
+                        key=self.config.private_key,
+                        creds=_creds,
+                        signature_type=2,
+                        funder=self.config.funder_address,
+                    )
+                    self._clob_is_sync = True
+                    logger.info("ClobClient initialised (sync fallback, run_in_executor)")
             except Exception as exc:
                 logger.warning(f"ClobClient init failed: {exc}")
                 self._clob_client = None
@@ -687,14 +703,26 @@ class PolymarketClient:
                 side=BUY if side.upper() == "BUY" else SELL,
             )
             try:
-                signed = await asyncio.wait_for(
-                    self._clob_client.create_market_order(order_args),
-                    timeout=5.0,
-                )
-                resp = await asyncio.wait_for(
-                    self._clob_client.post_order(signed, OrderType.FOK),
-                    timeout=5.0,
-                )
+                loop = asyncio.get_event_loop()
+                if self._clob_is_sync:
+                    import functools
+                    signed = await asyncio.wait_for(
+                        loop.run_in_executor(None, self._clob_client.create_market_order, order_args),
+                        timeout=5.0,
+                    )
+                    resp = await asyncio.wait_for(
+                        loop.run_in_executor(None, functools.partial(self._clob_client.post_order, signed, OrderType.FOK)),
+                        timeout=5.0,
+                    )
+                else:
+                    signed = await asyncio.wait_for(
+                        self._clob_client.create_market_order(order_args),
+                        timeout=5.0,
+                    )
+                    resp = await asyncio.wait_for(
+                        self._clob_client.post_order(signed, OrderType.FOK),
+                        timeout=5.0,
+                    )
             except asyncio.TimeoutError:
                 logger.error(f"[LIVE] Order placement timed out for token={token_id[:16]}")
                 return None
@@ -728,14 +756,26 @@ class PolymarketClient:
                 side=BUY if side == "BUY" else SELL,
             )
             try:
-                signed = await asyncio.wait_for(
-                    self._clob_client.create_order(order_args),
-                    timeout=5.0,
-                )
-                resp = await asyncio.wait_for(
-                    self._clob_client.post_order(signed, OrderType.GTC),
-                    timeout=5.0,
-                )
+                loop = asyncio.get_event_loop()
+                if self._clob_is_sync:
+                    import functools
+                    signed = await asyncio.wait_for(
+                        loop.run_in_executor(None, self._clob_client.create_order, order_args),
+                        timeout=5.0,
+                    )
+                    resp = await asyncio.wait_for(
+                        loop.run_in_executor(None, functools.partial(self._clob_client.post_order, signed, OrderType.GTC)),
+                        timeout=5.0,
+                    )
+                else:
+                    signed = await asyncio.wait_for(
+                        self._clob_client.create_order(order_args),
+                        timeout=5.0,
+                    )
+                    resp = await asyncio.wait_for(
+                        self._clob_client.post_order(signed, OrderType.GTC),
+                        timeout=5.0,
+                    )
             except asyncio.TimeoutError:
                 logger.error(f"[LIVE] Order placement timed out for token={token_id[:16]}")
                 return None
