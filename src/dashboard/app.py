@@ -3202,8 +3202,8 @@ tr:hover td{background:var(--surface2)}
   <h1 id="bot-title">Polymarket Arb Bot</h1>
   <span id="mode-badge">PAPER</span>
   <span id="uptime-info">loading...</span>
-  <button id="add-funds-btn" onclick="addFunds()">+ Add $10k</button>
-  <button id="reset-btn" onclick="resetPortfolio()">Reset to $10,000</button>
+  <button id="add-funds-btn" onclick="addFunds()" style="display:none">+ Add $10k</button>
+  <button id="reset-btn" onclick="resetPortfolio()" style="display:none">Reset to $10,000</button>
 </header>
 
 <div class="tabs">
@@ -4548,6 +4548,13 @@ function updateStatus(s){
   if(livew){livew.textContent=wr.toFixed(1)+'%';livew.className='val '+(wr>=50?'green':'red');}
   const livet=$('live-trades');
   if(livet) livet.textContent=s.total_trades;
+
+  // Show paper-only controls only in paper mode
+  const paperOnly=s.paper_trading!==false;
+  ['add-funds-btn','reset-btn'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.style.display=paperOnly?'':'none';
+  });
 
   // Polymarket public profile + activity (funder / proxy wallet from env)
   const addr=(s.polymarket_address||'').trim();
