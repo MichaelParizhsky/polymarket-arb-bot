@@ -695,12 +695,11 @@ class PolymarketClient:
             return None
         try:
             from py_clob_client.clob_types import MarketOrderArgs, OrderType
-            from py_clob_client.constants import BUY, SELL
 
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 amount=amount_usdc,
-                side=BUY if side.upper() == "BUY" else SELL,
+                side=side.upper(),
             )
             try:
                 loop = asyncio.get_event_loop()
@@ -746,14 +745,13 @@ class PolymarketClient:
             logger.error("ClobClient not initialised — cannot place live limit order")
             return None
         try:
-            from py_clob_client.clob_types import LimitOrderArgs, OrderType
-            from py_clob_client.constants import BUY, SELL
+            from py_clob_client.clob_types import OrderArgs, OrderType
 
-            order_args = LimitOrderArgs(
+            order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
                 size=size,
-                side=BUY if side == "BUY" else SELL,
+                side=side.upper(),
             )
             try:
                 loop = asyncio.get_event_loop()
