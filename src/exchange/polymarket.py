@@ -175,6 +175,40 @@ class PolymarketClient:
             await self._http.aclose()
 
     # ------------------------------------------------------------------ #
+    #  Account / balance                                                    #
+    # ------------------------------------------------------------------ #
+
+    async def get_usdc_balance(self) -> float | None:
+        """Fetch real USDC balance from Polymarket CLOB. Returns None on failure."""
+        if not self._clob_client:
+            return None
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self._clob_client.get_balance_allowance, params
+            )
+            raw = result.get("balance") or result.get("allowance", 0)
+            usdc = float(raw) / 1_000_000  # 6-decimal USDC on Polygon
+            return usdc
+        except Exception as exc:
+            logger.warning(f"get_usdc_balance failed: {exc}")
+            return None
+
+    async def get_open_orders(self) -> list[dict]:
+        """Return list of open orders from the CLOB."""
+        if not self._clob_client:
+            return []
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, self._clob_client.get_orders)
+            return result if isinstance(result, list) else result.get("data", [])
+        except Exception as exc:
+            logger.warning(f"get_open_orders failed: {exc}")
+            return []
+
+    # ------------------------------------------------------------------ #
     #  Market data                                                          #
     # ------------------------------------------------------------------ #
 

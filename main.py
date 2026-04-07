@@ -429,6 +429,22 @@ class ArbBot:
             # Apply any previously auto-tuned config
             self._load_saved_config()
 
+            # Live mode: sync real USDC balance and open orders from Polymarket
+            if not self.paper:
+                real_bal = await poly.get_usdc_balance()
+                if real_bal is not None:
+                    logger.info(f"[LIVE] Polymarket USDC balance: ${real_bal:.2f}")
+                    self.portfolio.usdc_balance = real_bal
+                    self.portfolio.starting_balance = real_bal
+                    self.portfolio.save_to_json(STATE_PATH)
+                else:
+                    logger.warning("[LIVE] Could not fetch Polymarket balance — using state file value")
+                open_orders = await poly.get_open_orders()
+                if open_orders:
+                    logger.info(f"[LIVE] {len(open_orders)} open orders on CLOB at startup")
+                    for o in open_orders[:5]:
+                        logger.info(f"  order {o.get('id','?')[:16]} token={str(o.get('asset_id','?'))[:16]} side={o.get('side','?')} price={o.get('price','?')} size={o.get('size_matched','?')}/{o.get('original_size','?')}")
+
             # Paper exploration: unfreeze risk locks on each deploy (Railway / Bot B)
             if self.paper and os.getenv(
                 "PAPER_RESET_RISK_ON_START", ""
@@ -466,9 +482,18 @@ class ArbBot:
         logger.info("Bot running. Press Ctrl+C to stop.")
         last_summary_at = time.time()
         last_trade_alert_at: float = 0.0   # tracks when we last warned about no trades
+        last_balance_sync_at: float = 0.0  # live balance refresh cadence
         summary_interval = 60   # save state every 60s (was 300s — reduces data loss on Railway redeploy)
 
         while self._running:
+            # Refresh real Polymarket balance every 5 minutes in live mode
+            if not self.paper and (time.time() - last_balance_sync_at) > 300:
+                real_bal = await self.poly.get_usdc_balance()
+                if real_bal is not None:
+                    self.portfolio.usdc_balance = real_bal
+                    last_balance_sync_at = time.time()
+                    logger.debug(f"[LIVE] Balance synced from Polymarket: ${real_bal:.2f}")
+
             # Check for dashboard-deployed strategies every 10 cycles
             if self._cycle_count % 10 == 0:
                 self._process_pending_deploys()
