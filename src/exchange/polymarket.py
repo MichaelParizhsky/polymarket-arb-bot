@@ -208,6 +208,28 @@ class PolymarketClient:
             logger.warning(f"get_open_orders failed: {exc}")
             return []
 
+    async def get_trade_history(self, limit: int = 500) -> list[dict]:
+        """Fetch fill history from Polymarket CLOB for this account.
+
+        L2 auth identifies the account; no extra filter needed to get all fills
+        (both maker and taker sides). Returns raw trade dicts with fields:
+        id, asset_id, side, size, price, match_time, fee_rate_bps, status, etc.
+        """
+        if not self._clob_client:
+            return []
+        try:
+            import functools
+            loop = asyncio.get_event_loop()
+            # Pass params=None so L2 auth returns all trades for our account
+            result = await loop.run_in_executor(
+                None, functools.partial(self._clob_client.get_trades, None)
+            )
+            trades = result if isinstance(result, list) else result.get("data", [])
+            return trades[:limit]
+        except Exception as exc:
+            logger.warning(f"get_trade_history failed: {exc}")
+            return []
+
     # ------------------------------------------------------------------ #
     #  Market data                                                          #
     # ------------------------------------------------------------------ #
