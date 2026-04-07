@@ -492,6 +492,84 @@ def add_funds(amount: float = 10000.0):
 
 
 # ------------------------------------------------------------------ #
+#  Railway variable management endpoints                               #
+# ------------------------------------------------------------------ #
+
+@app.get("/api/railway/vars")
+async def railway_vars_get():
+    """Return all Railway service variables.  Sensitive values are masked."""
+    from src.utils.railway_client import get_variables, is_configured
+    if not is_configured():
+        return JSONResponse(
+            {"error": "Railway not configured. Set RAILWAY_TOKEN, RAILWAY_SERVICE_ID, RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID."},
+            status_code=503,
+        )
+    try:
+        variables = await get_variables()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    # Mask secret values so they're not exposed in the browser
+    _SECRET_KEYS = {
+        "API_KEY", "API_SECRET", "PASSPHRASE", "PRIVATE_KEY",
+        "PASSWORD", "TOKEN", "ANTHROPIC", "GROK", "PERPLEXITY",
+    }
+    masked = {}
+    for k, v in variables.items():
+        if any(s in k.upper() for s in _SECRET_KEYS):
+            masked[k] = "••••••••"
+        else:
+            masked[k] = v
+    return {"variables": masked, "configured": True}
+
+
+@app.post("/api/railway/vars")
+async def railway_vars_set(
+    request: Request,
+    authorized: bool = Depends(_check_api_key),
+):
+    """Update one or more Railway service variables."""
+    if not authorized:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    from src.utils.railway_client import upsert_variable, is_configured
+    if not is_configured():
+        return JSONResponse(
+            {"error": "Railway not configured. Set RAILWAY_TOKEN, RAILWAY_SERVICE_ID, RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID."},
+            status_code=503,
+        )
+
+    body = await request.json()
+    updates: dict[str, str] = body.get("variables", {})
+    if not updates:
+        return JSONResponse({"error": "No variables provided"}, status_code=400)
+
+    # Block writes to sensitive keys
+    _SECRET_KEYS = {
+        "API_KEY", "API_SECRET", "PASSPHRASE", "PRIVATE_KEY",
+        "PASSWORD", "TOKEN", "ANTHROPIC", "GROK", "PERPLEXITY",
+    }
+    for k in updates:
+        if any(s in k.upper() for s in _SECRET_KEYS):
+            return JSONResponse({"error": f"Cannot update secret key: {k}"}, status_code=400)
+
+    results = {}
+    errors = {}
+    for name, value in updates.items():
+        try:
+            await upsert_variable(name, str(value))
+            results[name] = "updated"
+        except Exception as exc:
+            errors[name] = str(exc)
+
+    return {
+        "updated": results,
+        "errors": errors,
+        "note": "Changes take effect on next Railway redeploy.",
+    }
+
+
+# ------------------------------------------------------------------ #
 #  Bot API endpoints                                                   #
 # ------------------------------------------------------------------ #
 
@@ -3323,6 +3401,7 @@ tr:hover td{background:var(--surface2)}
   <div class="tab active" onclick="showTab('overview')">Overview</div>
   <div class="tab" onclick="showTab('pos-trades')">Positions / Trades</div>
   <div class="tab" onclick="showTab('analytics')">Analytics</div>
+  <div class="tab" onclick="showTab('config')">Config</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -4433,7 +4512,193 @@ async function loadAnalyticsTab() {
     });
   } else { noData($('an-concentration')); }
 }
+
+// ─────────────────────────────────────────────────────────────
+// Railway Config Tab
+// ─────────────────────────────────────────────────────────────
+
+// Variable groups for organised display (env var prefix → label)
+const CFG_GROUPS = [
+  { label: 'Bot Mode', keys: ['PAPER_TRADING','STARTING_BALANCE','LOG_LEVEL','BOT_NAME'] },
+  { label: 'Risk Limits', keys: ['MAX_TOTAL_EXPOSURE','MAX_POSITION_SIZE','MIN_EDGE_THRESHOLD','MAX_DRAWDOWN_PCT','MAX_SLIPPAGE','MIN_TRADE_INTERVAL','TOKEN_COOLDOWN','MAX_OPEN_ORDERS'] },
+  { label: 'Market Filters', keys: ['MAX_MARKETS','MAX_DAYS_TO_RESOLUTION','DAILY_CLOSE_ONLY'] },
+  { label: 'Strategies', keys: [
+    'STRATEGY_COMBINATORIAL','STRATEGY_MARKET_MAKING','STRATEGY_RESOLUTION',
+    'STRATEGY_EVENT_DRIVEN','STRATEGY_QUICK_RESOLUTION','STRATEGY_CRYPTO_5M',
+    'STRATEGY_SWARM','STRATEGY_LIVE_GAME','STRATEGY_OPTIMISM_TAX',
+    'STRATEGY_LATENCY_ARB','STRATEGY_CROSS_EXCHANGE','STRATEGY_FUTURES_HEDGE','STRATEGY_WEATHER'
+  ]},
+  { label: 'Market Making', keys: ['MM_SPREAD_BPS','MM_ORDER_SIZE','MM_MAX_INVENTORY','MM_SKEW_FACTOR','MM_MID_MIN','MM_MID_MAX','MM_MIN_HOURS_TO_EXPIRY'] },
+  { label: 'Quick Resolution', keys: ['QUICK_RESOLUTION_MIN_CONVICTION','QUICK_RESOLUTION_MAX_HOURS','QUICK_RESOLUTION_MAX_SPEND','QUICK_RESOLUTION_MIN_EDGE','QUICK_RESOLUTION_MIN_VOLUME'] },
+  { label: 'Crypto 5M', keys: ['CRYPTO_5M_MAX_SPEND','CRYPTO_5M_DUAL_ARB_THRESHOLD','CRYPTO_5M_MIN_NET_EDGE','CRYPTO_5M_SNIPE_MIN_CONVICTION','CRYPTO_5M_SNIPE_MAX_SPEND'] },
+  { label: 'Swarm', keys: ['SWARM_MIN_EDGE','SWARM_MIN_CONFIDENCE','SWARM_MAX_SPEND','SWARM_AGENT_COUNT','SWARM_MAX_MARKETS','SWARM_COOLDOWN_HOURS'] },
+  { label: 'Other', keys: [] },  // catches everything not in a named group
+];
+
+let _railwayVars = {};        // original values from API
+let _cfgEdits = {};           // user-modified values (pending save)
+
+async function loadRailwayVars() {
+  const statusEl = $('cfg-status');
+  const errEl = $('cfg-error');
+  const loadEl = $('cfg-loading');
+  if(statusEl) statusEl.textContent = 'Loading…';
+  if(errEl) errEl.style.display='none';
+
+  try {
+    const r = await fetch('/api/railway/vars');
+    const data = await r.json();
+    if(!r.ok || data.error) {
+      showCfgError(data.error || 'Failed to load variables');
+      if(statusEl) statusEl.textContent = '';
+      return;
+    }
+    _railwayVars = data.variables || {};
+    _cfgEdits = {};
+    renderCfgGroups();
+    if(statusEl) statusEl.textContent = `${Object.keys(_railwayVars).length} variables loaded`;
+  } catch(e) {
+    showCfgError('Network error: ' + e.message);
+    if(statusEl) statusEl.textContent = '';
+  }
+}
+
+function renderCfgGroups() {
+  const container = $('cfg-groups');
+  if(!container) return;
+  if($('cfg-loading')) $('cfg-loading').remove();
+
+  const allKeys = Object.keys(_railwayVars).sort();
+  const assignedKeys = new Set();
+
+  let html = '';
+  for(const group of CFG_GROUPS) {
+    const groupKeys = group.keys.length > 0
+      ? group.keys.filter(k => _railwayVars.hasOwnProperty(k))
+      : allKeys.filter(k => !assignedKeys.has(k));  // "Other" catches remainder
+    if(groupKeys.length === 0) continue;
+    groupKeys.forEach(k => assignedKeys.add(k));
+
+    html += `<div style="background:#141c28;border:1px solid #1e3a5f;border-radius:6px;padding:16px">`;
+    html += `<h4 style="margin:0 0 12px;color:#4a9eff;font-size:13px;letter-spacing:.5px;text-transform:uppercase">${group.label}</h4>`;
+    html += `<table style="width:100%;border-collapse:collapse">`;
+    for(const key of groupKeys) {
+      const val = _railwayVars[key];
+      const isMasked = val === '••••••••';
+      html += `<tr style="border-bottom:1px solid #1e2d40">
+        <td style="padding:7px 10px 7px 0;color:#8ab4d4;font-size:12px;font-family:monospace;width:45%;vertical-align:middle">${key}</td>
+        <td style="padding:4px 0;vertical-align:middle">`;
+      if(isMasked) {
+        html += `<span style="color:#555;font-size:12px;font-family:monospace">••••••••</span>`;
+      } else if(val === 'true' || val === 'false') {
+        const checked = val === 'true' ? 'checked' : '';
+        html += `<label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" ${checked} data-key="${key}" onchange="cfgToggle(this)"
+            style="width:16px;height:16px;accent-color:#4a9eff;cursor:pointer">
+          <span id="cfg-lbl-${key}" style="font-size:12px;color:${val==='true'?'#4f9':'#f88'}">${val}</span>
+        </label>`;
+      } else {
+        html += `<input type="text" value="${escHtml(val)}" data-key="${key}" onchange="cfgEdit(this)"
+          style="background:#0d1520;border:1px solid #1e3a5f;color:#cde;padding:4px 8px;border-radius:3px;font-size:12px;font-family:monospace;width:100%;box-sizing:border-box">`;
+      }
+      html += `</td></tr>`;
+    }
+    html += `</table></div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+function cfgToggle(el) {
+  const key = el.dataset.key;
+  const val = el.checked ? 'true' : 'false';
+  _cfgEdits[key] = val;
+  const lbl = $(`cfg-lbl-${key}`);
+  if(lbl) { lbl.textContent = val; lbl.style.color = val==='true' ? '#4f9' : '#f88'; }
+}
+
+function cfgEdit(el) {
+  _cfgEdits[el.dataset.key] = el.value;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function saveRailwayVars() {
+  if(Object.keys(_cfgEdits).length === 0) {
+    showCfgSuccess('No changes to save.');
+    return;
+  }
+  const statusEl = $('cfg-status');
+  if(statusEl) statusEl.textContent = 'Saving…';
+  $('cfg-error').style.display='none';
+  $('cfg-success').style.display='none';
+
+  try {
+    const r = await fetch('/api/railway/vars', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ variables: _cfgEdits })
+    });
+    const data = await r.json();
+    if(!r.ok || data.error) {
+      showCfgError(data.error || 'Save failed');
+    } else {
+      const updated = Object.keys(data.updated || {}).length;
+      const errs = Object.keys(data.errors || {});
+      if(errs.length > 0) {
+        showCfgError(`Errors on: ${errs.join(', ')}`);
+      } else {
+        showCfgSuccess(`${updated} variable${updated!==1?'s':''} saved. Redeploy Railway to apply.`);
+        _cfgEdits = {};
+        // Refresh to confirm values
+        setTimeout(loadRailwayVars, 500);
+      }
+    }
+  } catch(e) {
+    showCfgError('Network error: ' + e.message);
+  }
+  if(statusEl) statusEl.textContent = '';
+}
+
+function showCfgError(msg) {
+  const el = $('cfg-error');
+  if(el){ el.textContent = msg; el.style.display='block'; }
+}
+function showCfgSuccess(msg) {
+  const el = $('cfg-success');
+  if(el){ el.textContent = msg; el.style.display='block'; setTimeout(()=>el.style.display='none', 6000); }
+}
 </script>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 4: CONFIG  (Railway variable editor)                   -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-config">
+  <div class="section">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px">
+      <h3 style="margin:0">Railway Config Variables</h3>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="cfg-status" style="font-size:12px;opacity:.7"></span>
+        <button onclick="loadRailwayVars()" style="padding:6px 12px;background:#1e3a5f;border:1px solid #334;color:#ccc;border-radius:4px;cursor:pointer">Refresh</button>
+        <button onclick="saveRailwayVars()" style="padding:6px 14px;background:#0d7a3e;border:none;color:#fff;border-radius:4px;cursor:pointer;font-weight:600">Save Changes</button>
+      </div>
+    </div>
+    <p style="font-size:12px;color:#888;margin-bottom:16px">
+      Changes take effect on the <strong>next Railway redeploy</strong>.
+      Secret keys (API keys, tokens, passwords) are masked and cannot be edited here.
+      Requires <code>RAILWAY_TOKEN</code> to be set in Railway.
+    </p>
+    <div id="cfg-error" style="display:none;background:#3a1a1a;border:1px solid #c33;color:#f88;padding:10px;border-radius:4px;margin-bottom:12px"></div>
+    <div id="cfg-success" style="display:none;background:#0a2e1a;border:1px solid #0d7a3e;color:#4f9;padding:10px;border-radius:4px;margin-bottom:12px"></div>
+
+    <!-- Variable groups -->
+    <div id="cfg-groups" style="display:flex;flex-direction:column;gap:24px">
+      <p id="cfg-loading" style="color:#888">Loading variables from Railway...</p>
+    </div>
+  </div>
+</div>
 
 <!-- Hidden elements required by log stream (live-uptime, live-realized, etc.) -->
 <div style="display:none">
@@ -4461,8 +4726,8 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-// 3 tabs: overview, pos-trades, analytics
-const allTabs=['overview','pos-trades','analytics'];
+// 4 tabs: overview, pos-trades, analytics, config
+const allTabs=['overview','pos-trades','analytics','config'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
 
 function showTab(name){
@@ -4472,7 +4737,9 @@ function showTab(name){
   if(pg) pg.classList.add('active');
   currentTab=name;
 
-  if(name==='analytics'){
+  if(name==='config'){
+    loadRailwayVars();
+  } else if(name==='analytics'){
     fetchAnalytics();
     fetchSystemStatus();
     fetchBalances();
