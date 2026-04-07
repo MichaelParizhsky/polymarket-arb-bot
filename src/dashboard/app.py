@@ -3208,14 +3208,7 @@ tr:hover td{background:var(--surface2)}
 
 <div class="tabs">
   <div class="tab active" onclick="showTab('overview')">Overview</div>
-  <div class="tab" onclick="showTab('positions')">Positions</div>
-  <div class="tab" onclick="showTab('trades')">Trades</div>
-  <div class="tab" onclick="showTab('strategies')">Strategies</div>
-  <div class="tab" onclick="showTab('ai-intel')">AI Intel</div>
-  <div class="tab" onclick="showTab('meta')">Meta-Agent</div>
-  <div class="tab" onclick="showTab('system')">System</div>
-  <div class="tab" onclick="showTab('weather')">Weather</div>
-  <div class="tab" onclick="showTab('sports')">Sports</div>
+  <div class="tab" onclick="showTab('pos-trades')">Positions / Trades</div>
   <div class="tab" onclick="showTab('analytics')">Analytics</div>
 </div>
 
@@ -3387,9 +3380,9 @@ tr:hover td{background:var(--surface2)}
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 2: POSITIONS                                           -->
+<!-- TAB 2: POSITIONS / TRADES                                  -->
 <!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-positions">
+<div class="page" id="tab-pos-trades">
   <div class="section">
     <h3>Open Positions (<span id="open-pos-count">0</span>)</h3>
     <div id="positions-table"><div class="no-data">No open positions</div></div>
@@ -3398,13 +3391,7 @@ tr:hover td{background:var(--surface2)}
     <h3>Closed Positions — Recent 100 <span style="color:var(--muted);font-weight:normal;font-size:.63rem">Realized results only</span></h3>
     <div id="closed-table"><div class="no-data">No closed positions yet</div></div>
   </div>
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 3: TRADES                                              -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-trades">
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px">
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:16px 0">
     <div class="card"><div class="lbl">Total Trades</div><div class="val blue" id="t-total">--</div></div>
     <div class="card"><div class="lbl">Buys</div><div class="val green" id="t-buys">--</div></div>
     <div class="card"><div class="lbl">Sells</div><div class="val red" id="t-sells">--</div></div>
@@ -3417,9 +3404,11 @@ tr:hover td{background:var(--surface2)}
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 4: STRATEGIES  (was Analytics + Status strategy cards) -->
+<!-- TAB 3: ANALYTICS                                           -->
 <!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-strategies">
+<div class="page" id="tab-analytics">
+
+  <!-- SECTION: STRATEGIES -->
 
   <!-- Risk Health Score (from Status) -->
   <div class="section" style="margin-bottom:14px">
@@ -3632,12 +3621,10 @@ tr:hover td{background:var(--surface2)}
     <h3>Meta-Agent Parameter Change Timeline</h3>
     <div id="param-timeline"><div class="no-data">No parameter changes yet</div></div>
   </div>
-</div>
 
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 5: AI INTEL  (was AI Intel + Research)                 -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-ai-intel">
+  <hr style="border:none;border-top:1px solid #1a2a1a;margin:16px 0">
+
+  <!-- SECTION: AI INTEL & RESEARCH -->
 
   <!-- AI Service Status Cards -->
   <div class="ai-status-grid" id="ai-intel-status-cards">
@@ -3770,12 +3757,11 @@ tr:hover td{background:var(--surface2)}
       </div>
     </div>
   </div>
-</div>
 
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 6: META-AGENT                                          -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-meta">
+  <hr style="border:none;border-top:1px solid #1a2a1a;margin:16px 0">
+
+  <!-- SECTION: META-AGENT -->
+
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;flex:1;min-width:0">
       <div class="card"><div class="lbl">Analyses Run</div><div class="val blue" id="meta-count">--</div></div>
@@ -3794,12 +3780,10 @@ tr:hover td{background:var(--surface2)}
     <h3>Analysis History</h3>
     <div id="meta-history"></div>
   </div>
-</div>
 
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 7: SYSTEM  (was Status + Balances + Code Review + Compare) -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-system">
+  <hr style="border:none;border-top:1px solid #1a2a1a;margin:16px 0">
+
+  <!-- SECTION: SYSTEM -->
 
   <!-- Connections + API keys checklist -->
   <div class="section">
@@ -3990,152 +3974,9 @@ tr:hover td{background:var(--surface2)}
     </div>
   </div>
 
-</div>
+  <hr style="border:none;border-top:1px solid #1a2a1a;margin:16px 0">
 
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 8: WEATHER                                             -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-weather">
-
-  <!-- Summary cards -->
-  <div class="kpi-row" id="weather-kpi-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
-    <div class="kpi-card"><div class="kpi-label">Total Trades</div><div class="kpi-value" id="w-total">--</div></div>
-    <div class="kpi-card"><div class="kpi-label">Wins</div><div class="kpi-value" id="w-wins">--</div></div>
-    <div class="kpi-card"><div class="kpi-label">Win Rate</div><div class="kpi-value" id="w-winrate">--</div></div>
-    <div class="kpi-card"><div class="kpi-label">Total PnL</div><div class="kpi-value" id="w-pnl">--</div></div>
-  </div>
-
-  <!-- Per-city breakdown -->
-  <div class="section">
-    <h3>Per-City Breakdown</h3>
-    <table class="trade-table">
-      <thead><tr>
-        <th>City</th>
-        <th style="text-align:right">Trades</th>
-        <th style="text-align:right">Win Rate</th>
-        <th style="text-align:right">PnL</th>
-      </tr></thead>
-      <tbody id="w-city-tbody">
-        <tr><td colspan="4" style="color:var(--muted);text-align:center">No weather trades yet</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Recent signals -->
-  <div class="section">
-    <h3>Recent Signals</h3>
-    <table class="trade-table">
-      <thead><tr>
-        <th>Date</th>
-        <th>City</th>
-        <th style="text-align:right">Model</th>
-        <th style="text-align:right">Market</th>
-        <th style="text-align:right">Edge</th>
-        <th>Side</th>
-        <th style="text-align:right">PnL</th>
-      </tr></thead>
-      <tbody id="w-signals-tbody">
-        <tr><td colspan="7" style="color:var(--muted);text-align:center">No signals yet</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-</div>
-
-<!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB: SPORTS                                                -->
-<!-- ═══════════════════════════════════════════════════════════ -->
-<div class="page" id="tab-sports">
-
-  <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-    <h2 style="font-size:.9rem;font-weight:700;color:var(--text);margin:0">Live Sports</h2>
-    <span style="font-size:.65rem;color:var(--muted)">ESPN scores · refreshes every 30s · no API cost</span>
-    <button onclick="loadSports();loadSportsLive();" style="margin-left:auto;font-size:.65rem;padding:4px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer">Refresh</button>
-  </div>
-
-  <!-- KPI row -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
-    <div class="kpi-card"><div class="kpi-label">Sports Bets</div><div class="kpi-value" id="sp-total">--</div></div>
-    <div class="kpi-card">
-      <div class="kpi-label">Win Rate</div>
-      <div class="kpi-value" id="sp-winrate">--</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Total PnL</div>
-      <div class="kpi-value" id="sp-pnl">--</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Open Positions</div>
-      <div class="kpi-value" id="sp-open">--</div>
-    </div>
-  </div>
-
-  <!-- Live games (ESPN) -->
-  <div class="section">
-    <h3>Live Games <span id="sp-live-badge" style="font-size:.7rem;background:var(--red);color:#fff;padding:2px 8px;border-radius:4px;vertical-align:middle;display:none">LIVE</span></h3>
-    <div id="sp-live-games"><div class="no-data" style="color:var(--muted)">Loading live games...</div></div>
-  </div>
-
-  <!-- Open positions with player stats -->
-  <div class="section">
-    <h3>Open Sports Positions</h3>
-    <div id="sp-open-positions"><div class="no-data" style="color:var(--muted)">No open sports positions</div></div>
-  </div>
-
-  <!-- Bet type breakdown -->
-  <div class="section">
-    <h3>Performance by Bet Type</h3>
-    <table class="trade-table">
-      <thead><tr>
-        <th>Bet Type</th>
-        <th style="text-align:right">Trades</th>
-        <th style="text-align:right">Win Rate</th>
-        <th style="text-align:right">PnL</th>
-      </tr></thead>
-      <tbody id="sp-bettype-tbody">
-        <tr><td colspan="4" style="color:var(--muted);text-align:center">No data yet</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- League breakdown -->
-  <div class="section">
-    <h3>Performance by League</h3>
-    <table class="trade-table">
-      <thead><tr>
-        <th>League</th>
-        <th style="text-align:right">Trades</th>
-        <th style="text-align:right">Win Rate</th>
-        <th style="text-align:right">PnL</th>
-      </tr></thead>
-      <tbody id="sp-league-tbody">
-        <tr><td colspan="4" style="color:var(--muted);text-align:center">No data yet</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Recent sports trades -->
-  <div class="section">
-    <h3>Recent Sports Trades</h3>
-    <table class="trade-table">
-      <thead><tr>
-        <th>Market</th>
-        <th>Type</th>
-        <th>League</th>
-        <th>Outcome</th>
-        <th style="text-align:right">PnL</th>
-        <th>Result</th>
-      </tr></thead>
-      <tbody id="sp-recent-tbody">
-        <tr><td colspan="6" style="color:var(--muted);text-align:center">No trades yet</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-</div>
-
-<!-- ════════════════════════════════════════ ANALYTICS TAB ════════════════════════════════════════ -->
-<div class="page" id="tab-analytics">
+  <!-- SECTION: DEEP ANALYTICS -->
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
     <h2 style="font-size:.9rem;font-weight:700;color:var(--text);margin:0">Deep Analytics</h2>
     <span style="font-size:.65rem;color:var(--muted)">All data from closed trades · refresh on tab open</span>
@@ -4507,10 +4348,9 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-// 10 tabs: overview, positions, trades, strategies, ai-intel, meta, system, weather, sports, analytics
-const allTabs=['overview','positions','trades','strategies','ai-intel','meta','system','weather','sports','analytics'];
+// 3 tabs: overview, pos-trades, analytics
+const allTabs=['overview','pos-trades','analytics'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
-let _sportsInterval=null;
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',allTabs[i]===name)});
@@ -4519,59 +4359,46 @@ function showTab(name){
   if(pg) pg.classList.add('active');
   currentTab=name;
 
-  if(name==='system'){
+  if(name==='analytics'){
+    fetchAnalytics();
     fetchSystemStatus();
     fetchBalances();
     fetchCodeReview();
-    fetchCompare();
-    if(_statusInterval) clearInterval(_statusInterval);
-    _statusInterval=setInterval(fetchSystemStatus,10000);
-    if(_compareInterval)clearInterval(_compareInterval);
-    _compareInterval=setInterval(fetchCompare,30000);
-  } else {
-    if(_statusInterval){clearInterval(_statusInterval);_statusInterval=null;}
-    if(_compareInterval){clearInterval(_compareInterval);_compareInterval=null;}
-  }
-
-  if(name==='strategies'){
-    fetchAnalytics();
-    fetchSystemStatus();
-  }
-
-  if(name==='weather'){
-    loadWeather();
-  }
-
-  if(name==='sports'){
-    loadSports();
-    loadSportsLive();
-    if(window._sportsInterval) clearInterval(window._sportsInterval);
-    window._sportsInterval=setInterval(()=>{loadSports();loadSportsLive();},30000);
-  } else {
-    if(window._sportsInterval){clearInterval(window._sportsInterval);window._sportsInterval=null;}
-  }
-
-  if(name==='analytics'){
-    loadAnalyticsTab();
-  }
-
-  if(name==='ai-intel'){
+    fetchMeta();
+    fetchResearch();
     fetchEnsemble();
     fetchNews();
     fetchHedges();
-    fetchResearch();
-    if(_ensembleInterval)clearInterval(_ensembleInterval);
-    if(_newsInterval)clearInterval(_newsInterval);
-    if(_hedgeInterval)clearInterval(_hedgeInterval);
+    loadAnalyticsTab();
+    if(_statusInterval) clearInterval(_statusInterval);
+    _statusInterval=setInterval(fetchSystemStatus,10000);
+    if(_ensembleInterval) clearInterval(_ensembleInterval);
+    if(_newsInterval) clearInterval(_newsInterval);
+    if(_hedgeInterval) clearInterval(_hedgeInterval);
     _ensembleInterval=setInterval(fetchEnsemble,60000);
     _newsInterval=setInterval(fetchNews,120000);
     _hedgeInterval=setInterval(fetchHedges,30000);
   } else {
+    if(_statusInterval){clearInterval(_statusInterval);_statusInterval=null;}
     if(_ensembleInterval){clearInterval(_ensembleInterval);_ensembleInterval=null;}
     if(_newsInterval){clearInterval(_newsInterval);_newsInterval=null;}
     if(_hedgeInterval){clearInterval(_hedgeInterval);_hedgeInterval=null;}
   }
 
+  if(name==='pos-trades'){
+    const s=fetch('/api/status').then(r=>r.json());
+    Promise.all([
+      fetch('/api/positions').then(r=>r.json()),
+      fetch('/api/closed_positions').then(r=>r.json()),
+      s,
+    ]).then(([open,closed,status])=>{updatePositions(open,closed);updateTrades(null,status);});
+    fetch('/api/trades').then(r=>r.json()).then(d=>{
+      const sc=fetch('/api/status').then(r=>r.json());
+      sc.then(s=>updateTrades(d,s));
+    });
+  }
+
+  if(name==='overview'){_fetchSentinelExtras();}
 }
 
 function loadWeather(){
@@ -4663,15 +4490,15 @@ async function fetchAll(){
     updateStratPnl(stratPnl);
     updateStratChart(stratTrades);
 
-    if(currentTab==='positions'){
+    if(currentTab==='pos-trades'){
       const [open,closed]=await Promise.all([
         fetch('/api/positions').then(r=>r.json()),
         fetch('/api/closed_positions').then(r=>r.json()),
       ]);
       updatePositions(open,closed);
+      const d=await fetch('/api/trades').then(r=>r.json());updateTrades(d,status);
     }
-    if(currentTab==='trades'){const d=await fetch('/api/trades').then(r=>r.json());updateTrades(d,status);}
-    if(currentTab==='meta'){fetchMeta();}
+    if(currentTab==='analytics'){fetchMeta();}
     if(currentTab==='overview'){_fetchSentinelExtras();}
 
     $('last-update').textContent='Updated: '+new Date().toLocaleTimeString();
