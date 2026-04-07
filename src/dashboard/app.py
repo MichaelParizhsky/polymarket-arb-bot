@@ -3145,6 +3145,55 @@ tr:hover td{background:var(--surface2)}
 .ai-card-status{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
 .ai-card-note{font-size:.68rem;color:var(--muted);line-height:1.5}
 .ai-card-key{font-size:.63rem;color:var(--muted);font-family:monospace;margin-top:6px;padding:4px 8px;background:var(--bg);border-radius:4px}
+
+/* ─── SENTINEL overrides — compact terminal style ─────────────────── */
+.sentinel-bar{background:#070707;border:1px solid #1a2a1a;border-radius:6px;padding:6px 12px;margin-bottom:8px;font-family:'Cascadia Code','Consolas',monospace;font-size:.72rem}
+.sentinel-bar .row1{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:3px}
+.sentinel-bar .row2{display:flex;gap:16px;align-items:center;flex-wrap:wrap;color:#64748b}
+.sentinel-bar .sep{color:#1a3a1a}
+.sentinel-label{color:#64748b;font-size:.65rem;text-transform:uppercase;margin-right:4px}
+.sentinel-val{font-weight:700}
+.sentinel-val.green{color:#10b981}.sentinel-val.red{color:#ef4444}.sentinel-val.cyan{color:#06b6d4}.sentinel-val.yellow{color:#f59e0b}.sentinel-val.white{color:#e2e8f0}.sentinel-val.dim{color:#475569}
+
+.sentinel-grid{display:grid;grid-template-columns:20fr 55fr 25fr;gap:8px;height:calc(100vh - 140px);min-height:500px}
+.sentinel-col{display:flex;flex-direction:column;gap:8px;overflow:hidden}
+.sentinel-panel{background:#0a0a0f;border:1px solid #1a2a1a;border-radius:6px;padding:8px;flex:1;overflow:hidden;display:flex;flex-direction:column}
+.sentinel-panel-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:#1a6a3a;font-weight:700;margin-bottom:6px;font-family:'Cascadia Code',monospace;border-bottom:1px solid #1a2a1a;padding-bottom:4px}
+.sentinel-panel-body{flex:1;overflow-y:auto}
+.sentinel-panel-body::-webkit-scrollbar{width:3px}
+.sentinel-panel-body::-webkit-scrollbar-thumb{background:#1a3a1a}
+
+.sentinel-log-line{font-family:'Cascadia Code','Consolas',monospace;font-size:.65rem;padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid #0d0d14}
+.sentinel-log-line.err{color:#ef4444}.sentinel-log-line.warn{color:#f59e0b}.sentinel-log-line.info{color:#475569}.sentinel-log-line.debug{color:#2a2a3a}
+.sentinel-log-line .log-prefix{color:#1a4a2a;margin-right:4px}
+
+.sentinel-strat-table{width:100%;border-collapse:collapse;font-size:.67rem}
+.sentinel-strat-table th{color:#1a6a3a;font-size:.58rem;text-transform:uppercase;padding:3px 4px;border-bottom:1px solid #1a2a1a;font-weight:700;letter-spacing:.05em}
+.sentinel-strat-table td{padding:3px 4px;border-bottom:1px solid #0d0d14;color:#94a3b8}
+.sentinel-strat-table td.name{color:#e2e8f0;font-family:monospace}
+.sentinel-strat-table td.pnl-pos{color:#10b981;font-weight:700}
+.sentinel-strat-table td.pnl-neg{color:#ef4444;font-weight:700}
+.sentinel-strat-table .on-dot{color:#10b981}.sentinel-strat-table .off-dot{color:#374151}
+
+.mini-bar{display:inline-block;height:8px;border-radius:2px;min-width:2px;vertical-align:middle}
+
+.sentinel-pos{font-size:.65rem;font-family:monospace;padding:3px 0;border-bottom:1px solid #0d0d14;display:flex;align-items:center;gap:6px}
+.sentinel-pos .q{flex:1;color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sentinel-pos .bar-wrap{width:48px;flex-shrink:0}
+.pos-bar{height:8px;border-radius:2px}.pos-bar.yes{background:#10b981}.pos-bar.no{background:#ef4444}
+.sentinel-pos .side{font-weight:700;width:24px;flex-shrink:0}
+.sentinel-pos .side.yes{color:#10b981}.sentinel-pos .side.no{color:#ef4444}
+.sentinel-pos .basis{color:#64748b}
+
+.intel-row{display:flex;align-items:center;gap:6px;padding:2px 0;font-size:.65rem;border-bottom:1px solid #0d0d14}
+.intel-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.intel-dot.ok{background:#10b981;box-shadow:0 0 4px #10b981}.intel-dot.warn{background:#f59e0b}.intel-dot.err{background:#ef4444}.intel-dot.off{background:#374151}
+.intel-label{color:#e2e8f0;font-size:.65rem;flex:1}
+.intel-detail{color:#374151;font-size:.6rem}
+.intel-section-title{font-size:.58rem;color:#1a6a3a;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin:6px 0 2px;font-family:monospace}
+
+/* overview page fills full height, no max-width constraint */
+#tab-overview{max-width:none;padding:8px 12px}
 </style>
 </head>
 <body>
@@ -3171,110 +3220,169 @@ tr:hover td{background:var(--surface2)}
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
-<!-- TAB 1: OVERVIEW                                            -->
+<!-- TAB 1: OVERVIEW  (SENTINEL terminal layout)                -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <div class="page active" id="tab-overview">
 
-  <div style="display:flex;justify-content:flex-end;margin-bottom:14px;gap:8px">
-    <a id="poly-profile-link" href="https://polymarket.com/portfolio" target="_blank"
-       style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);color:var(--accent2);
-              padding:7px 14px;border-radius:8px;font-size:.72rem;font-weight:700;
-              text-decoration:none;border:1px solid var(--border);transition:background .15s"
-       onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background='var(--surface2)'">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-      Polymarket Profile
-    </a>
-    <a href="https://polymarket.com/portfolio" target="_blank" id="poly-portfolio-link"
-       style="display:inline-flex;align-items:center;gap:6px;background:var(--surface2);color:var(--green);
-              padding:7px 14px;border-radius:8px;font-size:.72rem;font-weight:700;
-              text-decoration:none;border:1px solid var(--border);transition:background .15s"
-       onmouseover="this.style.background='var(--border)'" onmouseout="this.style.background='var(--surface2)'">
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-      Portfolio
-    </a>
-  </div>
+  <!-- Hidden legacy elements kept for JS compatibility -->
+  <span id="total-value" style="display:none"></span>
+  <span id="total-pnl-sub" style="display:none"></span>
+  <span id="balance" style="display:none"></span>
+  <span id="win-rate" style="display:none"></span>
+  <span id="trades-per-hr" style="display:none"></span>
+  <span id="total-trades-sub" style="display:none"></span>
+  <span id="realized-pnl" style="display:none"></span>
+  <span id="realized-pnl-pct" style="display:none"></span>
+  <span id="closed-count" style="display:none">0</span>
+  <span id="pos-count" style="display:none"></span>
+  <span id="exposure-sub" style="display:none"></span>
+  <span id="fees" style="display:none"></span>
+  <span id="live-cycle" style="display:none"></span>
+  <span id="live-uptime-sub" style="display:none"></span>
+  <canvas id="pnlChart" style="display:none"></canvas>
+  <canvas id="stratChart" style="display:none"></canvas>
+  <div id="strat-bars" style="display:none"></div>
+  <div id="timer-meta" style="display:none"></div>
+  <div id="timer-meta-sub" style="display:none"></div>
+  <div id="timer-research" style="display:none"></div>
+  <div id="timer-research-sub" style="display:none"></div>
+  <div id="timer-review" style="display:none"></div>
+  <div id="timer-review-sub" style="display:none"></div>
+  <a id="poly-profile-link" href="https://polymarket.com/portfolio" target="_blank" style="display:none"></a>
+  <a id="poly-portfolio-link" href="https://polymarket.com/portfolio" target="_blank" style="display:none"></a>
 
-  <!-- Top 4 metric cards -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px">
-    <div class="card card-pnl">
-      <div class="lbl">Total P&amp;L</div>
-      <div class="val" id="total-value" style="font-size:1.6rem">--</div>
-      <div class="sub" id="total-pnl-sub">--</div>
+  <!-- TOP STAT BAR -->
+  <div class="sentinel-bar">
+    <div class="row1">
+      <span style="color:#06b6d4;font-weight:700;font-family:monospace">&#9672; BOT B</span>
+      <span class="sep">&#x2502;</span>
+      <span id="ov-mode-badge2" style="font-weight:700"></span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">HEALTH</span><span id="ov-health" class="sentinel-val white">?</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">BAL</span><span id="ov-bal" class="sentinel-val cyan">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">VALUE</span><span id="ov-value" class="sentinel-val white">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">PNL</span><span id="ov-pnl2" class="sentinel-val">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">REALIZED</span><span id="ov-rpnl" class="sentinel-val">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">DD</span><span id="ov-dd" class="sentinel-val">--</span>
+      <span class="sep">&#x2502;</span>
+      <span id="ov-sync" style="color:#10b981;font-weight:700">&#9672; NET SYNC</span>
     </div>
-    <div class="card card-balance">
-      <div class="lbl">Cash Balance</div>
-      <div class="val blue" id="balance" style="font-size:1.6rem">--</div>
-    </div>
-    <div class="card card-winrate">
-      <div class="lbl">Win Rate</div>
-      <div class="val" id="win-rate" style="font-size:1.6rem">--</div>
-      <div class="sub">closed positions</div>
-    </div>
-    <div class="card card-trades">
-      <div class="lbl">Trades Today</div>
-      <div class="val purple" id="trades-per-hr" style="font-size:1.6rem">--</div>
-      <div class="sub" id="total-trades-sub">-- total</div>
-    </div>
-  </div>
-
-  <!-- Second row: realized P&L, positions, exposure, fees -->
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px">
-    <div class="card">
-      <div class="lbl">Realized P&amp;L</div>
-      <div class="val" id="realized-pnl">--</div>
-      <div class="sub" id="realized-pnl-pct">-- | <span id="closed-count">0</span> closed</div>
-    </div>
-    <div class="card">
-      <div class="lbl">Open Positions</div>
-      <div class="val yellow" id="pos-count">--</div>
-      <div class="sub" id="exposure-sub">--</div>
-    </div>
-    <div class="card">
-      <div class="lbl">Fees Paid</div>
-      <div class="val red" id="fees">--</div>
-    </div>
-    <div class="card">
-      <div class="lbl">Cycle Count</div>
-      <div class="val blue" id="live-cycle">--</div>
-      <div class="sub" id="live-uptime-sub">--</div>
-    </div>
-  </div>
-
-  <!-- Charts -->
-  <div class="chart-grid">
-    <div class="chart-box">
-      <h3>Portfolio Value Over Time</h3>
-      <canvas id="pnlChart"></canvas>
-    </div>
-    <div class="chart-box">
-      <h3>Trades Per Strategy</h3>
-      <canvas id="stratChart"></canvas>
+    <div class="row2">
+      <span class="sentinel-label">TRADES</span><span id="ov-trades2" class="sentinel-val dim">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">OPEN</span><span id="ov-open-pos" class="sentinel-val cyan">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">CLOSED</span><span id="ov-closed-pos" class="sentinel-val dim">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">WIN</span><span id="ov-wr2" class="sentinel-val">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">EXP</span><span id="ov-exp" class="sentinel-val">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">FEES</span><span id="ov-fees" class="sentinel-val dim">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">TPH</span><span id="ov-tph" class="sentinel-val dim">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">CYCLES</span><span id="ov-cycles" class="sentinel-val dim">--</span>
+      <span class="sep">&#x2502;</span>
+      <span class="sentinel-label">UP</span><span id="ov-uptime2" class="sentinel-val dim">--</span>
+      <span class="sep">&#x2502;</span>
+      <span id="ov-last-update2" class="sentinel-val dim">--</span>
     </div>
   </div>
 
-  <!-- Strategy P&L bars -->
-  <div class="section">
-    <h3>Strategy P&amp;L</h3>
-    <div class="strat-bars" id="strat-bars"><div class="no-data">Waiting for trades...</div></div>
-  </div>
+  <!-- 3-COLUMN SENTINEL GRID -->
+  <div class="sentinel-grid">
 
-  <!-- Agent countdown timers -->
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px">
-    <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--card-radius);padding:14px">
-      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);font-weight:700;margin-bottom:5px">Meta-Agent</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:monospace;color:var(--text)" id="timer-meta">--</div>
-      <div style="font-size:.62rem;color:var(--muted);margin-top:3px" id="timer-meta-sub">last run --</div>
+    <!-- LEFT: Events Log -->
+    <div class="sentinel-col">
+      <div class="sentinel-panel" style="flex:1">
+        <div class="sentinel-panel-title">&#9672; EVENTS</div>
+        <div class="sentinel-panel-body" id="ov-log-feed"></div>
+      </div>
     </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--accent2);border-radius:var(--card-radius);padding:14px">
-      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent2);font-weight:700;margin-bottom:5px">Research Agent</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:monospace;color:var(--text)" id="timer-research">--</div>
-      <div style="font-size:.62rem;color:var(--muted);margin-top:3px" id="timer-research-sub">last run --</div>
+
+    <!-- CENTER: Strategies + Chart + Meta -->
+    <div class="sentinel-col">
+      <!-- Compact stats grid -->
+      <div class="sentinel-panel" style="flex:0;padding:8px 10px">
+        <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;text-align:center;font-family:monospace">
+          <div><div style="font-size:1.1rem;font-weight:700;color:#06b6d4" id="ov-s-bal">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">Balance</div></div>
+          <div><div style="font-size:1.1rem;font-weight:700" id="ov-s-pnl">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">P&amp;L</div></div>
+          <div><div style="font-size:1.1rem;font-weight:700" id="ov-s-wr">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">Win Rate</div></div>
+          <div><div style="font-size:1.1rem;font-weight:700;color:#a78bfa" id="ov-s-dd">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">Drawdown</div></div>
+          <div><div style="font-size:1.1rem;font-weight:700;color:#64748b" id="ov-s-fees">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">Fees</div></div>
+          <div><div style="font-size:1.1rem;font-weight:700;color:#06b6d4" id="ov-s-pos">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">Open Pos</div></div>
+        </div>
+      </div>
+
+      <!-- Strategies table -->
+      <div class="sentinel-panel" style="flex:2">
+        <div class="sentinel-panel-title">&#9672; STRATEGIES</div>
+        <div class="sentinel-panel-body">
+          <table class="sentinel-strat-table">
+            <thead><tr>
+              <th>STRATEGY</th><th>TRD</th><th>WIN%</th><th>P&amp;L</th><th>CONTRIB</th><th>&#9679;</th>
+            </tr></thead>
+            <tbody id="ov-strat-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- P&L Chart -->
+      <div class="sentinel-panel" style="flex:2">
+        <div class="sentinel-panel-title">&#9672; P&amp;L CHART</div>
+        <div class="sentinel-panel-body" style="position:relative">
+          <canvas id="ov-pnl-chart" style="width:100%;height:130px"></canvas>
+          <div id="ov-chart-label" style="position:absolute;bottom:4px;right:8px;font-family:monospace;font-size:.7rem;color:#10b981"></div>
+        </div>
+      </div>
+
+      <!-- Meta-agent + timers -->
+      <div class="sentinel-panel" style="flex:0;padding:6px 10px">
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-family:monospace;font-size:.65rem">
+          <span style="color:#1a6a3a;font-weight:700">META-AGENT</span>
+          <span id="ov-meta-status">--</span>
+          <span style="color:#374151">&#x2502;</span>
+          <span style="color:#374151">RESEARCH</span> <span id="ov-research-timer" style="color:#475569">--</span>
+          <span style="color:#374151">&#x2502;</span>
+          <span style="color:#374151">CODE-REVIEW</span> <span id="ov-cr-timer" style="color:#475569">--</span>
+          <span style="color:#374151">&#x2502;</span>
+          <span id="ov-disk-info" style="color:#374151">--</span>
+        </div>
+      </div>
     </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--yellow);border-radius:var(--card-radius);padding:14px">
-      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--yellow);font-weight:700;margin-bottom:5px">Code Review</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:monospace;color:var(--text)" id="timer-review">--</div>
-      <div style="font-size:.62rem;color:var(--muted);margin-top:3px" id="timer-review-sub">last run --</div>
+
+    <!-- RIGHT: Positions + Intel -->
+    <div class="sentinel-col">
+      <!-- Open positions -->
+      <div class="sentinel-panel" style="flex:2">
+        <div class="sentinel-panel-title">&#9672; POSITIONS</div>
+        <div class="sentinel-panel-body" id="ov-positions-panel">
+          <div style="color:#374151;font-size:.65rem;padding:8px 0">No open positions</div>
+        </div>
+      </div>
+
+      <!-- Connections + Keys + AI Intel -->
+      <div class="sentinel-panel" style="flex:3">
+        <div class="sentinel-panel-title">&#9672; INTEL</div>
+        <div class="sentinel-panel-body">
+          <div class="intel-section-title">CONNECTIONS</div>
+          <div id="ov-connections"></div>
+          <div class="intel-section-title" style="margin-top:6px">API KEYS</div>
+          <div id="ov-apikeys"></div>
+          <div class="intel-section-title" style="margin-top:6px">AI INTEL</div>
+          <div id="ov-ai-intel"></div>
+          <div class="intel-section-title" style="margin-top:6px">RISK FLAGS</div>
+          <div id="ov-risk-flags"><span style="color:#374151;font-size:.65rem">None</span></div>
+        </div>
+      </div>
     </div>
+
   </div>
 </div>
 
@@ -4550,6 +4658,7 @@ async function fetchAll(){
       fetch('/api/strategy_trades').then(r=>r.json()),
     ]);
     updateStatus(status);
+    updateSentinelStatus(status);
     updatePnlChart(pnlH);
     updateStratPnl(stratPnl);
     updateStratChart(stratTrades);
@@ -4563,6 +4672,7 @@ async function fetchAll(){
     }
     if(currentTab==='trades'){const d=await fetch('/api/trades').then(r=>r.json());updateTrades(d,status);}
     if(currentTab==='meta'){fetchMeta();}
+    if(currentTab==='overview'){_fetchSentinelExtras();}
 
     $('last-update').textContent='Updated: '+new Date().toLocaleTimeString();
   }catch(e){$('last-update').textContent='Connection error...';}
@@ -4777,6 +4887,9 @@ async function fetchSystemStatus(){
 }
 
 function renderSystemStatus(d){
+  // Update sentinel overview intel panel whenever system data arrives
+  try{updateSentinelSystem(d);}catch(e){console.error('updateSentinelSystem error',e);}
+
   // Mode badge in header
   const modeBadge=$('mode-badge');
   modeBadge.textContent=d.mode||'PAPER';
@@ -6706,6 +6819,240 @@ function loadSportsLive(){
 
   }).catch(e=>console.error('sports live error',e));
 }
+
+// ─── SENTINEL Overview Functions ──────────────────────────────────────────────
+
+function _ovSetText(id,val){const el=document.getElementById(id);if(el)el.textContent=val;}
+function _ovFmt(n){return n>=1000?(n/1000).toFixed(1)+'k':n.toFixed(2);}
+
+function updateSentinelStatus(d){
+  const pnl=d.pnl||0,rpnl=d.realized_pnl||0;
+  const pnlPct=d.pnl_pct||0,rpct=d.realized_pnl_pct||0;
+  const paper=d.paper_trading;
+  const dd=(window._sysData||{risk:{}}).risk&&(window._sysData.risk.drawdown_pct||0)||0;
+  const grade=(window._sysData||{risk:{}}).risk&&(window._sysData.risk.health_grade||'?')||'?';
+
+  const mb=document.getElementById('ov-mode-badge2');
+  if(mb){mb.textContent=paper?'\u25c8 PAPER':'\u25c8 LIVE';mb.style.color=paper?'#f59e0b':'#10b981';}
+
+  const gh=document.getElementById('ov-health');
+  if(gh){gh.textContent='['+grade+']';gh.className='sentinel-val '+(grade==='A'||grade==='B'?'green':grade==='C'||grade==='D'?'yellow':'red');}
+
+  _ovSetText('ov-bal','$'+_ovFmt(d.balance||0));
+  const bel=document.getElementById('ov-bal');if(bel)bel.className='sentinel-val cyan';
+  _ovSetText('ov-value','$'+_ovFmt(d.total_value||d.balance||0));
+
+  const pe=document.getElementById('ov-pnl2');
+  if(pe){const s=pnl>=0?'+':'';pe.textContent=s+'$'+_ovFmt(Math.abs(pnl))+' ('+s+pnlPct.toFixed(1)+'%)';pe.className='sentinel-val '+(pnl>=0?'green':'red');}
+
+  const re=document.getElementById('ov-rpnl');
+  if(re){const s=rpnl>=0?'+':'';re.textContent=s+'$'+_ovFmt(Math.abs(rpnl))+' ('+s+rpct.toFixed(1)+'%)';re.className='sentinel-val '+(rpnl>=0?'green':'red');}
+
+  const de=document.getElementById('ov-dd');
+  if(de){de.textContent=dd.toFixed(1)+'%';de.className='sentinel-val '+(dd<5?'green':dd<10?'yellow':'red');}
+
+  _ovSetText('ov-trades2',d.total_trades||0);
+  _ovSetText('ov-open-pos',d.open_positions||0);
+  _ovSetText('ov-closed-pos',d.closed_positions||0);
+
+  const we=document.getElementById('ov-wr2');
+  if(we){const wr=d.win_rate||0;we.textContent=wr.toFixed(1)+'%';we.className='sentinel-val '+(wr>=60?'green':'yellow');}
+
+  const ee=document.getElementById('ov-exp');
+  if(ee){const ep=(window._sysData&&window._sysData.risk&&window._sysData.risk.exposure_pct)||0;ee.textContent='$'+_ovFmt(d.exposure||0)+' ('+ep.toFixed(0)+'%)';ee.className='sentinel-val '+(d.exposure>3000?'yellow':'dim');}
+
+  _ovSetText('ov-fees','$'+(d.fees_paid||0).toFixed(2));
+  _ovSetText('ov-tph',(d.trades_per_hour||0).toFixed(1));
+  _ovSetText('ov-cycles',d.cycle_count||0);
+  _ovSetText('ov-uptime2',d.uptime||'--');
+  _ovSetText('ov-last-update2',new Date().toLocaleTimeString());
+
+  _ovSetText('ov-s-bal','$'+_ovFmt(d.balance||0));
+  const sp=document.getElementById('ov-s-pnl');
+  if(sp){const s=pnl>=0?'+':'';sp.textContent=s+'$'+_ovFmt(Math.abs(pnl));sp.style.color=pnl>=0?'#10b981':'#ef4444';}
+  const sw=document.getElementById('ov-s-wr');
+  if(sw){const wr=d.win_rate||0;sw.textContent=wr.toFixed(1)+'%';sw.style.color=wr>=60?'#10b981':'#f59e0b';}
+  const sd=document.getElementById('ov-s-dd');
+  if(sd){sd.textContent=dd.toFixed(1)+'%';sd.style.color=dd<5?'#10b981':dd<10?'#f59e0b':'#ef4444';}
+  _ovSetText('ov-s-fees','$'+(d.fees_paid||0).toFixed(2));
+  _ovSetText('ov-s-pos',d.open_positions||0);
+
+  const sy=document.getElementById('ov-sync');
+  if(sy){sy.textContent='\u25c8 NET SYNC';sy.style.color='#10b981';}
+}
+
+function updateSentinelSystem(sys){
+  window._sysData=sys;
+  const conns=sys.connections||{};
+  const keys=sys.api_keys||{};
+  const ai=sys.ai_research||{};
+  const risk=sys.risk||{};
+
+  const cc=document.getElementById('ov-connections');
+  if(cc){
+    cc.innerHTML=['polymarket','binance','kalshi'].map(function(k){
+      const c=conns[k]||{};const ok=c.status==='ok';const warn=c.status==='warn';
+      const cls=ok?'ok':warn?'warn':'err';
+      const lbl=k.charAt(0).toUpperCase()+k.slice(1);
+      return'<div class="intel-row"><div class="intel-dot '+cls+'"></div><span class="intel-label">'+lbl+'</span><span class="intel-detail">'+((c.detail||'').slice(0,22))+'</span></div>';
+    }).join('');
+  }
+
+  const kc=document.getElementById('ov-apikeys');
+  if(kc){
+    const pairs=[['anthropic','Anthropic'],['polymarket','Polymarket'],['kalshi_rsa','Kalshi RSA'],['perplexity','Perplexity'],['grok','Grok']];
+    kc.innerHTML=pairs.map(function(p){
+      const ok=!!keys[p[0]];
+      return'<div class="intel-row"><div class="intel-dot '+(ok?'ok':'off')+'"></div><span class="intel-label">'+p[1]+'</span><span style="color:'+(ok?'#10b981':'#374151')+';font-size:.6rem">'+(ok?'\u2713':'\u2717')+'</span></div>';
+    }).join('');
+  }
+
+  const ac=document.getElementById('ov-ai-intel');
+  if(ac){
+    ac.innerHTML=['perplexity','grok','mirofish'].map(function(k){
+      const a=ai[k]||{};const ok=!!a.configured;
+      const lbl=(a.label||k).slice(0,14);
+      return'<div class="intel-row"><div class="intel-dot '+(ok?'ok':'off')+'"></div><span class="intel-label">'+lbl+'</span><span style="color:'+(ok?'#10b981':'#374151')+';font-size:.6rem">'+(ok?'active':'offline')+'</span></div>';
+    }).join('');
+  }
+
+  const rf=document.getElementById('ov-risk-flags');
+  if(rf){
+    const flags=risk.flags||[];
+    rf.innerHTML=flags.length?flags.slice(0,5).map(function(f){return'<div style="color:#f59e0b;font-size:.63rem;padding:1px 0">\u2691 '+f.slice(0,40)+'</div>';}).join(''):'<span style="color:#374151;font-size:.65rem">None</span>';
+  }
+
+  const ma=sys.meta_agent||{};
+  const ms=document.getElementById('ov-meta-status');
+  if(ms){
+    const ago=ma.last_run_ago_minutes;
+    const enabled=ma.enabled;
+    const agoStr=ago!=null?Math.round(ago)+'min ago':'never';
+    ms.innerHTML='<span style="color:'+(enabled?'#10b981':'#374151')+'">'+(enabled?'\u25cf ACTIVE':'\u25cb DISABLED')+'</span> <span style="color:#374151">last '+agoStr+' \u00b7 every '+(ma.interval_minutes||30)+'min</span>';
+  }
+
+  const disk=sys.disk||{};
+  _ovSetText('ov-disk-info','DISK '+(disk.log_files_mb||0).toFixed(1)+'MB / '+(disk.log_files_count||0)+' files');
+}
+
+function updateSentinelStrategyTable(stratPnlMap,stratTradesMap,systemStrats,analyticsData){
+  const tbody=document.getElementById('ov-strat-tbody');
+  if(!tbody)return;
+  const sysS=systemStrats||{};
+  const sPnl=stratPnlMap||{};
+  const sTrd=stratTradesMap||{};
+  const sRoi=(analyticsData||{}).strategy_roi||{};
+  const sWr=(analyticsData||{}).strategy_win_rates||{};
+  const names=Object.keys(sysS).length?Object.keys(sysS):Object.keys(sPnl);
+  const maxPnl=Math.max.apply(null,names.map(function(n){return Math.abs(sPnl[n]||0);}).concat([1]));
+  tbody.innerHTML=names.slice(0,12).map(function(name){
+    const cfg=sysS[name]||{};
+    const enabled=cfg.enabled!==false;
+    const pnl=sPnl[name]||0;
+    const trd=sTrd[name]||0;
+    const wr=sWr[name]||0;
+    const pnlCls=pnl>=0?'pnl-pos':'pnl-neg';
+    const pnlStr=(pnl>=0?'+':'')+('$'+Math.abs(pnl).toFixed(2));
+    const barW=Math.round((Math.abs(pnl)/maxPnl)*60);
+    const barCol=pnl>=0?'#10b981':'#ef4444';
+    const short=name.replace(/_/g,' ').toUpperCase().slice(0,16);
+    return'<tr><td class="name">'+short+'</td><td>'+(trd||'\u2014')+'</td><td style="color:'+(wr>=60?'#10b981':wr>0?'#f59e0b':'#374151')+'">'+(wr?wr.toFixed(0)+'%':'\u2014')+'</td><td class="'+pnlCls+'">'+pnlStr+'</td><td><div class="mini-bar" style="width:'+barW+'px;background:'+barCol+'"></div></td><td class="'+(enabled?'on-dot':'off-dot')+'">'+(enabled?'ON':'off')+'</td></tr>';
+  }).join('');
+}
+
+function updateSentinelPositions(positions){
+  const panel=document.getElementById('ov-positions-panel');
+  if(!panel)return;
+  if(!positions||!positions.length){panel.innerHTML='<div style="color:#374151;font-size:.65rem;padding:8px 0">No open positions</div>';return;}
+  const maxC=Math.max.apply(null,positions.map(function(p){return p.contracts||0;}).concat([1]));
+  panel.innerHTML=positions.slice(0,14).map(function(p){
+    const q=(p.question||'Unknown').slice(0,22);
+    const outcome=(p.outcome||'YES').toUpperCase();
+    const isLong=outcome==='YES';
+    const barW=Math.max(2,Math.round(((p.contracts||0)/maxC)*44));
+    const days=p.end_date_iso?Math.max(0,Math.round((new Date(p.end_date_iso)-Date.now())/86400000))+'d':'?';
+    return'<div class="sentinel-pos"><span class="q" title="'+(p.question||'')+'">'+q+'</span><div class="bar-wrap"><div class="pos-bar '+(isLong?'yes':'no')+'" style="width:'+barW+'px"></div></div><span class="side '+(isLong?'yes':'no')+'">'+outcome+'</span><span class="basis">$'+(p.cost_basis||0).toFixed(0)+' '+days+'</span></div>';
+  }).join('')+(positions.length>14?'<div style="color:#374151;font-size:.6rem;padding:4px 0">\u2026+'+(positions.length-14)+' more</div>':'');
+}
+
+function updateSentinelLog(logs){
+  const feed=document.getElementById('ov-log-feed');
+  if(!feed)return;
+  if(!logs||!logs.length)return;
+  feed.innerHTML=logs.slice(-40).map(function(entry){
+    const lvl=(entry.level||'INFO').toUpperCase();
+    const msg=entry.message||String(entry);
+    const cls=lvl==='ERROR'?'err':lvl==='WARNING'?'warn':lvl==='DEBUG'?'debug':'info';
+    const prefix=lvl==='ERROR'?'\u2717':lvl==='WARNING'?'\u26a0':'\u00b7';
+    return'<div class="sentinel-log-line '+cls+'"><span class="log-prefix">'+prefix+'</span>'+msg.slice(0,70)+'</div>';
+  }).join('');
+  feed.scrollTop=feed.scrollHeight;
+}
+
+function updateSentinelTimers(timers){
+  const fmtS=function(s){if(s==null)return'never';const n=Math.round(s);if(n<=0)return'now';const h=Math.floor(n/3600),m=Math.floor((n%3600)/60),sc=n%60;return h?h+'h '+m+'m':m?m+'m '+sc+'s':sc+'s';};
+  const rt=(timers.research||{}).next_in_secs;
+  const ct=(timers.code_review||{}).next_in_secs;
+  _ovSetText('ov-research-timer','next '+fmtS(rt));
+  _ovSetText('ov-cr-timer','next '+fmtS(ct));
+}
+
+function drawSentinelChart(history){
+  const canvas=document.getElementById('ov-pnl-chart');
+  if(!canvas)return;
+  const values=(history||[]).map(function(h){return h.pnl||0;}).filter(function(v){return!isNaN(v);});
+  if(values.length<2)return;
+  const dpr=window.devicePixelRatio||1;
+  const W=canvas.offsetWidth||400;
+  const H=130;
+  canvas.width=W*dpr;canvas.height=H*dpr;
+  canvas.style.width=W+'px';canvas.style.height=H+'px';
+  const ctx=canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+  const mn=Math.min.apply(null,values),mx=Math.max.apply(null,values);
+  const rng=Math.max(mx-mn,0.01);
+  const isUp=values[values.length-1]>=values[0];
+  const col=isUp?'#10b981':'#ef4444';
+  const toX=function(i){return(i/(values.length-1))*(W-20)+10;};
+  const toY=function(v){return H-10-((v-mn)/rng)*(H-20);};
+  ctx.beginPath();ctx.moveTo(toX(0),H-10);
+  values.forEach(function(v,i){ctx.lineTo(toX(i),toY(v));});
+  ctx.lineTo(toX(values.length-1),H-10);ctx.closePath();
+  const grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,isUp?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)');
+  grad.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=grad;ctx.fill();
+  ctx.beginPath();
+  values.forEach(function(v,i){i===0?ctx.moveTo(toX(i),toY(v)):ctx.lineTo(toX(i),toY(v));});
+  ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.stroke();
+  if(mn<0&&mx>0){
+    const zy=toY(0);
+    ctx.beginPath();ctx.moveTo(10,zy);ctx.lineTo(W-10,zy);
+    ctx.strokeStyle='#1a3a1a';ctx.lineWidth=0.5;ctx.setLineDash([3,3]);ctx.stroke();ctx.setLineDash([]);
+  }
+  const cur=values[values.length-1];
+  const lbl=document.getElementById('ov-chart-label');
+  if(lbl){const s=cur>=0?'+':'';lbl.textContent=s+'$'+cur.toFixed(2);lbl.style.color=col;}
+}
+
+function _fetchSentinelExtras(){
+  Promise.all([
+    fetch('/api/strategy_pnl').then(function(r){return r.json();}).catch(function(){return{};}),
+    fetch('/api/strategy_trades').then(function(r){return r.json();}).catch(function(){return{};}),
+    fetch('/api/analytics').then(function(r){return r.json();}).catch(function(){return{};}),
+    fetch('/api/system').then(function(r){return r.json();}).catch(function(){return{};})
+  ]).then(function(results){
+    updateSentinelStrategyTable(results[0],results[1],results[3].strategies,results[2]);
+    updateSentinelSystem(results[3]);
+  });
+  fetch('/api/positions').then(function(r){return r.json();}).then(updateSentinelPositions).catch(function(){});
+  fetch('/api/logs?limit=50').then(function(r){return r.json();}).then(updateSentinelLog).catch(function(){});
+  fetch('/api/pnl_history').then(function(r){return r.json();}).then(drawSentinelChart).catch(function(){});
+  fetch('/api/agent_timers').then(function(r){return r.json();}).then(updateSentinelTimers).catch(function(){});
+}
+
+// ─── End SENTINEL Overview Functions ──────────────────────────────────────────
 
 fetchAll();
 setInterval(fetchAll,3000);
