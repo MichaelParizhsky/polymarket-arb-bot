@@ -3155,7 +3155,7 @@ tr:hover td{background:var(--surface2)}
 .sentinel-val{font-weight:700}
 .sentinel-val.green{color:#10b981}.sentinel-val.red{color:#ef4444}.sentinel-val.cyan{color:#06b6d4}.sentinel-val.yellow{color:#f59e0b}.sentinel-val.white{color:#e2e8f0}.sentinel-val.dim{color:#475569}
 
-.sentinel-grid{display:grid;grid-template-columns:20fr 55fr 25fr;gap:8px;height:calc(100vh - 140px);min-height:500px}
+.sentinel-grid{display:grid;grid-template-columns:20fr 55fr 25fr;gap:8px;height:calc(100vh - 210px);min-height:500px}
 .sentinel-col{display:flex;flex-direction:column;gap:8px;overflow:hidden}
 .sentinel-panel{background:#0a0a0f;border:1px solid #1a2a1a;border-radius:6px;padding:8px;flex:1;overflow:hidden;display:flex;flex-direction:column}
 .sentinel-panel-title{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:#1a6a3a;font-weight:700;margin-bottom:6px;font-family:'Cascadia Code',monospace;border-bottom:1px solid #1a2a1a;padding-bottom:4px}
@@ -3302,7 +3302,7 @@ tr:hover td{background:var(--surface2)}
     <!-- CENTER: Strategies + Chart + Meta -->
     <div class="sentinel-col">
       <!-- Compact stats grid -->
-      <div class="sentinel-panel" style="flex:0;padding:8px 10px">
+      <div class="sentinel-panel" style="flex:0 0 auto;padding:8px 10px">
         <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;text-align:center;font-family:monospace">
           <div><div style="font-size:1.1rem;font-weight:700;color:#06b6d4" id="ov-s-bal">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">Balance</div></div>
           <div><div style="font-size:1.1rem;font-weight:700" id="ov-s-pnl">--</div><div style="font-size:.55rem;color:#1a6a3a;text-transform:uppercase">P&amp;L</div></div>
@@ -3336,7 +3336,7 @@ tr:hover td{background:var(--surface2)}
       </div>
 
       <!-- Meta-agent + timers -->
-      <div class="sentinel-panel" style="flex:0;padding:6px 10px">
+      <div class="sentinel-panel" style="flex:0 0 auto;padding:6px 10px">
         <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-family:monospace;font-size:.65rem">
           <span style="color:#1a6a3a;font-weight:700">META-AGENT</span>
           <span id="ov-meta-status">--</span>
