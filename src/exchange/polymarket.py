@@ -230,6 +230,29 @@ class PolymarketClient:
             logger.warning(f"get_trade_history failed: {exc}")
             return []
 
+    async def get_live_positions(self) -> list[dict]:
+        """Fetch open positions from Polymarket Data API. No auth required.
+
+        Returns list of dicts with keys: asset (token_id), title, outcome,
+        size, avgPrice, curPrice, initialValue, currentValue, cashPnl,
+        percentPnl, endDate, redeemable.
+        Falls back to [] on failure.
+        """
+        address = self.config.funder_address
+        if not address or not self._http:
+            return []
+        try:
+            resp = await self._http.get(
+                "https://data-api.polymarket.com/positions",
+                params={"user": address, "sizeThreshold": "0.01"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            logger.warning(f"get_live_positions failed: {exc}")
+            return []
+
     # ------------------------------------------------------------------ #
     #  Market data                                                          #
     # ------------------------------------------------------------------ #

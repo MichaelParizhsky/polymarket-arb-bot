@@ -59,6 +59,13 @@ _portfolio_lock = _threading.RLock()
 _market_status: dict[str, dict] = {}
 _market_status_lock = _threading.Lock()
 
+# Live account cache: populated from Polymarket Data API in live mode.
+# Keys: usdc_balance, positions (list of Data API dicts), total_position_value,
+#       unrealized_pnl, refreshed_at.
+# Empty dict = not yet populated (bot starting up or paper mode).
+_live_account: dict = {}
+_live_account_lock = _threading.Lock()
+
 
 def update_market_status(token_id: str, active: bool, closed: bool, end_date_iso: str, category: str = "") -> None:
     """Called by main.py to keep live market status for open positions."""
@@ -396,6 +403,21 @@ def register(portfolio, start_time: float, config=None, risk=None, binance=None,
     _ml_engine_ref = ml_engine
 
 
+def set_live_account(data: dict) -> None:
+    """Push real Polymarket account data to the dashboard cache (thread-safe).
+
+    Called by main.py after each _sync_live_state(). data should contain:
+        usdc_balance         float  — real USDC from CLOB
+        positions            list   — raw Data API position dicts
+        total_position_value float  — sum of currentValue across positions
+        unrealized_pnl       float  — sum of cashPnl across positions
+        refreshed_at         float  — time.time() when data was fetched
+    """
+    with _live_account_lock:
+        _live_account.clear()
+        _live_account.update(data)
+
+
 @app.post("/api/reset")
 def reset_portfolio():
     """Reset the paper portfolio to starting balance.
@@ -481,48 +503,104 @@ def status():
     if not _portfolio:
         return {"status": "starting"}
     uptime = int(time.time() - _bot_start_time)
+    is_live = _config and not _config.paper_trading
+
     with _portfolio_lock:
         p = _portfolio
-        _mtm = getattr(p, "last_mtm_prices", None) or None
-        total_pnl = round(p.total_pnl(_mtm), 2)
-        realized = round(p.realized_closed_pnl(), 2)
         n_trades = len(p.trades)
-        balance = round(p.usdc_balance, 2)
-        starting_balance = round(p.starting_balance, 2)
-        total_value = round(p.total_value(_mtm), 2)
-        open_positions = len(p.positions)
         closed_positions = len(p.closed_positions)
-        exposure = round(p.exposure(), 2)
         fees_paid = round(p.total_fees_paid(), 2)
         win_rate = p.win_rate()
-        mtm_count = len(getattr(p, "last_mtm_prices", {}) or {})
+
     trades_per_hour = round(n_trades / max(uptime / 3600, 0.01), 1)
     fresh_start = (n_trades == 0 and uptime < 300)
-    return {
+
+    base = {
         "status": "running",
-        "paper_trading": _config.paper_trading if _config else True,
+        "paper_trading": not is_live,
         "polymarket_address": (_config.polymarket.funder_address if _config else ""),
-        "mtm_positions_priced": mtm_count,
         "uptime_seconds": uptime,
         "uptime": _fmt_uptime(uptime),
         "cycle_count": _cycle_count,
-        "balance": balance,
-        "starting_balance": starting_balance,
-        "total_value": total_value,
-        "pnl": total_pnl,
-        "pnl_pct": round((total_pnl / starting_balance) * 100, 3),
-        "realized_pnl": realized,
-        "realized_pnl_pct": round((realized / starting_balance) * 100, 3),
-        "open_positions": open_positions,
         "closed_positions": closed_positions,
         "total_trades": n_trades,
-        "exposure": exposure,
         "fees_paid": fees_paid,
         "win_rate": win_rate,
         "trades_per_hour": trades_per_hour,
         "fresh_start": fresh_start,
         "state_loaded_from_file": _state_loaded_from_file,
     }
+
+    if is_live:
+        # Live mode: pull all financial figures from Polymarket Data API cache.
+        with _live_account_lock:
+            la = dict(_live_account)
+
+        if la:
+            balance = round(la.get("usdc_balance", 0.0), 2)
+            total_pos_value = round(la.get("total_position_value", 0.0), 2)
+            total_value = round(balance + total_pos_value, 2)
+            unrealized_pnl = round(la.get("unrealized_pnl", 0.0), 2)
+            with _portfolio_lock:
+                realized_pnl = round(_portfolio.realized_closed_pnl(), 2)
+            total_pnl = round(unrealized_pnl + realized_pnl, 2)
+            open_positions = len(la.get("positions", []))
+            age_secs = round(time.time() - la.get("refreshed_at", time.time()), 0)
+            base.update({
+                "balance": balance,
+                "total_position_value": total_pos_value,
+                "total_value": total_value,
+                "pnl": total_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "realized_pnl": realized_pnl,
+                "open_positions": open_positions,
+                "exposure": total_pos_value,
+                "live_data_age_secs": age_secs,
+                "live_data_source": "polymarket_data_api",
+            })
+        else:
+            # Live data not yet fetched — show portfolio internal state with a warning
+            with _portfolio_lock:
+                p2 = _portfolio
+                _mtm = getattr(p2, "last_mtm_prices", None) or None
+                base.update({
+                    "balance": round(p2.usdc_balance, 2),
+                    "total_value": round(p2.total_value(_mtm), 2),
+                    "pnl": None,
+                    "unrealized_pnl": None,
+                    "realized_pnl": round(p2.realized_closed_pnl(), 2),
+                    "open_positions": len(p2.positions),
+                    "exposure": round(p2.exposure(), 2),
+                    "live_data_age_secs": None,
+                    "live_data_source": "internal_pending_sync",
+                })
+    else:
+        # Paper mode: use fully internal portfolio tracking
+        with _portfolio_lock:
+            p2 = _portfolio
+            _mtm = getattr(p2, "last_mtm_prices", None) or None
+            total_pnl = round(p2.total_pnl(_mtm), 2)
+            realized = round(p2.realized_closed_pnl(), 2)
+            balance = round(p2.usdc_balance, 2)
+            starting_balance = round(p2.starting_balance, 2)
+            total_value = round(p2.total_value(_mtm), 2)
+            open_positions = len(p2.positions)
+            exposure = round(p2.exposure(), 2)
+            mtm_count = len(getattr(p2, "last_mtm_prices", {}) or {})
+        base.update({
+            "balance": balance,
+            "starting_balance": starting_balance,
+            "total_value": total_value,
+            "pnl": total_pnl,
+            "pnl_pct": round((total_pnl / starting_balance) * 100, 3) if starting_balance else 0,
+            "realized_pnl": realized,
+            "realized_pnl_pct": round((realized / starting_balance) * 100, 3) if starting_balance else 0,
+            "open_positions": open_positions,
+            "exposure": exposure,
+            "mtm_positions_priced": mtm_count,
+        })
+
+    return base
 
 
 @app.get("/api/pnl_history")
@@ -538,6 +616,39 @@ def pnl_history():
 def positions():
     if not _portfolio:
         return []
+
+    is_live = _config and not _config.paper_trading
+
+    # In live mode: serve positions straight from the Polymarket Data API cache
+    # if it's populated and recent (< 120 s old).
+    if is_live:
+        with _live_account_lock:
+            la = dict(_live_account)
+        age = time.time() - la.get("refreshed_at", 0)
+        if la and age < 120:
+            result = []
+            for p in la.get("positions", []):
+                tid = str(p.get("asset", ""))
+                result.append({
+                    "token_id": tid[:16] + "..." if len(tid) > 16 else tid,
+                    "token_id_full": tid,
+                    "question": str(p.get("title", ""))[:70],
+                    "outcome": str(p.get("outcome", "")),
+                    "contracts": round(float(p.get("size", 0)), 4),
+                    "avg_cost": round(float(p.get("avgPrice", 0)), 4),
+                    "cur_price": round(float(p.get("curPrice", 0)), 4),
+                    "cost_basis": round(float(p.get("initialValue", 0)), 2),
+                    "current_value": round(float(p.get("currentValue", 0)), 2),
+                    "cash_pnl": round(float(p.get("cashPnl", 0)), 4),
+                    "percent_pnl": round(float(p.get("percentPnl", 0)), 2),
+                    "redeemable": bool(p.get("redeemable", False)),
+                    "end_date_iso": str(p.get("endDate", "")),
+                    "market_active": not bool(p.get("redeemable", False)),
+                    "data_source": "polymarket_data_api",
+                })
+            return result
+
+    # Paper mode (or live data not yet populated): use internal portfolio tracking
     with _portfolio_lock:
         items = list(_portfolio.positions.items())
     with _market_status_lock:

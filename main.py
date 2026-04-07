@@ -23,7 +23,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from config import CONFIG
-from src.dashboard.app import app as dashboard_app, register as dashboard_register, update_market_status as _dashboard_update_market_status
+from src.dashboard.app import app as dashboard_app, register as dashboard_register, update_market_status as _dashboard_update_market_status, set_live_account as _dashboard_set_live_account
 from src.exchange.polymarket import PolymarketClient
 from src.exchange.binance import BinanceFeed
 from src.portfolio.paper_trading import PaperPortfolio
@@ -466,18 +466,16 @@ class ArbBot:
                 await self._shutdown()
 
     async def _sync_live_state(self, poly: "PolymarketClient", startup: bool = False) -> None:
-        """Sync portfolio state from Polymarket API (live mode only).
+        """Sync live account state from Polymarket APIs.
 
-        Everything financial comes from Polymarket — no hardcoded starting balance.
-        PnL is computed as: realized_pnl_from_fills + unrealized_pnl_from_open_positions.
-
-        We derive starting_balance mathematically so that total_pnl() stays consistent:
-            starting_balance = usdc_balance + open_cost_basis - realized_pnl_from_fills
-        This means total_pnl() = total_value - starting_balance = realized + unrealized.
+        Fetches real USDC balance and open positions, then pushes them to the
+        dashboard cache so it shows authoritative Polymarket data instead of
+        internally-derived estimates.  Fill history is synced for trade-count
+        display only — PnL is computed directly from the Data API.
         """
-        from src.portfolio.paper_trading import Trade, Position
+        from src.portfolio.paper_trading import Trade
 
-        # 1. Real USDC balance from Polymarket
+        # 1. Real USDC balance (CLOB, requires auth)
         real_bal = await poly.get_usdc_balance()
         if real_bal is not None:
             self.portfolio.usdc_balance = real_bal
@@ -485,14 +483,33 @@ class ArbBot:
                 logger.info(f"[LIVE] Polymarket USDC balance: ${real_bal:.2f}")
         else:
             logger.warning("[LIVE] Could not fetch Polymarket balance — keeping last known value")
+            real_bal = self.portfolio.usdc_balance
 
-        # 2. Fill history → reconstruct trades, positions, and realized PnL
+        # 2. Open positions (Data API, no auth needed)
+        live_positions = await poly.get_live_positions()
+        total_position_value = sum(float(p.get("currentValue", 0)) for p in live_positions)
+        unrealized_pnl = sum(float(p.get("cashPnl", 0)) for p in live_positions)
+        if startup:
+            logger.info(
+                f"[LIVE] {len(live_positions)} open positions, "
+                f"value=${total_position_value:.2f}, unrealized_pnl=${unrealized_pnl:.2f}"
+            )
+
+        # Push real account data to the dashboard — it will display these values directly.
+        _dashboard_set_live_account({
+            "usdc_balance": real_bal,
+            "positions": live_positions,
+            "total_position_value": total_position_value,
+            "unrealized_pnl": unrealized_pnl,
+            "refreshed_at": time.time(),
+        })
+
+        # 3. Fill history — synced for trade-count display only (not for PnL).
+        # We do NOT reconstruct PnL from fills because:
+        #   - fill `side` is taker-perspective (inverted for maker orders)
+        #   - resolution payouts don't appear as CLOB fills
         fills = await poly.get_trade_history()
         if fills:
-            if startup:
-                logger.info(f"[LIVE] Fetched {len(fills)} fills from Polymarket")
-
-            # Append new fills to internal trade history (dedup by trade id)
             existing_ids = {t.trade_id for t in self.portfolio.trades}
             new_trades: list[Trade] = []
             for f in fills:
@@ -517,42 +534,17 @@ class ArbBot:
                 ))
             if new_trades:
                 self.portfolio.trades.extend(new_trades)
-                logger.info(f"[LIVE] Synced {len(new_trades)} new fills into trade history")
+                if startup:
+                    logger.info(f"[LIVE] Synced {len(new_trades)} fills into trade history")
 
-            # Fills are appended to trade history for trade-count display only.
-            # We do NOT reconstruct positions or compute PnL from fills because:
-            #   1. The `side` field in fills is from the TAKER's perspective — inverted for maker fills
-            #   2. Market resolution payouts don't appear as CLOB sell trades
-            # Both cause fill-based PnL to be wildly wrong (negative).
-            pass  # fills already synced above
-
-        # 3. Derive starting_balance so total_pnl() = realized + unrealized (no hardcoded preset).
-        #
-        # Proof: total_pnl = total_value - starting_balance
-        #                   = (usdc + position_mtm) - starting_balance
-        #        We want: total_pnl = realized_pnl + unrealized_pnl
-        #                           = realized + (position_mtm - open_cost_basis)
-        #        Therefore: starting_balance = usdc + open_cost_basis - realized_pnl
-        #
-        # Sources:
-        #   usdc_balance    → Polymarket API (real, already set above)
-        #   open_cost_basis → internal portfolio.exposure() (sum of pos.contracts × pos.avg_cost)
-        #   realized_pnl    → internal portfolio.realized_pnl() (bot-tracked buy/sell operations)
-        #
-        # NOT computed from fills: fill `side` is taker-perspective (inverted for maker orders)
-        # and resolution payouts never appear as CLOB sell trades — both corrupt fill-based PnL.
+        # 4. Keep starting_balance consistent for the risk manager's drawdown calculation.
+        #    starting_balance = usdc + open_cost_basis - internal_realized
+        #    This keeps total_pnl() = realized + unrealized within the portfolio object.
         open_cost_basis = self.portfolio.exposure()
         internal_realized = self.portfolio.realized_pnl()
         self.portfolio.starting_balance = (
             self.portfolio.usdc_balance + open_cost_basis - internal_realized
         )
-        if startup:
-            logger.info(
-                f"[LIVE] PnL basis — usdc: ${self.portfolio.usdc_balance:.2f}, "
-                f"open cost: ${open_cost_basis:.2f}, "
-                f"realized: ${internal_realized:.2f}, "
-                f"→ starting_balance: ${self.portfolio.starting_balance:.2f}"
-            )
 
         # 5. Clear any stale hard stop now that we have correct values
         if self.risk.is_hard_stopped():
