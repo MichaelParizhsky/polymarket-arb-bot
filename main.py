@@ -519,83 +519,42 @@ class ArbBot:
                 self.portfolio.trades.extend(new_trades)
                 logger.info(f"[LIVE] Synced {len(new_trades)} new fills into trade history")
 
-            # Aggregate fills per token: buy_contracts, buy_cost, sell_contracts, sell_proceeds
-            net: dict[str, dict] = {}
-            for f in fills:
-                asset_id = str(f.get("asset_id") or f.get("token_id") or "")
-                if not asset_id:
-                    continue
-                side = str(f.get("side") or "BUY").upper()
-                size = float(f.get("size") or f.get("size_matched") or 0.0)
-                price = float(f.get("price") or 0.0)
-                if asset_id not in net:
-                    net[asset_id] = {
-                        "buy_contracts": 0.0, "buy_cost": 0.0,
-                        "sell_contracts": 0.0, "sell_proceeds": 0.0,
-                    }
-                if side == "BUY":
-                    net[asset_id]["buy_contracts"] += size
-                    net[asset_id]["buy_cost"] += size * price
-                else:
-                    net[asset_id]["sell_contracts"] += size
-                    net[asset_id]["sell_proceeds"] += size * price
+            # Fills are appended to trade history for trade-count display only.
+            # We do NOT reconstruct positions or compute PnL from fills because:
+            #   1. The `side` field in fills is from the TAKER's perspective — inverted for maker fills
+            #   2. Market resolution payouts don't appear as CLOB sell trades
+            # Both cause fill-based PnL to be wildly wrong (negative).
+            pass  # fills already synced above
 
-            # Reconstruct open positions from net fills
-            for asset_id, data in net.items():
-                net_contracts = data["buy_contracts"] - data["sell_contracts"]
-                if net_contracts < 0.01:
-                    self.portfolio.positions.pop(asset_id, None)
-                    continue
-                avg_cost = (data["buy_cost"] / data["buy_contracts"]) if data["buy_contracts"] > 0 else 0.0
-                if asset_id in self.portfolio.positions:
-                    pos = self.portfolio.positions[asset_id]
-                    pos.contracts = net_contracts
-                    pos.avg_cost = avg_cost
-                else:
-                    self.portfolio.positions[asset_id] = Position(
-                        token_id=asset_id,
-                        market_question="",
-                        outcome="",
-                        contracts=net_contracts,
-                        avg_cost=avg_cost,
-                        strategy="polymarket_api",
-                    )
-
-            # Compute realized PnL from fills (avg-cost method, gross before fees)
-            # realized = sell_proceeds - (sold_qty / bought_qty) × total_buy_cost
-            total_realized_pnl = 0.0
-            for data in net.values():
-                buy_c = data["buy_contracts"]
-                sell_c = data["sell_contracts"]
-                if buy_c > 0 and sell_c > 0:
-                    avg_buy_price = data["buy_cost"] / buy_c
-                    realized_qty = min(sell_c, buy_c)
-                    total_realized_pnl += data["sell_proceeds"] - realized_qty * avg_buy_price
-
-            # Compute open position cost basis
-            open_cost_basis = sum(
-                pos.contracts * pos.avg_cost
-                for pos in self.portfolio.positions.values()
+        # 3. Derive starting_balance so total_pnl() = realized + unrealized (no hardcoded preset).
+        #
+        # Proof: total_pnl = total_value - starting_balance
+        #                   = (usdc + position_mtm) - starting_balance
+        #        We want: total_pnl = realized_pnl + unrealized_pnl
+        #                           = realized + (position_mtm - open_cost_basis)
+        #        Therefore: starting_balance = usdc + open_cost_basis - realized_pnl
+        #
+        # Sources:
+        #   usdc_balance    → Polymarket API (real, already set above)
+        #   open_cost_basis → internal portfolio.exposure() (sum of pos.contracts × pos.avg_cost)
+        #   realized_pnl    → internal portfolio.realized_pnl() (bot-tracked buy/sell operations)
+        #
+        # NOT computed from fills: fill `side` is taker-perspective (inverted for maker orders)
+        # and resolution payouts never appear as CLOB sell trades — both corrupt fill-based PnL.
+        open_cost_basis = self.portfolio.exposure()
+        internal_realized = self.portfolio.realized_pnl()
+        self.portfolio.starting_balance = (
+            self.portfolio.usdc_balance + open_cost_basis - internal_realized
+        )
+        if startup:
+            logger.info(
+                f"[LIVE] PnL basis — usdc: ${self.portfolio.usdc_balance:.2f}, "
+                f"open cost: ${open_cost_basis:.2f}, "
+                f"realized: ${internal_realized:.2f}, "
+                f"→ starting_balance: ${self.portfolio.starting_balance:.2f}"
             )
 
-            # Derive starting_balance so that total_pnl() = realized + unrealized.
-            # Math: total_pnl = total_value - starting_balance
-            #       total_value = usdc + position_mtm
-            #       unrealized = position_mtm - open_cost_basis
-            #       realized + unrealized = (usdc + position_mtm) - starting_balance
-            #       ∴ starting_balance = usdc + open_cost_basis - realized
-            self.portfolio.starting_balance = (
-                self.portfolio.usdc_balance + open_cost_basis - total_realized_pnl
-            )
-
-            if startup:
-                logger.info(
-                    f"[LIVE] PnL basis — realized: ${total_realized_pnl:.2f}, "
-                    f"open cost basis: ${open_cost_basis:.2f}, "
-                    f"implied starting: ${self.portfolio.starting_balance:.2f}"
-                )
-
-        # 3. Clear any stale hard stop now that we have correct values
+        # 5. Clear any stale hard stop now that we have correct values
         if self.risk.is_hard_stopped():
             _mtm = getattr(self.portfolio, "last_mtm_prices", None) or {}
             total = self.portfolio.total_value(_mtm if _mtm else None)
@@ -614,7 +573,7 @@ class ArbBot:
                     f">= {self.config.risk.max_drawdown_pct:.1%}"
                 )
 
-        # 4. Open limit orders (log at startup)
+        # 6. Open limit orders (log at startup)
         if startup:
             open_orders = await poly.get_open_orders()
             if open_orders:
