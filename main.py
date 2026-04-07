@@ -921,7 +921,7 @@ class ArbBot:
                 )
                 if result:
                     logger.info(f"[LIVE] Order {result.order_id} status={result.status} token={sig.token_id[:16]}")
-                if result and result.status in ("FILLED", "MATCHED", "LIVE"):
+                if result and result.status.lower() in ("filled", "matched", "live"):
                     mq, outcome, end_dt = self._find_market_info(sig.token_id, context)
                     fill_contracts = (
                         result.filled_size
