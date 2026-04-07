@@ -887,14 +887,16 @@ class ArbBot:
             trade = None
 
             if not self.paper and sig.side == "BUY":
-                # Live: place limit order and handle immediate FILLED result
+                # Live: place limit order and handle immediate FILLED/MATCHED result
                 result = await self.poly.place_limit_order(
                     token_id=sig.token_id,
                     side=sig.side,
                     price=_price,
                     size=contracts,
                 )
-                if result and result.status == "FILLED":
+                if result:
+                    logger.info(f"[LIVE] Order {result.order_id} status={result.status} token={sig.token_id[:16]}")
+                if result and result.status in ("FILLED", "MATCHED", "LIVE"):
                     mq, outcome, end_dt = self._find_market_info(sig.token_id, context)
                     fill_contracts = (
                         result.filled_size
