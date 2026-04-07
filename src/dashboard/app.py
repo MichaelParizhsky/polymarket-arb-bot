@@ -6808,7 +6808,7 @@ function updateSentinelLog(logs){
   if(!logs||!logs.length)return;
   feed.innerHTML=logs.slice(-40).map(function(entry){
     const lvl=(entry.level||'INFO').toUpperCase();
-    const msg=entry.message||String(entry);
+    const msg=entry.msg||entry.message||'';
     const cls=lvl==='ERROR'?'err':lvl==='WARNING'?'warn':lvl==='DEBUG'?'debug':'info';
     const prefix=lvl==='ERROR'?'\u2717':lvl==='WARNING'?'\u26a0':'\u00b7';
     return'<div class="sentinel-log-line '+cls+'"><span class="log-prefix">'+prefix+'</span>'+msg.slice(0,70)+'</div>';
