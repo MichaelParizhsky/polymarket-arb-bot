@@ -103,31 +103,32 @@ class ArbBot:
             bal = self.portfolio.usdc_balance
             n_trades = len(self.portfolio.trades)
             logger.info(f"State restored: balance=${bal:,.2f}, {n_trades} trades in history")
-            # Paper mode: if accumulated losses would immediately trigger a hard stop on the
-            # first trade check, reset the drawdown baseline so trading can continue.
+            # If accumulated losses would immediately trigger a hard stop on the first trade
+            # check, reset the drawdown baseline so trading can continue.
             # The drawdown check uses BOTH mtm drawdown AND realized_pnl drawdown.
             # Resetting starting_balance alone isn't enough — historical closed_positions
             # keep realized_pnl negative, so we zero those out too. Trade history is kept.
-            if self.config.paper_trading:
-                current_tv = self.portfolio.total_value()
-                if current_tv > 0:
-                    realized = self.portfolio.realized_pnl()
-                    realized_dd = max(0.0, -realized / self.portfolio.starting_balance)
-                    mtm_dd = max(0.0, (self.portfolio.starting_balance - current_tv) / self.portfolio.starting_balance)
-                    paper_drawdown = max(realized_dd, mtm_dd)
-                    if paper_drawdown >= self.config.risk.max_drawdown_pct:
-                        logger.warning(
-                            f"[Startup] Paper mode: drawdown {paper_drawdown:.1%} >= hard stop limit "
-                            f"{self.config.risk.max_drawdown_pct:.1%} (realized={realized_dd:.1%}, "
-                            f"mtm={mtm_dd:.1%}) — resetting drawdown baseline to allow trading. "
-                            f"starting_balance ${self.portfolio.starting_balance:.2f} → ${current_tv:.2f}. "
-                            f"Set PAPER_SKIP_BUDGETS=true to also bypass strategy loss budgets."
-                        )
-                        self.portfolio.starting_balance = current_tv
-                        for pos in self.portfolio.positions.values():
-                            pos.realized_pnl = 0.0
-                        for entry in self.portfolio.closed_positions:
-                            entry["realized_pnl"] = 0.0
+            # Applied in both paper and live mode: in live mode _sync_live_state runs shortly
+            # after startup and will update the balance to real Polymarket values anyway.
+            current_tv = self.portfolio.total_value()
+            if current_tv > 0:
+                realized = self.portfolio.realized_pnl()
+                realized_dd = max(0.0, -realized / self.portfolio.starting_balance) if self.portfolio.starting_balance > 0 else 0.0
+                mtm_dd = max(0.0, (self.portfolio.starting_balance - current_tv) / self.portfolio.starting_balance) if self.portfolio.starting_balance > 0 else 0.0
+                startup_drawdown = max(realized_dd, mtm_dd)
+                if startup_drawdown >= self.config.risk.max_drawdown_pct:
+                    mode = "Paper" if self.config.paper_trading else "Live"
+                    logger.warning(
+                        f"[Startup] {mode} mode: drawdown {startup_drawdown:.1%} >= hard stop limit "
+                        f"{self.config.risk.max_drawdown_pct:.1%} (realized={realized_dd:.1%}, "
+                        f"mtm={mtm_dd:.1%}) — resetting drawdown baseline to allow trading. "
+                        f"starting_balance ${self.portfolio.starting_balance:.2f} → ${current_tv:.2f}."
+                    )
+                    self.portfolio.starting_balance = current_tv
+                    for pos in self.portfolio.positions.values():
+                        pos.realized_pnl = 0.0
+                    for entry in self.portfolio.closed_positions:
+                        entry["realized_pnl"] = 0.0
         else:
             logger.warning(
                 "No portfolio_state.json found — starting fresh. "
@@ -507,11 +508,17 @@ class ArbBot:
         except (FileNotFoundError, ValueError):
             snapshots = []
 
-        # Seed from config starting_balance if no snapshots yet
+        # Seed from config starting_balance if no snapshots yet.
+        # Only use STARTING_BALANCE if it looks like an intentional live value (within 2x of
+        # current account).  If it's the paper-mode default (e.g. 10000) and the live account
+        # is only ~$97, use total_value instead to avoid inflating all-time PnL loss numbers.
         if not snapshots:
-            seed_balance = getattr(self.config, "starting_balance", None) or total_value
+            configured_seed = getattr(self.config, "starting_balance", 0.0) or 0.0
+            seed_balance = (
+                configured_seed if 0 < configured_seed <= total_value * 2 else total_value
+            )
             snapshots = [{"t": now_ts - 1, "v": float(seed_balance)}]
-            logger.info(f"[LIVE] Seeding PnL history with starting_balance=${seed_balance:.2f}")
+            logger.info(f"[LIVE] Seeding PnL history with ${seed_balance:.2f}")
 
         # Append current snapshot (deduplicate: skip if last snapshot < 4 min ago)
         if now_ts - snapshots[-1]["t"] >= 240:
@@ -586,32 +593,37 @@ class ArbBot:
                 if startup:
                     logger.info(f"[LIVE] Synced {len(new_trades)} fills into trade history")
 
-        # 4. Keep starting_balance consistent for the risk manager's drawdown calculation.
-        #    starting_balance = usdc + open_cost_basis - internal_realized
-        #    This keeps total_pnl() = realized + unrealized within the portfolio object.
-        open_cost_basis = self.portfolio.exposure()
-        internal_realized = self.portfolio.realized_pnl()
-        self.portfolio.starting_balance = (
-            self.portfolio.usdc_balance + open_cost_basis - internal_realized
+        # 4. Reset starting_balance to the current internal total so the risk manager
+        #    never shows false drawdown from stale internal state.  In live mode, PnL
+        #    is tracked authoratatively via snapshots (not internal portfolio math), so
+        #    we reset the reference point on every sync.  Any real drawdown within a
+        #    4-minute window will still be caught by check_trade().
+        internal_total = self.portfolio.total_value(
+            getattr(self.portfolio, "last_mtm_prices", None) or None
         )
+        self.portfolio.starting_balance = max(internal_total, 0.01)
 
-        # 5. Clear any stale hard stop now that we have correct values
+        # 5. Clear any stale hard stop using REAL Polymarket values (authoritative).
+        #    config.starting_balance may be the paper-mode default (10000) if STARTING_BALANCE
+        #    is not set on Railway — in that case it is much larger than total_value and should
+        #    not be used as the drawdown reference.  Use it only if it looks like an intentional
+        #    live starting balance (within 2x of current account value).
+        configured_sb = self.config.starting_balance
+        real_sb = configured_sb if 0 < configured_sb <= total_value * 2 else total_value
+        real_drawdown = max(0.0, (real_sb - total_value) / real_sb) if real_sb > 0 else 0.0
         if self.risk.is_hard_stopped():
-            _mtm = getattr(self.portfolio, "last_mtm_prices", None) or {}
-            total = self.portfolio.total_value(_mtm if _mtm else None)
-            sb = self.portfolio.starting_balance
-            real_drawdown = max(0.0, (sb - total) / sb) if sb > 0 else 0.0
             if real_drawdown < self.config.risk.max_drawdown_pct:
                 self.risk.reset_permanent_lock()
                 logger.warning(
                     f"[LIVE] Hard stop cleared — real drawdown {real_drawdown:.1%} "
                     f"< limit {self.config.risk.max_drawdown_pct:.1%} "
-                    f"(total value ${total:.2f})"
+                    f"(Polymarket total ${total_value:.2f}, ref ${real_sb:.2f})"
                 )
             else:
                 logger.critical(
-                    f"[LIVE] Hard stop remains — drawdown {real_drawdown:.1%} "
-                    f">= {self.config.risk.max_drawdown_pct:.1%}"
+                    f"[LIVE] Hard stop remains — real drawdown {real_drawdown:.1%} "
+                    f">= {self.config.risk.max_drawdown_pct:.1%} "
+                    f"(Polymarket total ${total_value:.2f}, ref ${real_sb:.2f})"
                 )
 
         # 6. Open limit orders (log at startup)
