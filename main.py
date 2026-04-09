@@ -25,6 +25,7 @@ from rich.panel import Panel
 from config import CONFIG
 from src.dashboard.app import app as dashboard_app, register as dashboard_register, update_market_status as _dashboard_update_market_status, set_live_account as _dashboard_set_live_account
 from src.exchange.polymarket import PolymarketClient
+from src.exchange.maker_router import AutoRedeemer
 from src.exchange.binance import BinanceFeed
 from src.portfolio.paper_trading import PaperPortfolio
 from src.risk.risk_manager import RiskManager
@@ -461,6 +462,11 @@ class ArbBot:
             _t3.add_done_callback(self._background_tasks.discard)
             _t4.add_done_callback(self._background_tasks.discard)
 
+            # Auto-redeem resolved positions (live mode only) — recycles USDC back to balance
+            if not self.paper:
+                self._auto_redeemer = AutoRedeemer(poly, poll_interval_s=60.0)
+                await self._auto_redeemer.start()
+
             try:
                 await self._main_loop()
             finally:
@@ -649,8 +655,8 @@ class ArbBot:
         summary_interval = 60   # save state every 60s (was 300s — reduces data loss on Railway redeploy)
 
         while self._running:
-            # Refresh real Polymarket state every 5 minutes in live mode
-            if not self.paper and (time.time() - last_balance_sync_at) > 300:
+            # Refresh real Polymarket state every 1 minute in live mode
+            if not self.paper and (time.time() - last_balance_sync_at) > 60:
                 await self._sync_live_state(self.poly)
                 last_balance_sync_at = time.time()
 
@@ -2064,6 +2070,8 @@ class ArbBot:
     async def _shutdown(self) -> None:
         """Graceful shutdown."""
         logger.info("Shutting down...")
+        if hasattr(self, "_auto_redeemer"):
+            await self._auto_redeemer.stop()
         await self.binance.stop()
         if self._ws_feed:
             await self._ws_feed.stop()
