@@ -1,4 +1,6 @@
 anthropic>=0.40.0
+git+https://github.com/Polymarket/py-builder-relayer-client.git
+git+https://github.com/Polymarket/py-builder-signing-sdk.git
 openai>=1.0.0
 sse-starlette>=1.8.0
 py-clob-client>=0.34.6
