@@ -912,6 +912,7 @@ def system_status():
         "futures_hedge":     "Binance futures hedge on crypto",
         "quick_resolution":  "High-conviction near-expiry entries",
         "crypto_5m":         "5m/15m dual-arb + Grok snipe",
+        "crypto_1h":         "1h candle snipe (end-of-hour momentum)",
         "swarm":             "MiroFish crowd simulation mispricing",
     }
     strategies = {}
@@ -2536,6 +2537,161 @@ def ml_stats():
     return stats
 
 
+@app.get("/api/crypto/stats")
+def crypto_stats():
+    """Crypto market tracker: 5m/15m and 1h Up/Down bets — coin, mode, and open position breakdown."""
+    _CRYPTO_STRATS = {"crypto_5m", "crypto_1h"}
+    _COIN_KW = [
+        ("bitcoin", "BTC"), ("btc", "BTC"),
+        ("ethereum", "ETH"), ("eth", "ETH"),
+        ("solana", "SOL"), ("sol", "SOL"),
+        ("xrp", "XRP"), ("ripple", "XRP"),
+        ("dogecoin", "DOGE"), ("doge", "DOGE"),
+        ("bnb", "BNB"), ("binancecoin", "BNB"),
+        ("hype", "HYPE"),
+    ]
+
+    def _coin(question: str, meta: dict) -> str:
+        if meta.get("coin"):
+            return meta["coin"].upper()
+        q = question.lower()
+        for kw, sym in _COIN_KW:
+            if kw in q:
+                return sym
+        return "?"
+
+    def _mode(meta: dict, strategy: str) -> str:
+        at = meta.get("arb_type", "")
+        if at == "dual_side":
+            return "Dual Arb"
+        if at == "oracle_lag":
+            return "Oracle Lag"
+        if at == "candle_snipe_1h":
+            return "1h Snipe"
+        if at == "snipe":
+            return "5m Snipe"
+        if strategy == "crypto_1h":
+            return "1h Snipe"
+        return "5m Trade"
+
+    if not _portfolio:
+        return {
+            "total_trades": 0, "wins": 0, "win_rate": 0, "total_pnl": 0.0,
+            "open_count": 0, "open_positions": [],
+            "coin_breakdown": [], "mode_breakdown": [], "recent_trades": [],
+        }
+
+    with _portfolio_lock:
+        positions = list(_portfolio.positions.values())
+        closed = list(_portfolio.closed_positions)
+        last_mtm = dict(getattr(_portfolio, "last_mtm_prices", {}) or {})
+
+    crypto_closed = [p for p in closed if p.get("strategy") in _CRYPTO_STRATS]
+
+    coin_stats: dict = {}
+    mode_stats: dict = {}
+
+    for pos in crypto_closed:
+        meta = pos.get("metadata") or {}
+        strategy = pos.get("strategy", "")
+        c = _coin(pos.get("market_question", ""), meta)
+        m = _mode(meta, strategy)
+        pnl = pos.get("realized_pnl", 0.0)
+        won = pnl > 0
+        for key, bucket in [(c, coin_stats), (m, mode_stats)]:
+            if key not in bucket:
+                bucket[key] = {"trades": 0, "wins": 0, "pnl": 0.0, "strategy": strategy}
+            bucket[key]["trades"] += 1
+            bucket[key]["wins"] += int(won)
+            bucket[key]["pnl"] += pnl
+
+    total_closed = len(crypto_closed)
+    wins_total = sum(1 for p in crypto_closed if p.get("realized_pnl", 0) > 0)
+    total_pnl = sum(p.get("realized_pnl", 0.0) for p in crypto_closed)
+
+    coin_list = [
+        {"coin": k, "trades": v["trades"], "wins": v["wins"],
+         "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+         "pnl": round(v["pnl"], 2)}
+        for k, v in sorted(coin_stats.items(), key=lambda x: -x[1]["trades"])
+    ]
+    mode_list = [
+        {"mode": k, "strategy": v.get("strategy", "crypto_5m"), "trades": v["trades"],
+         "wins": v["wins"],
+         "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+         "pnl": round(v["pnl"], 2)}
+        for k, v in sorted(mode_stats.items(), key=lambda x: -x[1]["trades"])
+    ]
+
+    # Open crypto positions with countdown
+    import time as _time
+    open_crypto = []
+    for pos in positions:
+        if pos.strategy not in _CRYPTO_STRATS:
+            continue
+        meta = pos.metadata or {}
+        c = _coin(pos.market_question, meta)
+        m = _mode(meta, pos.strategy)
+        mtm = last_mtm.get(pos.token_id, pos.avg_cost)
+        unr = pos.unrealized_pnl(mtm)
+        seconds_left = 0
+        if pos.end_date_iso:
+            try:
+                from datetime import datetime, timezone
+                s = pos.end_date_iso.strip().rstrip("Z")
+                if "T" not in s:
+                    s += "T00:00:00"
+                end_dt = datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+                seconds_left = max(0, int((end_dt - datetime.now(timezone.utc)).total_seconds()))
+            except Exception:
+                pass
+        open_crypto.append({
+            "token_id": pos.token_id,
+            "market_question": pos.market_question,
+            "outcome": pos.outcome,
+            "coin": c,
+            "mode": m,
+            "strategy": pos.strategy,
+            "avg_cost": round(pos.avg_cost, 4),
+            "current_price": round(mtm, 4),
+            "unrealized_pnl": round(unr, 2),
+            "net_edge": round(meta.get("net_edge", 0.0), 4),
+            "seconds_left": seconds_left,
+            "opened_at": int(pos.opened_at),
+        })
+    open_crypto.sort(key=lambda x: x["seconds_left"])
+
+    # Recent 40 closed
+    recent = []
+    for pos in reversed(crypto_closed[-40:]):
+        meta = pos.get("metadata") or {}
+        strategy = pos.get("strategy", "")
+        q = pos.get("market_question", "")
+        recent.append({
+            "market_question": q[:70],
+            "outcome": pos.get("outcome", ""),
+            "coin": _coin(q, meta),
+            "mode": _mode(meta, strategy),
+            "strategy": strategy,
+            "net_edge": round(meta.get("net_edge", 0.0), 4),
+            "pnl": round(pos.get("realized_pnl", 0.0), 2),
+            "won": pos.get("realized_pnl", 0) > 0,
+            "closed_at": int(pos.get("closed_at", 0)),
+        })
+
+    return {
+        "total_trades": total_closed,
+        "wins": wins_total,
+        "win_rate": round(wins_total / total_closed * 100, 1) if total_closed else 0,
+        "total_pnl": round(total_pnl, 2),
+        "open_count": len(open_crypto),
+        "open_positions": open_crypto,
+        "coin_breakdown": coin_list,
+        "mode_breakdown": mode_list,
+        "recent_trades": recent,
+    }
+
+
 @app.get("/api/sports/live")
 async def sports_live():
     """
@@ -3184,6 +3340,7 @@ tr:hover td{background:var(--surface2)}
 .badge.swarm{background:#0d1a1a;color:#34d399}
 .badge.quick_resolution{background:#1a1a0d;color:#fbbf24}
 .badge.crypto_5m{background:#0d0d1a;color:#a5b4fc}
+.badge.crypto_1h{background:#0a1a0d;color:#4ade80}
 
 /* Strategy bars */
 .strat-bars{display:flex;flex-direction:column;gap:8px}
@@ -3402,6 +3559,7 @@ tr:hover td{background:var(--surface2)}
   <div class="tab" onclick="showTab('pos-trades')">Positions / Trades</div>
   <div class="tab" onclick="showTab('analytics')">Analytics</div>
   <div class="tab" onclick="showTab('config')">Config</div>
+  <div class="tab" onclick="showTab('crypto')">Crypto</div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════ -->
@@ -4524,13 +4682,14 @@ const CFG_GROUPS = [
   { label: 'Market Filters', keys: ['MAX_MARKETS','MAX_DAYS_TO_RESOLUTION','DAILY_CLOSE_ONLY'] },
   { label: 'Strategies', keys: [
     'STRATEGY_COMBINATORIAL','STRATEGY_MARKET_MAKING','STRATEGY_RESOLUTION',
-    'STRATEGY_EVENT_DRIVEN','STRATEGY_QUICK_RESOLUTION','STRATEGY_CRYPTO_5M',
+    'STRATEGY_EVENT_DRIVEN','STRATEGY_QUICK_RESOLUTION','STRATEGY_CRYPTO_5M','STRATEGY_CRYPTO_1H',
     'STRATEGY_SWARM','STRATEGY_LIVE_GAME','STRATEGY_OPTIMISM_TAX',
     'STRATEGY_LATENCY_ARB','STRATEGY_CROSS_EXCHANGE','STRATEGY_FUTURES_HEDGE','STRATEGY_WEATHER'
   ]},
   { label: 'Market Making', keys: ['MM_SPREAD_BPS','MM_ORDER_SIZE','MM_MAX_INVENTORY','MM_SKEW_FACTOR','MM_MID_MIN','MM_MID_MAX','MM_MIN_HOURS_TO_EXPIRY'] },
   { label: 'Quick Resolution', keys: ['QUICK_RESOLUTION_MIN_CONVICTION','QUICK_RESOLUTION_MAX_HOURS','QUICK_RESOLUTION_MAX_SPEND','QUICK_RESOLUTION_MIN_EDGE','QUICK_RESOLUTION_MIN_VOLUME'] },
   { label: 'Crypto 5M', keys: ['CRYPTO_5M_MAX_SPEND','CRYPTO_5M_DUAL_ARB_THRESHOLD','CRYPTO_5M_MIN_NET_EDGE','CRYPTO_5M_SNIPE_MIN_CONVICTION','CRYPTO_5M_SNIPE_MAX_SPEND'] },
+  { label: 'Crypto 1H', keys: ['CRYPTO_1H_MAX_SPEND','CRYPTO_1H_SNIPE_WINDOW','CRYPTO_1H_MIN_CANDLE_MOVE','CRYPTO_1H_MIN_NET_EDGE'] },
   { label: 'Swarm', keys: ['SWARM_MIN_EDGE','SWARM_MIN_CONFIDENCE','SWARM_MAX_SPEND','SWARM_AGENT_COUNT','SWARM_MAX_MARKETS','SWARM_COOLDOWN_HOURS'] },
   { label: 'Other', keys: [] },  // catches everything not in a named group
 ];
@@ -4700,6 +4859,105 @@ function showCfgSuccess(msg) {
   </div>
 </div>
 
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- TAB 5: CRYPTO  (5m / 1h market tracker)                   -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="page" id="tab-crypto">
+  <div class="section">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+      <h2 style="margin:0;font-size:1.1rem">Crypto Markets</h2>
+      <span class="badge crypto_5m">5m / 15m</span>
+      <span class="badge crypto_1h">1h</span>
+    </div>
+
+    <!-- KPI row -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+      <div class="kpi-card">
+        <div class="kpi-label">Total Bets</div>
+        <div class="kpi-value" id="cr-total">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Win Rate</div>
+        <div class="kpi-value" id="cr-winrate">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Net PnL</div>
+        <div class="kpi-value" id="cr-pnl">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Open Now</div>
+        <div class="kpi-value" id="cr-open">--</div>
+      </div>
+    </div>
+
+    <!-- Coin + Mode breakdown -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px">
+        <h4 style="margin:0 0 10px;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">By Coin</h4>
+        <table class="trade-table" style="font-size:.76rem">
+          <thead><tr>
+            <th>Coin</th>
+            <th style="text-align:right">Bets</th>
+            <th style="text-align:right">Win%</th>
+            <th style="text-align:right">PnL</th>
+          </tr></thead>
+          <tbody id="cr-coin-tbody">
+            <tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">No data yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px">
+        <h4 style="margin:0 0 10px;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">By Mode</h4>
+        <table class="trade-table" style="font-size:.76rem">
+          <thead><tr>
+            <th>Mode</th>
+            <th style="text-align:right">Bets</th>
+            <th style="text-align:right">Win%</th>
+            <th style="text-align:right">PnL</th>
+          </tr></thead>
+          <tbody id="cr-mode-tbody">
+            <tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">No data yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Open positions with countdown -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px;margin-bottom:20px">
+      <h4 style="margin:0 0 12px;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">
+        Open Positions
+        <span id="cr-open-badge" style="display:none;margin-left:8px;padding:2px 8px;background:var(--red);color:#fff;border-radius:10px;font-size:.65rem;vertical-align:middle">LIVE</span>
+      </h4>
+      <div id="cr-open-positions">
+        <div class="no-data" style="color:var(--muted)">No open crypto positions</div>
+      </div>
+    </div>
+
+    <!-- Recent closed trades -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);padding:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+        <h4 style="margin:0;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Recent Closed Bets</h4>
+        <button onclick="loadCrypto()" style="padding:3px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);border-radius:4px;cursor:pointer;font-size:.7rem">Refresh</button>
+      </div>
+      <table class="trade-table" style="font-size:.75rem">
+        <thead><tr>
+          <th>Market</th>
+          <th>Coin</th>
+          <th>Mode</th>
+          <th>Direction</th>
+          <th style="text-align:right">Edge</th>
+          <th style="text-align:right">PnL</th>
+          <th>Result</th>
+        </tr></thead>
+        <tbody id="cr-recent-tbody">
+          <tr><td colspan="7" style="color:var(--muted);text-align:center;padding:16px">No closed crypto trades yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <!-- Hidden elements required by log stream (live-uptime, live-realized, etc.) -->
 <div style="display:none">
   <span id="live-uptime">--</span>
@@ -4726,8 +4984,8 @@ const pnlClass=n=>n>=0?'green':'red';
 let currentTab='overview';
 let _statusInterval=null;
 
-// 4 tabs: overview, pos-trades, analytics, config
-const allTabs=['overview','pos-trades','analytics','config'];
+// 5 tabs: overview, pos-trades, analytics, config, crypto
+const allTabs=['overview','pos-trades','analytics','config','crypto'];
 let _ensembleInterval=null,_newsInterval=null,_hedgeInterval=null,_compareInterval=null;
 
 function showTab(name){
@@ -4779,6 +5037,8 @@ function showTab(name){
   }
 
   if(name==='overview'){_fetchSentinelExtras();}
+  if(name==='crypto'){loadCrypto();}
+  else if(_cryptoCountdownInterval){clearInterval(_cryptoCountdownInterval);_cryptoCountdownInterval=null;}
 }
 
 function loadWeather(){
@@ -7267,6 +7527,132 @@ function _fetchSentinelExtras(){
 }
 
 // ─── End SENTINEL Overview Functions ──────────────────────────────────────────
+
+// ── Crypto tab ──────────────────────────────────────────────────────────── //
+
+let _cryptoCountdownInterval = null;
+
+function fmtCountdown(secs){
+  const h=Math.floor(secs/3600);
+  const m=Math.floor((secs%3600)/60);
+  const s=secs%60;
+  if(h>0) return h+'h '+m+'m';
+  if(m>0) return m+'m '+String(s).padStart(2,'0')+'s';
+  return s+'s';
+}
+
+function _countdownColor(secs){
+  if(secs<=60) return 'var(--red)';
+  if(secs<=300) return 'var(--yellow)';
+  return 'var(--accent2)';
+}
+
+function loadCrypto(){
+  fetch('/api/crypto/stats').then(r=>r.json()).then(d=>{
+    // KPIs
+    $('cr-total').textContent = d.total_trades ?? '--';
+    const wrEl=$('cr-winrate');
+    wrEl.textContent = d.win_rate != null ? d.win_rate+'%' : '--';
+    wrEl.style.color = d.win_rate >= 50 ? 'var(--green)' : 'var(--red)';
+    const pEl=$('cr-pnl');
+    pEl.textContent = fmtPnl(d.total_pnl);
+    pEl.className = 'kpi-value '+(d.total_pnl >= 0 ? 'green' : 'red');
+    $('cr-open').textContent = d.open_count ?? '--';
+
+    // Coin breakdown
+    const coinTb=$('cr-coin-tbody');
+    if(d.coin_breakdown && d.coin_breakdown.length){
+      coinTb.innerHTML=d.coin_breakdown.map(r=>`
+        <tr>
+          <td><span class="badge" style="background:#0d0d1a;color:#a5b4fc;font-weight:700">${r.coin}</span></td>
+          <td style="text-align:right">${r.trades}</td>
+          <td style="text-align:right;color:${r.win_rate>=50?'var(--green)':'var(--red)'}">${r.win_rate}%</td>
+          <td style="text-align:right;color:${r.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(r.pnl)}</td>
+        </tr>`).join('');
+    } else {
+      coinTb.innerHTML='<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:12px">No closed trades yet</td></tr>';
+    }
+
+    // Mode breakdown
+    const modeTb=$('cr-mode-tbody');
+    if(d.mode_breakdown && d.mode_breakdown.length){
+      modeTb.innerHTML=d.mode_breakdown.map(r=>`
+        <tr>
+          <td><span class="badge ${r.strategy}">${r.mode}</span></td>
+          <td style="text-align:right">${r.trades}</td>
+          <td style="text-align:right;color:${r.win_rate>=50?'var(--green)':'var(--red)'}">${r.win_rate}%</td>
+          <td style="text-align:right;color:${r.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(r.pnl)}</td>
+        </tr>`).join('');
+    } else {
+      modeTb.innerHTML='<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:12px">No data yet</td></tr>';
+    }
+
+    // Open positions with live countdown
+    const opDiv=$('cr-open-positions');
+    const opBadge=$('cr-open-badge');
+    if(_cryptoCountdownInterval){clearInterval(_cryptoCountdownInterval);_cryptoCountdownInterval=null;}
+
+    if(d.open_positions && d.open_positions.length){
+      opBadge.style.display='inline';
+      opDiv.innerHTML=`<table class="trade-table" style="font-size:.76rem">
+        <thead><tr>
+          <th>Market</th><th>Coin</th><th>Mode</th><th>Dir</th>
+          <th style="text-align:right">Entry</th>
+          <th style="text-align:right">Unr. PnL</th>
+          <th style="text-align:right">Closes In</th>
+        </tr></thead><tbody>`+
+        d.open_positions.map(p=>`
+          <tr>
+            <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.market_question}">${p.market_question}</td>
+            <td><span class="badge" style="background:#0d0d1a;color:#a5b4fc">${p.coin}</span></td>
+            <td><span class="badge ${p.strategy}">${p.mode}</span></td>
+            <td style="font-weight:700;color:${p.outcome==='UP'||p.outcome==='Yes'?'var(--green)':'var(--red)'}">${p.outcome}</td>
+            <td style="text-align:right">${(p.avg_cost*100).toFixed(1)}&cent;</td>
+            <td style="text-align:right;color:${p.unrealized_pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(p.unrealized_pnl)}</td>
+            <td style="text-align:right;font-family:monospace" id="cr-cd-${p.token_id.slice(-8)}">${p.seconds_left>0?fmtCountdown(p.seconds_left):'Expired'}</td>
+          </tr>`).join('')+
+        `</tbody></table>`;
+
+      // Live countdown ticker
+      const endMap={};
+      d.open_positions.forEach(p=>{
+        if(p.seconds_left>0) endMap[p.token_id.slice(-8)]=Date.now()+p.seconds_left*1000;
+      });
+      _cryptoCountdownInterval=setInterval(()=>{
+        const now=Date.now();
+        Object.entries(endMap).forEach(([key,endMs])=>{
+          const el=$('cr-cd-'+key);
+          if(!el) return;
+          const s=Math.max(0,Math.round((endMs-now)/1000));
+          el.textContent=s>0?fmtCountdown(s):'Resolved';
+          el.style.color=s===0?'var(--muted)':_countdownColor(s);
+        });
+      },1000);
+    } else {
+      opBadge.style.display='none';
+      opDiv.innerHTML='<div class="no-data" style="color:var(--muted)">No open crypto positions</div>';
+    }
+
+    // Recent closed trades
+    const rtb=$('cr-recent-tbody');
+    if(d.recent_trades && d.recent_trades.length){
+      rtb.innerHTML=d.recent_trades.map(t=>`
+        <tr>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.market_question}">${t.market_question}</td>
+          <td><span class="badge" style="background:#0d0d1a;color:#a5b4fc">${t.coin}</span></td>
+          <td><span class="badge ${t.strategy}">${t.mode}</span></td>
+          <td style="color:${t.outcome==='UP'||t.outcome==='Yes'?'var(--green)':'var(--red)'};">${t.outcome}</td>
+          <td style="text-align:right;color:#888;font-size:.72rem">${t.net_edge>0?(t.net_edge*100).toFixed(1)+'%':'--'}</td>
+          <td style="text-align:right;color:${t.pnl>=0?'var(--green)':'var(--red)'}">${fmtPnl(t.pnl)}</td>
+          <td><span class="badge ${t.won?'green':'red'}">${t.won?'WIN':'LOSS'}</span></td>
+        </tr>`).join('');
+    } else {
+      rtb.innerHTML='<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:12px">No closed crypto trades yet</td></tr>';
+    }
+  }).catch(e=>console.error('crypto stats error',e));
+}
+
+// ─────────────────────────────────────────────────────────────────────────── //
 
 fetchAll();
 setInterval(fetchAll,3000);
