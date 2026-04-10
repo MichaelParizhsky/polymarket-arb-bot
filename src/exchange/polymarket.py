@@ -549,6 +549,106 @@ class PolymarketClient:
         logger.info(f"crypto_short_markets: found {len(markets)} active crypto short markets")
         return markets
 
+    async def get_crypto_1h_markets(
+        self,
+        coins: list[str] | None = None,
+        include_next_hours: int = 2,
+    ) -> list[Market]:
+        """
+        Discover current and upcoming 1-hour crypto Up/Down markets via
+        deterministic event slug calculation.
+
+        Slug format:
+            {coin_name}-up-or-down-{month}-{day}-{year}-{hour}{am/pm}-et
+        Examples:
+            bitcoin-up-or-down-april-10-2026-5am-et
+            ethereum-up-or-down-april-10-2026-6pm-et
+        """
+        import datetime as _dt
+
+        if coins is None:
+            coins = ["btc", "eth", "sol", "xrp", "doge", "bnb"]
+
+        _COIN_NAMES: dict[str, str] = {
+            "btc": "bitcoin", "eth": "ethereum", "sol": "solana",
+            "xrp": "xrp", "doge": "dogecoin", "bnb": "bnb", "hype": "hype",
+        }
+        _MONTH_NAMES: dict[int, str] = {
+            1: "january", 2: "february", 3: "march", 4: "april",
+            5: "may", 6: "june", 7: "july", 8: "august",
+            9: "september", 10: "october", 11: "november", 12: "december",
+        }
+
+        # EDT = UTC-4 (March–November). Adjust to -5 for EST in winter.
+        et_offset = _dt.timedelta(hours=-4)
+        now_utc = _dt.datetime.now(_dt.timezone.utc)
+        now_et = now_utc + et_offset
+        current_hour_et = now_et.replace(minute=0, second=0, microsecond=0)
+
+        slugs: list[str] = []
+        for coin in coins:
+            coin_name = _COIN_NAMES.get(coin.lower(), coin.lower())
+            for offset in range(include_next_hours + 1):
+                hour_dt = current_hour_et + _dt.timedelta(hours=offset)
+                month = _MONTH_NAMES[hour_dt.month]
+                day = str(hour_dt.day)
+                year = str(hour_dt.year)
+                h = hour_dt.hour
+                if h == 0:
+                    hour_str = "12am"
+                elif h < 12:
+                    hour_str = f"{h}am"
+                elif h == 12:
+                    hour_str = "12pm"
+                else:
+                    hour_str = f"{h - 12}pm"
+                slugs.append(f"{coin_name}-up-or-down-{month}-{day}-{year}-{hour_str}-et")
+
+        if not self._http:
+            logger.warning("get_crypto_1h_markets: HTTP client not initialised")
+            return []
+
+        async def _fetch_1h_event(slug: str) -> list[Market]:
+            out: list[Market] = []
+            try:
+                resp = await self._http.get(
+                    f"{self.GAMMA_BASE}/events",
+                    params={"slug": slug},
+                    timeout=httpx.Timeout(10.0),
+                )
+                if resp.status_code != 200:
+                    return out
+                data = resp.json()
+                events = data if isinstance(data, list) else [data]
+                for event in events:
+                    for raw in event.get("markets", []):
+                        try:
+                            market = self._parse_market(raw)
+                            if market:
+                                out.append(market)
+                        except Exception as exc:
+                            logger.debug(f"crypto_1h: parse error {slug}: {exc}")
+            except Exception as exc:
+                logger.debug(f"crypto_1h: fetch error {slug}: {exc}")
+            return out
+
+        results = await asyncio.gather(
+            *[_fetch_1h_event(s) for s in slugs],
+            return_exceptions=True,
+        )
+        seen: set[str] = set()
+        markets: list[Market] = []
+        for res in results:
+            if isinstance(res, Exception):
+                continue
+            for m in res:
+                if m.condition_id not in seen:
+                    seen.add(m.condition_id)
+                    markets.append(m)
+
+        logger.info(f"crypto_1h_markets: found {len(markets)} active 1-hour crypto markets")
+        return markets
+
     async def get_sports_markets(
         self,
         max_hours: float = 48.0,

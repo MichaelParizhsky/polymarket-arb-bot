@@ -179,6 +179,25 @@ class StrategyConfig:
         default_factory=lambda: _float("CRYPTO_5M_SNIPE_MAX_SPEND", 30.0)
     )
 
+    # Crypto 1-hour Up/Down candle-snipe strategy
+    # Fires in the last 10 min of each ET clock hour when Binance candle has moved > 0.7%.
+    # Maker fee = 0% (crypto_fees_v2); taker fee = 0.072 * p * (1-p).
+    crypto_1h_enabled: bool = field(default_factory=lambda: _bool("STRATEGY_CRYPTO_1H", False))
+    crypto_1h_coins: list = field(default_factory=lambda: ["btc", "eth", "sol", "xrp"])
+    crypto_1h_max_spend: float = field(default_factory=lambda: _float("CRYPTO_1H_MAX_SPEND", 150.0))
+    # Seconds before ET hour end to start firing snipe signals (default 600 = 10 min)
+    crypto_1h_snipe_window: float = field(
+        default_factory=lambda: _float("CRYPTO_1H_SNIPE_WINDOW", 600.0)
+    )
+    # Minimum absolute candle return to fire a snipe (default 0.7%)
+    crypto_1h_min_candle_move: float = field(
+        default_factory=lambda: _float("CRYPTO_1H_MIN_CANDLE_MOVE", 0.007)
+    )
+    # Minimum fee-adjusted net edge to fire (default 3%)
+    crypto_1h_min_net_edge: float = field(
+        default_factory=lambda: _float("CRYPTO_1H_MIN_NET_EDGE", 0.03)
+    )
+
     # Markets coverage
     max_markets: int = field(default_factory=lambda: _int("MAX_MARKETS", 500))
     max_days_to_resolution: int = field(default_factory=lambda: _int("MAX_DAYS_TO_RESOLUTION", 30))

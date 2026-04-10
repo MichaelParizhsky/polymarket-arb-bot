@@ -39,6 +39,7 @@ from src.strategies.cross_exchange import CrossExchangeStrategy
 from src.strategies.futures_hedge import FuturesHedge
 from src.strategies.quick_resolution import QuickResolutionStrategy
 from src.strategies.crypto_5m import CryptoShortStrategy
+from src.strategies.crypto_1h import Crypto1hStrategy
 from src.strategies.live_game import LiveGameStrategy
 try:
     from src.strategies.swarm_prediction import SwarmPredictionStrategy
@@ -237,6 +238,11 @@ class ArbBot:
                 CryptoShortStrategy(self.config, self.portfolio, self.risk)
             )
             logger.info("CryptoShortStrategy (5m/15m dual-arb + snipe) ENABLED")
+        if getattr(cfg, 'crypto_1h_enabled', False):
+            self._strategies.append(
+                Crypto1hStrategy(self.config, self.portfolio, self.risk)
+            )
+            logger.info("Crypto1hStrategy (1h candle snipe) ENABLED")
         if getattr(cfg, 'swarm_enabled', False):
             if _SWARM_AVAILABLE:
                 self._strategies.append(
@@ -870,9 +876,18 @@ class ArbBot:
             except Exception as exc:
                 logger.warning(f"get_crypto_short_markets failed: {exc}")
 
+        # Fetch 1-hour crypto markets if strategy is enabled
+        crypto_1h_markets = []
+        if getattr(self.config.strategies, 'crypto_1h_enabled', False):
+            try:
+                coins_1h = list(getattr(self.config.strategies, "crypto_1h_coins", None) or ["btc", "eth", "sol", "xrp"])
+                crypto_1h_markets = await self.poly.get_crypto_1h_markets(coins=coins_1h)
+            except Exception as exc:
+                logger.warning(f"get_crypto_1h_markets failed: {exc}")
+
         # O(1) token lookup for execution path — avoids scanning all markets per fill
         token_meta: dict[str, tuple[str, str, str, tuple[str, ...]]] = {}
-        for coll in (markets_sorted, crypto_short_markets):
+        for coll in (markets_sorted, crypto_short_markets, crypto_1h_markets):
             for m in coll:
                 q = m.question
                 tags = tuple(getattr(m, "tags", ()) or ())
@@ -886,7 +901,7 @@ class ArbBot:
         # on Polymarket) still receive accurate active/closed status.
         if self.portfolio.positions:
             open_tids = set(self.portfolio.positions.keys())
-            for coll in (_all_markets_unfiltered, crypto_short_markets):
+            for coll in (_all_markets_unfiltered, crypto_short_markets, crypto_1h_markets):
                 for m in coll:
                     for t in m.tokens:
                         if t.token_id in open_tids:
@@ -895,7 +910,7 @@ class ArbBot:
                                 t.token_id, m.active, m.closed, m.end_date_iso, _cat
                             )
 
-        # Collect all token IDs (main markets + crypto short markets)
+        # Collect all token IDs (main markets + crypto short + 1h markets)
         token_ids: list[str] = []
         _seen_tok: set[str] = set()
         for m in markets_sorted:
@@ -904,6 +919,11 @@ class ArbBot:
                     _seen_tok.add(t.token_id)
                     token_ids.append(t.token_id)
         for m in crypto_short_markets:
+            for t in m.tokens:
+                if t.token_id not in _seen_tok:
+                    _seen_tok.add(t.token_id)
+                    token_ids.append(t.token_id)
+        for m in crypto_1h_markets:
             for t in m.tokens:
                 if t.token_id not in _seen_tok:
                     _seen_tok.add(t.token_id)
@@ -969,6 +989,7 @@ class ArbBot:
             "binance_feed": self.binance,
             "kalshi_markets": kalshi_markets,
             "crypto_short_markets": crypto_short_markets,
+            "crypto_1h_markets": crypto_1h_markets,
             "token_meta": token_meta,
             "timestamp": time.time(),
         }
@@ -1851,6 +1872,7 @@ class ArbBot:
         "STRATEGY_EVENT_DRIVEN":   ("strategies", "event_driven_enabled",     bool),
         "STRATEGY_QUICK_RESOLUTION": ("strategies", "quick_resolution_enabled", bool),
         "STRATEGY_CRYPTO_5M":        ("strategies", "crypto_5m_enabled",         bool),
+        "STRATEGY_CRYPTO_1H":        ("strategies", "crypto_1h_enabled",         bool),
     }
 
     def _apply_config_overrides(self, overrides: dict) -> list[str]:
